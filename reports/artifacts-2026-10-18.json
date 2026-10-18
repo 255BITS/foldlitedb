@@ -1,0 +1,30 @@
+{
+  "foldlitedb_code_commit": "35dd5197a3a968f1de817a0b208894890a666b41",
+  "hypergan_code_commit": "fe33ef202e867353990fbb1f8d6d067f780a75e3",
+  "artifacts": [
+    {
+      "project": "foldlitedb",
+      "filename": "foldlitedb-0.1.0-py3-none-any.whl",
+      "bytes": 117056,
+      "sha256": "d5bdfce495e19d24f2b58f28c14826c3980938cbd43bfc91675483bc7499b997"
+    },
+    {
+      "project": "foldlitedb",
+      "filename": "foldlitedb-0.1.0.tar.gz",
+      "bytes": 147994,
+      "sha256": "5901f2da180cc9a74d63b488ea00bd961312e03eb1bb23b97185942d1fc02024"
+    },
+    {
+      "project": "foldlitedb-integration",
+      "filename": "hypergan-2.0.0a1-py3-none-any.whl",
+      "bytes": 670799,
+      "sha256": "637e8e9450413bc0137b8960867f06d6d4c85570199b7dbf37468a1659a93975"
+    },
+    {
+      "project": "foldlitedb-integration",
+      "filename": "hypergan-2.0.0a1.tar.gz",
+      "bytes": 1092115,
+      "sha256": "2fc1d5fb7c4093265a3f842299928ee6fc2a96e5b2b1cae1adeed4d1b3e7dee7"
+    }
+  ]
+}

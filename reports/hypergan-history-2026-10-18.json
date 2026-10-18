@@ -1,0 +1,22 @@
+{
+  "initial_source_documents": 10001,
+  "initial_measurements": 10000,
+  "final_source_documents": 10002,
+  "initial_index_seconds": 0.8909359289973509,
+  "initial_historical_query_seconds": 1.599079781997716,
+  "reopen_index_seconds": 0.9358780629991088,
+  "reopened_historical_query_seconds": 0.22988353300024755,
+  "reopened_reducer_add_calls": 0,
+  "suffix_index_seconds": 0.9240599109980394,
+  "suffix_historical_query_seconds": 0.2166287520012702,
+  "suffix_reducer_add_batches": [
+    1
+  ],
+  "persisted_query_cache_bytes": 21356544,
+  "groups": 527,
+  "module_sha256": "864115d9bb62750c69b26313573764ced77bcc7cc7439f62b1b5d516b33da148",
+  "limits": "Source/projection discovery indexes still rebuild on each service startup; query caches duplicate documents per query.",
+  "foldlitedb_code_commit": "35dd5197a3a968f1de817a0b208894890a666b41",
+  "measurement_hypergan_commit": "4699c3f84f2e10de16a28e03683b5f4b8e7389fd",
+  "verified_rebased_hypergan_commit": "fe33ef202e867353990fbb1f8d6d067f780a75e3"
+}

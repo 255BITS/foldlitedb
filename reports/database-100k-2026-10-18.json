@@ -1,0 +1,39 @@
+{
+  "workload": {
+    "documents": 100000,
+    "keys": 128,
+    "batch_size": 1024,
+    "live_documents": 100,
+    "reducer": "mean/v1",
+    "payload": "one integer series key and one scalar per document"
+  },
+  "runtime": {
+    "python": "3.14.8",
+    "platform": "Linux-7.2.10-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "sqlite": "3.51.2"
+  },
+  "rebuild_seconds": 4.379952098999638,
+  "rebuild_documents_per_second": 22831.29991828896,
+  "first_query_ms": 12.686607005889527,
+  "reopen_and_query_ms": 13.348180997127201,
+  "live_document_to_key_query_ms": {
+    "median": 0.7044545018288773,
+    "p95": 0.7534940014011227,
+    "p99": 0.9036049959831871
+  },
+  "live_document_to_full_query_ms": {
+    "median": 13.296060496941209,
+    "p95": 13.638591997732874,
+    "p99": 13.872562994947657
+  },
+  "regeneration_seconds": 4.27173001600022,
+  "regeneration_matches_live": true,
+  "database_bytes": 12226560,
+  "database_bytes_per_document": 122.14345654345654,
+  "peak_process_rss_bytes": 82702336,
+  "memory_measurement": "Linux /proc/self/status VmHWM",
+  "benchmark_sha256": "1127ddfde0d4df5d2537af42ea03887f3db7c47b81898992b584ef334be0489d",
+  "measurement_foldlitedb_commit": "3bc2c81ecd67afdb691ea25ab947199258c5bcd9",
+  "verified_foldlitedb_commit": "35dd5197a3a968f1de817a0b208894890a666b41"
+}
