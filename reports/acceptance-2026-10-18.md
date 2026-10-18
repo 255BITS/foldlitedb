@@ -134,9 +134,14 @@ Deleting a run's `views/<revision>/foldlite/` directory while stopped regenerate
 those derived views. A shared projection store and persisted discovery index are
 useful later performance work, with a larger concurrency/retention contract.
 
-Foldlite has no configured Git remote; the user will push it. The HyperGAN branch
-push was attempted with SSH and the existing GitHub CLI credential. SSH has no
-usable key; HTTPS was rejected because that credential lacks `workflow` scope for
-the necessary CI change. All work is committed locally. Before the first package
-release, HyperGAN CI needs `FOLDLITEDB_SOURCE` set to an accessible pinned source
-or wheel. No package publishing or release was performed.
+At initial qualification, pushes were blocked by the shell's SSH setup and an
+HTTPS credential without `workflow` scope. Reloading the user's `.zshrc` restored
+the configured SSH authentication. The public repository is now
+[255BITS/foldlitedb](https://github.com/255BITS/foldlitedb), with `master` pushed.
+The HyperGAN integration branch is pushed and
+[PR #398](https://github.com/HyperGAN/HyperGAN/pull/398) targets `develop`.
+
+Until the first package release, HyperGAN's `FOLDLITEDB_SOURCE` CI variable points
+to the qualified public commit
+`git+https://github.com/255BITS/foldlitedb.git@c5b237d1d99d32fadeb0a913a054f89ce50392d4`.
+No package publishing or release was performed.
