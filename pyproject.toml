@@ -32,5 +32,6 @@ namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["browser"]
 addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
 markers = ["browser: requires a real Chromium browser"]
