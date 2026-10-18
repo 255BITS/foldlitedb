@@ -90,6 +90,7 @@ async def materialize_jsonl_view(path, *, generation, view, read_page, target_cu
     from contextlib import contextmanager
     from dataclasses import replace
     import math
+    import sqlite3
     import threading
     import time
     from .database import Database, Document, GenerationMismatch
@@ -207,8 +208,12 @@ async def materialize_jsonl_view(path, *, generation, view, read_page, target_cu
         # The lock spans source checkpoint capture through final snapshot, across
         # processes as well as threads. SQLite transaction locks alone do not
         # prevent a second job advancing state between those operations.
-        with cache_lock():
-            return materialize_locked()
+        try:
+            with cache_lock():
+                return materialize_locked()
+        except sqlite3.Error as exc:
+            raise RuntimeError('Cannot read or update derived view cache; verify cache access or remove '
+                               'it while observers are stopped, then retry') from exc
 
     worker = asyncio.create_task(asyncio.to_thread(materialize))
     try:

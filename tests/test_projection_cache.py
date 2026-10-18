@@ -173,3 +173,14 @@ def test_concurrent_snapshots_hold_a_cache_lock_until_final_query(tmp_path, monk
         asyncio.run(scenario())
     finally:
         release.set()
+
+
+def test_corrupt_derived_database_has_an_actionable_error(tmp_path):
+    path = tmp_path / 'corrupt.sqlite'
+    path.write_bytes(b'not a SQLite database')
+    documents = [{'n': 1, 'key': 'total', 'value': 3}]
+    with pytest.raises(RuntimeError, match='derived view cache.*remove'):
+        asyncio.run(materialize(path, documents, []))
+    path.unlink()
+    result = asyncio.run(materialize(path, documents, []))
+    assert result[0].state == 3

@@ -103,3 +103,37 @@ def read_jsonl_page(path, state, *, consume, encode, limit=100,
         return dict(documents=documents, document_cursors=cursors, cursor=encode(state),
                     has_more=read_end < stat.st_size or b'\n' in data[consumed:],
                     partial_tail=read_end == stat.st_size and bool(data) and not data.endswith(b'\n'))
+
+
+def read_jsonl_tail(path, limit=100, max_bytes=1048576, *, decode=None,
+                    error_message='Corrupt complete document row in log'):
+    """Read a bounded tail, discarding clipped leading and unfinished documents.
+
+    Unlike a forward cursor page, this is a diagnostic snapshot with no replay
+    acknowledgement. At most max_bytes are read. Applications can provide their
+    document decoder and compatibility error text; the default is json.loads.
+    """
+    import json
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000:
+        raise ValueError('limit must be between 1 and 10000')
+    if not isinstance(max_bytes, int) or not 1 <= max_bytes <= MAX_PAGE_BYTES:
+        raise ValueError('max_bytes must be between 1 and 16777216')
+    path = Path(path)
+    if not path.exists():
+        return []
+    with path.open('rb') as handle:
+        handle.seek(0, 2)
+        start = max(0, handle.tell() - max_bytes)
+        handle.seek(start)
+        data = handle.read(max_bytes)
+    if start:
+        data = data.partition(b'\n')[2]
+    lines = data.split(b'\n')[:-1]
+    documents = []
+    decode = json.loads if decode is None else decode
+    for line in lines[-limit:]:
+        try:
+            documents.append(decode(line))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError(error_message) from exc
+    return documents

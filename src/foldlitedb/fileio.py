@@ -125,3 +125,38 @@ class AppendJournal:
             os.fsync(source.fileno())
         sync_directory(self.path.parent)
         return {'offset': self.offset, 'sha256': self.digest.hexdigest()}
+
+
+class PrefixTruncatedError(ValueError):
+    """The source no longer contains all committed prefix bytes."""
+
+
+class PrefixMismatchError(ValueError):
+    """Committed bytes changed or the prefix ends inside a document."""
+
+
+def validate_jsonl_prefix(path, *, offset, sha256):
+    """Verify exact committed bytes and return their last complete document.
+
+    Later documents and unfinished later writes are permitted. Hashing streams
+    in 1 MiB blocks and retains the final document for decoding. That document
+    may exceed one block; no new document-size limit is imposed here. The caller
+    validates application identity against the returned JSON document.
+    """
+    if type(offset) is not int or offset < 1:
+        raise ValueError('Committed prefix offset must be a positive integer')
+    digest, remaining, tail = hashlib.sha256(), offset, b''
+    with Path(path).open('rb') as source:
+        while remaining:
+            block = source.read(min(1048576, remaining))
+            if not block:
+                raise PrefixTruncatedError('Committed prefix is missing documents')
+            digest.update(block)
+            remaining -= len(block)
+            tail += block
+            lines = tail.rsplit(b'\n', 2)
+            if len(lines) == 3:
+                tail = b'\n'.join(lines[-2:])
+    if digest.hexdigest() != sha256 or not tail.endswith(b'\n'):
+        raise PrefixMismatchError('Committed prefix digest or complete-document mismatch')
+    return json.loads(tail.rstrip(b'\n').rsplit(b'\n', 1)[-1])
