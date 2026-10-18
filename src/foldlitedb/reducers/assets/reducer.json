@@ -1,0 +1,45 @@
+{
+  "abi": 1,
+  "sha256": "864115d9bb62750c69b26313573764ced77bcc7cc7439f62b1b5d516b33da148",
+  "bytes": 209562,
+  "rust": "1.90.0",
+  "max_memory_bytes": 16777216,
+  "max_request_bytes": 262144,
+  "max_batch_values": 1024,
+  "reducers": [
+    "mean/v1",
+    "envelope/v1",
+    "sum/v1",
+    "count/v1"
+  ],
+  "capabilities": {
+    "mean/v1": {
+      "mergeable": true,
+      "ordered": false,
+      "state_version": 1,
+      "contribution_schema": "finite-scalar-position/v1",
+      "exact_merge": false
+    },
+    "envelope/v1": {
+      "mergeable": true,
+      "ordered": false,
+      "state_version": 1,
+      "contribution_schema": "finite-scalar-position/v1",
+      "exact_merge": true
+    },
+    "sum/v1": {
+      "mergeable": true,
+      "ordered": false,
+      "state_version": 1,
+      "contribution_schema": "finite-scalar-position/v1",
+      "exact_merge": false
+    },
+    "count/v1": {
+      "mergeable": true,
+      "ordered": false,
+      "state_version": 1,
+      "contribution_schema": "finite-scalar-position/v1",
+      "exact_merge": true
+    }
+  }
+}
