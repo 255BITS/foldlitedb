@@ -60,9 +60,8 @@ def file_lock(directory, *, name=".foldlite.lock"):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-
 def repair_jsonl_tail(path):
-    """Drop an incomplete final write before appending a new attempt."""
+    """Drop an incomplete final write before appending new documents."""
     path = Path(path)
     if not path.exists():
         return
@@ -106,7 +105,8 @@ class AppendJournal:
         data = (json.dumps(row, allow_nan=False) + '\n').encode('utf-8')
         try:
             with self.path.open('ab') as output:
-                output.write(data)
+                if output.write(data) != len(data):
+                    raise OSError('Incomplete document write; reopen to repair its tail')
                 output.flush()
         except BaseException:
             self.failed = True

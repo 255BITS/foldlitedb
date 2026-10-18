@@ -62,3 +62,114 @@ def test_generation_change_regenerates_and_group_limit_is_explicit(tmp_path):
     documents.append({'n': 2, 'key': 'other', 'value': 9})
     with pytest.raises(ValueError, match='exceeds 1 groups'):
         asyncio.run(materialize(path, documents, [], generation='two', max_groups=1))
+
+
+@pytest.mark.parametrize('phase', ['constructor', 'ingest'])
+def test_cancellation_drains_owned_database_before_return(tmp_path, monkeypatch, phase):
+    """Constructor and queued ingest work cannot outlive the job's close."""
+    import threading
+    import foldlitedb.database as module
+    original = module.Database
+    entered, release = threading.Event(), threading.Event()
+    instances, events = [], []
+
+    class SlowDatabase(original):
+        def __init__(self, *args, **kwargs):
+            if phase == 'constructor':
+                entered.set()
+                assert release.wait(5)
+            super().__init__(*args, **kwargs)
+            instances.append(self)
+
+        def ingest(self, documents):
+            if phase == 'ingest':
+                entered.set()
+                assert release.wait(5)
+            try:
+                return super().ingest(documents)
+            finally:
+                events.append('ingest_settled')
+
+        def close(self):
+            events.append('close')
+            return super().close()
+
+    monkeypatch.setattr(module, 'Database', SlowDatabase)
+    documents = [{'n': 1, 'key': 'total', 'value': 3}]
+    async def scenario():
+        task = asyncio.create_task(materialize(tmp_path / 'cancel.sqlite', documents, []))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()  # Repeated cancellation must still drain the owner.
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert instances and all(database._closed for database in instances)
+        assert events[-1] == 'close'
+        if phase == 'ingest':
+            assert events.index('ingest_settled') < events.index('close')
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+
+
+def test_delayed_snapshot_rebuilds_without_exposing_future_state(tmp_path):
+    path = tmp_path / 'views.sqlite'
+    documents = [{'n': n, 'key': 'total', 'value': n} for n in range(1, 4)]
+    latest = asyncio.run(materialize(path, documents, []))
+    earlier = asyncio.run(materialize(path, documents[:1], []))
+    assert earlier[0].state == 1
+    reads = []
+    reopened = asyncio.run(materialize(path, documents, reads))
+    assert latest[0].state == reopened[0].state == 6
+    assert None not in reads  # The durable newer snapshot was preserved.
+
+
+def test_concurrent_snapshots_hold_a_cache_lock_until_final_query(tmp_path, monkeypatch):
+    import threading
+    import foldlitedb.database as database_module
+    import foldlitedb.fileio as fileio_module
+    original_database, original_lock = database_module.Database, fileio_module.file_lock
+    final_query, release, lock_attempted = threading.Event(), threading.Event(), threading.Event()
+    instances, locks = [], []
+
+    class PausedDatabase(original_database):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.queries = 0
+            instances.append(self)
+
+        def query(self, *args, **kwargs):
+            self.queries += 1
+            if len(instances) == 1 and self.queries == 2:
+                final_query.set()
+                assert release.wait(5)
+            return super().query(*args, **kwargs)
+
+    def traced_lock(*args, **kwargs):
+        locks.append(1)
+        if len(locks) > 1:
+            lock_attempted.set()
+        return original_lock(*args, **kwargs)
+    monkeypatch.setattr(database_module, 'Database', PausedDatabase)
+    monkeypatch.setattr(fileio_module, 'file_lock', traced_lock)
+    path = tmp_path / 'shared.sqlite'
+    documents = [{'n': n, 'key': 'total', 'value': n} for n in range(1, 4)]
+    async def scenario():
+        first = asyncio.create_task(materialize(path, documents[:1], []))
+        assert await asyncio.to_thread(final_query.wait, 5)
+        second = asyncio.create_task(materialize(path, documents, []))
+        assert await asyncio.to_thread(lock_attempted.wait, 5)
+        assert len(instances) == 1
+        release.set()
+        earlier, later = await asyncio.gather(first, second)
+        assert earlier[0].state == 1
+        assert later[0].state == 6
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()

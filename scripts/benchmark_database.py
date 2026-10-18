@@ -100,13 +100,13 @@ def run(root, count, keys, batch_size, live_count):
     except (OSError, StopIteration):
         peak_rss_bytes = None
     if peak_rss_bytes is None:
-      try:
-        import resource
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        peak_rss_bytes = rss if platform.system() == 'Darwin' else rss * 1024
-        memory_method = 'resource.getrusage(RUSAGE_SELF).ru_maxrss'
-      except ImportError:
-        peak_rss_bytes = None
+        try:
+            import resource
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            peak_rss_bytes = rss if platform.system() == 'Darwin' else rss * 1024
+            memory_method = 'resource.getrusage(RUSAGE_SELF).ru_maxrss'
+        except ImportError:
+            peak_rss_bytes = None
     return {
         'workload': {'documents': count, 'keys': keys, 'batch_size': batch_size,
                      'live_documents': live_count, 'reducer': 'mean/v1',

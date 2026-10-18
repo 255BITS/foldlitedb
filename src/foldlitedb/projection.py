@@ -1,6 +1,7 @@
 """Application-neutral append-only projection persistence."""
 import json
 import os
+from pathlib import Path
 
 
 def json_bytes(value):
@@ -20,6 +21,7 @@ def load_json(raw):
 
 
 def read_bounded_json(path, *, max_bytes=65536, open_file=None):
+    path = Path(path)
     with (open_file(path) if open_file else path.open('rb')) as handle:
         raw = handle.read(max_bytes + 1)
     if len(raw) > max_bytes:
@@ -85,71 +87,147 @@ async def materialize_jsonl_view(path, *, generation, view, read_page, target_cu
     does not create a mapper process or start a background task.
     """
     import asyncio
+    from contextlib import contextmanager
     from dataclasses import replace
+    import math
+    import threading
     import time
     from .database import Database, Document, GenerationMismatch
+    from .fileio import file_lock
 
     if type(max_groups) is not int or not 1 <= max_groups <= 4095:
         raise ValueError('max_groups must be an integer in 1..4095')
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('timeout must be positive finite seconds')
+    cancelled = threading.Event()
     started = time.monotonic()
-    known = set()
-    def bounded_map(document):
+
+    class WorkCancelled(Exception):
+        pass
+
+    def check_budget():
+        if cancelled.is_set():
+            raise WorkCancelled()
         if time.monotonic() - started > timeout:
-            raise ValueError('Historical reduction exceeded its time budget')
-        for key, contribution in view.map(document):
-            encoded_key = json_bytes(key)
-            if encoded_key not in known:
-                if len(known) >= max_groups:
-                    raise ValueError(f'View exceeds {max_groups} groups; narrow the view')
-                known.add(encoded_key)
-            yield key, contribution
-    await asyncio.to_thread(read_page, target_cursor, limit=1)
-    try:
-        database = await asyncio.to_thread(Database, path, generation=generation)
-    except GenerationMismatch:
-        database = await asyncio.to_thread(Database, path, generation=generation, reset=True)
-    try:
-        await asyncio.to_thread(database.register, replace(view, map=bounded_map))
-        snapshot = await asyncio.to_thread(database.query, view.name, limit=max_groups + 1)
-        if not snapshot.complete or len(snapshot.rows) > max_groups:
-            raise ValueError(f'View exceeds {max_groups} groups; narrow the view')
-        known.update(json_bytes(row.key) for row in snapshot.rows)
-        checkpoint = await asyncio.to_thread(database.checkpoint, 'projection')
-        replay = None
-        if checkpoint is not None:
-            last = await asyncio.to_thread(database.get, str(checkpoint), source='projection')
-            if last is None:
-                raise ValueError('Projection checkpoint document disappeared; rebuild the view cache')
-            replay = last.payload['cursor']
+            raise ValueError('Historical reduction exceeded its time budget; retry with a larger explicit history budget or prepare a smaller projection')
+
+    def materialize_locked():
+        # One worker owns construction, every operation and close. Cancellation
+        # never closes a connection underneath work still running in a thread.
+        known = set()
+        def bounded_map(document):
+            check_budget()
+            for key, contribution in view.map(document):
+                encoded_key = json_bytes(key)
+                if encoded_key not in known:
+                    if len(known) >= max_groups:
+                        raise ValueError(f'View exceeds {max_groups} groups; narrow the view')
+                    known.add(encoded_key)
+                yield key, contribution
+        check_budget()
+        read_page(target_cursor, limit=1)
+        check_budget()
+        try:
+            database = Database(path, generation=generation)
+        except GenerationMismatch:
+            check_budget()
+            database = Database(path, generation=generation, reset=True)
+        # A delayed request can capture an older watermark than an already
+        # completed job. Rebuild that snapshot transiently without discarding a
+        # newer useful durable cache or returning future contributions.
+        try:
+            checkpoint = database.checkpoint('projection')
+        except BaseException:
+            database.close()
+            raise
         if (checkpoint or 0) > target_position:
-            raise ValueError('Projection cache is ahead of the requested snapshot')
-        if replay is not None:
-            await asyncio.to_thread(read_page, replay, limit=1)
-        target = cursor_position(target_cursor)
-        while cursor_position(replay) < target:
-            if time.monotonic() - started > timeout:
-                raise ValueError('Historical reduction exceeded its time budget; retry with a larger explicit history budget or prepare a smaller projection')
-            documents, cursors, _ = await asyncio.to_thread(read_page, replay)
-            if not documents:
-                raise ValueError('Historical projection watermark disappeared')
-            batch = []
-            for document, end in zip(documents, cursors):
-                if cursor_position(end) > target:
-                    break
-                position = document_position(document)
-                batch.append(Document(str(position), {'document': document, 'cursor': end},
-                                      position=position, source='projection'))
-                replay = end
-                checkpoint = position
-            if not batch:
-                raise ValueError('Historical snapshot is not a complete document boundary')
-            await asyncio.to_thread(database.ingest, batch)
-            await asyncio.sleep(0)
-        if (checkpoint or 0) != target_position:
-            raise ValueError('Projection checkpoint differs from the requested snapshot')
-        snapshot = await asyncio.to_thread(database.query, view.name, limit=max_groups + 1)
-        if not snapshot.complete or len(snapshot.rows) > max_groups:
-            raise ValueError(f'View exceeds {max_groups} groups; narrow the view')
-        return snapshot.rows
-    finally:
-        await asyncio.to_thread(database.close)
+            database.close()
+            check_budget()
+            database = Database(':memory:', generation=generation)
+        with database:
+            check_budget()
+            database.register(replace(view, map=bounded_map))
+            snapshot = database.query(view.name, limit=max_groups + 1)
+            if not snapshot.complete or len(snapshot.rows) > max_groups:
+                raise ValueError(f'View exceeds {max_groups} groups; narrow the view')
+            known.update(json_bytes(row.key) for row in snapshot.rows)
+            checkpoint = database.checkpoint('projection')
+            replay = None
+            if checkpoint is not None:
+                last = database.get(str(checkpoint), source='projection')
+                if last is None:
+                    raise ValueError('Projection checkpoint document disappeared; rebuild the view cache')
+                replay = last.payload['cursor']
+            if replay is not None:
+                read_page(replay, limit=1)
+            target = cursor_position(target_cursor)
+            while cursor_position(replay) < target:
+                check_budget()
+                documents, cursors, _ = read_page(replay)
+                if not documents:
+                    raise ValueError('Historical projection watermark disappeared')
+                batch = []
+                for document, end in zip(documents, cursors):
+                    if cursor_position(end) > target:
+                        break
+                    position = document_position(document)
+                    batch.append(Document(str(position), {'document': document, 'cursor': end},
+                                          position=position, source='projection'))
+                    replay = end
+                    checkpoint = position
+                if not batch:
+                    raise ValueError('Historical snapshot is not a complete document boundary')
+                database.ingest(batch)
+            check_budget()
+            if (checkpoint or 0) != target_position:
+                raise ValueError('Projection checkpoint differs from the requested snapshot')
+            snapshot = database.query(view.name, limit=max_groups + 1)
+            if not snapshot.complete or len(snapshot.rows) > max_groups:
+                raise ValueError(f'View exceeds {max_groups} groups; narrow the view')
+            return snapshot.rows
+
+    @contextmanager
+    def cache_lock():
+        cache_path = Path(path)
+        while True:
+            check_budget()
+            lock = file_lock(cache_path.parent, name=cache_path.name + '.lock')
+            try:
+                lock.__enter__()
+            except RuntimeError:
+                cancelled.wait(.025)
+                continue
+            try:
+                yield
+            finally:
+                lock.__exit__(None, None, None)
+            return
+
+    def materialize():
+        # The lock spans source checkpoint capture through final snapshot, across
+        # processes as well as threads. SQLite transaction locks alone do not
+        # prevent a second job advancing state between those operations.
+        with cache_lock():
+            return materialize_locked()
+
+    worker = asyncio.create_task(asyncio.to_thread(materialize))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        cancelled.set()
+        # Shielding alone leaves a background task alive. Drain it, including
+        # repeated cancellation requests, so the connection is always closed
+        # before this job finishes. An in-flight transaction may commit first.
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if worker.done() and not worker.cancelled():
+            try:
+                worker.result()
+            except BaseException:
+                pass
+        raise

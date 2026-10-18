@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import hashlib
 import itertools
 import json
+import math
 import sqlite3
 import threading
 from typing import Any, Callable, Iterable, Mapping
@@ -322,6 +323,9 @@ class Database:
                  max_page_bytes: int = 8 * 1024 * 1024,
                  max_emissions_per_document: int = 1024, timeout: float = 30):
         _identity(generation, "generation")
+        if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+                or not 0 <= timeout <= (2**31 - 1) / 1000):
+            raise DatabaseError("timeout must be finite seconds in 0..2147483.647")
         for name, value in (("max_batch", max_batch), ("max_batch_bytes", max_batch_bytes),
                             ("max_value_bytes", max_value_bytes),
                             ("max_key_bytes", max_key_bytes),

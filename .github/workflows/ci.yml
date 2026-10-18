@@ -40,6 +40,10 @@ jobs:
         run: cargo test --locked
       - name: Verify reproducible WASM build
         run: python scripts/build_reducer.py --check
+      - name: Verify native and WASM behavior
+        run: |
+          python -m pip install '.[reducers]'
+          python scripts/check_reducer_parity.py
 
   browser:
     runs-on: ubuntu-latest

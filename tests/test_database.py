@@ -446,3 +446,15 @@ def test_cached_document_reads_detect_another_instances_reset(tmp_path):
             for read in (lambda: old.get("0"), old.checkpoint, old.stats):
                 with pytest.raises(CursorExpired):
                     read()
+
+
+@pytest.mark.parametrize("timeout", [-1, True, None, "2", float("nan"), float("inf"), 2147483.648])
+def test_invalid_lock_timeouts_are_rejected_before_opening(timeout):
+    with pytest.raises(DatabaseError, match="timeout must be finite"):
+        Database(":memory:", timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", [0, 0.125, 2147483.647])
+def test_supported_lock_timeout_boundaries(timeout):
+    with Database(":memory:", timeout=timeout) as database:
+        assert database.stats()["documents"] == 0

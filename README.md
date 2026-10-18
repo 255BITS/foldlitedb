@@ -69,8 +69,9 @@ different order can change an ordered fold's result.
 IDs and positions are scoped to a source. An identical replay performs no map
 work; conflicting reuse of an ID or position fails. An ingestion batch commits
 its documents, source checkpoints, view states, and changes together. Use
-`db.ingest_many(documents, batch_size=1024)` to consume a larger iterable with
-bounded memory and separate atomic batches.
+`for result in db.ingest_many(documents, batch_size=1024): ...` to consume a larger
+iterable with bounded memory and separate atomic batches. This method is a lazy
+iterator; iterating commits its batches.
 
 `query` returns a stable snapshot. Continue its pages with **both** its `cursor`
 and `after` fields, then pass the snapshot cursor to `changes`. Change pages carry
@@ -86,6 +87,11 @@ retained documents, keys, and change history. Large historical view registration
 hold a write transaction while rebuilding; readers can continue on their SQLite
 snapshots. Source documents and reference-input contents remain the application's
 responsibility.
+
+Each database instance registers the view callbacks it owns. Queries and change
+polls automatically catch those views up if another instance has ingested source
+documents without those callbacks. `refresh(name)` explicitly performs the same
+catch-up. A failing callback rolls back that view's catch-up and reports the error.
 
 Map and ordered-fold code is trusted Python. A version is an explicit promise
 about its behavior and captured inputs; changing a callable requires changing its
