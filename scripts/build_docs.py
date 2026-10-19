@@ -99,6 +99,60 @@ def performance(report):
     return "\n".join(result)
 
 
+def payload_performance(report):
+    if report.get("complete") is not True:
+        raise ValueError("Refusing to publish an incomplete payload report")
+    trials = report["trials"]
+    settings = trials[0]
+    sizes = sorted({trial["payload_bytes"] for trial in trials})
+    if len({trial["result_sha256"] for trial in trials}) != 1:
+        raise ValueError("Payload probe result hashes must agree across sizes and engines")
+    result = [
+        f'<p>A separate {len(trials)}-trial NVMe/ext4 probe adds unused ASCII padding of '
+        '0, 1 KiB, or 16 KiB per document while preserving numeric map results. '
+        f'Each configuration uses {settings["documents"]} documents plus '
+        f'{settings["live_documents"]} live records, {settings["batch_size"]}-document '
+        f'durable batches, {settings["keys"]} keys, and two repeats. Compare sizes '
+        'within this probe; its batch size differs from the worker-scaling matrix.</p>',
+        '<div class="table-wrap"><table><thead><tr><th scope="col">Padding / document</th>'
+        '<th scope="col">Python SQLite docs/s</th><th scope="col">Native SQLite, 1 worker</th>'
+        '<th scope="col">Native SQLite, 4 workers</th><th scope="col">Native log, 1 worker</th>'
+        '<th scope="col">Native log, 4 workers</th></tr></thead><tbody>',
+    ]
+    engines = [("python-sqlite", 1), ("rust-sqlite", 1), ("rust-sqlite", 4),
+               ("rust-log", 1), ("rust-log", 4)]
+    fixture_sizes = []
+    for size in sizes:
+        cases = [trial for trial in trials if trial["payload_bytes"] == size]
+        if len({trial["fixture_sha256"] for trial in cases}) != 1:
+            raise ValueError("Each payload size must use identical fixtures across engines")
+        fixture_sizes.append(cases[0]["fixture_json_bytes"])
+        label = f"{size // 1024} KiB" if size else "0 B"
+        row = [f'<tr><th scope="row">{label}</th>']
+        for engine, workers in engines:
+            rate = statistics.median(trial["ingest_documents_per_second"] for trial in cases
+                                     if trial["engine"] == engine and trial["workers"] == workers)
+            row.append(f'<td>{rate:,.0f}</td>')
+        result.append("".join(row) + '</tr>')
+    result.append('</tbody></table></div>')
+    result.append('<p>Actual encoded fixture sizes, including identities and live records, '
+                  'are ' + ", ".join(f'{size:,}' for size in fixture_sizes) +
+                  ' bytes respectively. At 16 KiB padding, median whole-process peak RSS '
+                  'for one worker is ' + ", ".join(
+                      f'{label}: {statistics.median(trial["peak_process_rss_bytes"] for trial in trials if trial["payload_bytes"] == max(sizes) and trial["engine"] == engine and trial["workers"] == 1) / 1024**2:.1f} MiB'
+                      for engine, label in (("python-sqlite", "Python"), ("rust-sqlite", "native SQLite"), ("rust-log", "native log"))) + '.</p>')
+    result.append('<p>Larger ignored payloads exercise JSON serialization, validation, copying, '
+                  'retained storage, and durability together; these timings do not isolate one cause. '
+                  'Peak RSS also includes fixture objects, encoded input, and the Python host. '
+                  'This small padding probe does not establish behavior for every nested document '
+                  'shape or high-fanout map.</p>')
+    result.append('<p><a href="experimental-payloads-report.json">Download the complete payload probe</a>. '
+                  'The original 156-trial results remain unchanged, with their measured runner '
+                  'hash and source commit preserved in the primary report; the new padding option '
+                  'is additive and defaults to zero.</p>')
+    return "\n".join(result)
+
+
 class Outline(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -143,6 +197,11 @@ def build(output: Path):
                 report = json.loads(report_path.read_text())
                 body = body.replace("{{performance}}", performance(report))
                 shutil.copy2(report_path, staged / "experimental-native-report.json")
+            if "payload_report" in page:
+                report_path = ROOT / page["payload_report"]
+                report = json.loads(report_path.read_text())
+                body = body.replace("{{payload_performance}}", payload_performance(report))
+                shutil.copy2(report_path, staged / "experimental-payloads-report.json")
             outline = Outline()
             outline.feed(body)
             navigation = "\n".join(
