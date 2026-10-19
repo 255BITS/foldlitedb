@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Document identity, source positions, regeneration, and versioned computation.">
+  <meta name="description" content="Source identity, ordered replay, module upgrades, native persistence, browser memory, and numerical contracts.">
   <meta name="color-scheme" content="light">
   <title>Replay and ordering · Foldlite DB</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -18,7 +18,7 @@
       <span>foldlite<span class="brand-db">db</span></span>
     </a>
     <span class="development-badge">Development preview</span>
-    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
     <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
   </header>
   <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
@@ -39,70 +39,81 @@
   <div class="page-layout">
     <main id="content" tabindex="-1"><p class="eyebrow">The model</p>
 <h1>Replay and ordering</h1>
-<p class="lead">Documents are immutable observations. Views are the changing state derived from them. Identities and positions make that state recoverable.</p>
+<p class="lead">Documents are immutable observations. Views are the changing state derived from them. Stable identity, ordered inputs, and exact computation definitions make that state recoverable.</p>
 
 <h2 id="identity">Names are optional</h2>
-<p><code>add(payload)</code> assigns an internal ID. Two equal payloads still represent two observations. A caller-supplied name tells the database that a repeated call refers to the same observation.</p>
-<p>An identical named retry does no map work and keeps its original position, even after the source advances. Changing that name's payload is a conflict rather than an update. Model a changing lifecycle by appending a new observation and folding its status.</p>
+<p><code>add(payload)</code> assigns an internal ID. Equal unnamed payloads still represent separate observations. A caller-supplied name tells the host that an identical repeated call refers to one observation.</p>
+<p>An identical named retry skips mapping and keeps its original position, even after the source advances. Changing that name's payload is a conflict. Model a changing lifecycle by appending a new observation and folding its status. This identity model applies to the native portable host, the browser host, and the callback API.</p>
 
 <h2 id="positions">Positions track a source</h2>
-<p>A position means “this document's offset in its source.” Automatic positions start at zero and follow that source's committed checkpoint. External logs can supply their own monotonically increasing offsets, with gaps.</p>
-<pre data-run="python"><code>from foldlitedb import Database, DocumentConflict, SourceOrderError
+<p>A position means “this document's offset in its source.” Automatic positions start at zero and follow that source's committed checkpoint. External logs can supply monotonically increasing offsets with gaps.</p>
+<pre data-run="python"><code>from foldlitedb import PortableDatabase, SourceOrderError
 
-with Database(":memory:") as db:
-    first = db.add({"value": 4}, source="training.log", position=10)
-    db.add({"value": 8}, source="training.log", position=40)
-    assert db.add({"value": 4}, source="training.log", position=10) == first
-    assert db.checkpoint("training.log") == 40
+with PortableDatabase(":memory:") as db:
+    first = db.add({"metric": "loss", "value": 4}, source="training.log", position=10)
+    db.add({"metric": "loss", "value": 8}, source="training.log", position=40)
+    assert db.add(first.payload, source="training.log", position=10) == first
+    assert db.stats()["checkpoints"]["training.log"] == 40
     try:
-        db.add({"value": 3}, source="training.log", position=30)
+        db.add({"metric": "loss", "value": 3}, source="training.log", position=30)
     except SourceOrderError:
         pass
     else:
         raise AssertionError("New records cannot arrive behind the checkpoint")</code></pre>
-<p>IDs and positions are scoped to a source. A supplied source and position can identify a replay without a caller-supplied ID. An unseen record behind the checkpoint fails; a record at an already used position must match.</p>
-<p>Positions range from zero through <code>2**53 - 1</code>. Avoid mixing automatic positions with an external log's offsets unless they share the same progression.</p>
+<p>IDs and positions are scoped to a source. An existing source position can identify a replay without a caller-supplied ID; payloads and any supplied ID must match. Previously unseen positions behind the checkpoint fail.</p>
+<p>Positions range from zero through <code>2**53 - 1</code>. Avoid mixing automatic positions with external offsets unless they share the same progression. Source checkpoints advance in the same transaction as documents and view states.</p>
 
 <h2 id="ingestion-order">Ingestion order is separate</h2>
-<p>Ordered Python folds process persisted ingestion order. A source offset does not sort records across sources, and a measurement timestamp does not reorder an existing fold. Applications choose the domain order before ingestion.</p>
-<p>Numeric envelopes use the declared source position plus a stable hash of source, document identity, and emission ordinal. This provides deterministic first/last ordering and min/max tie breaking, even when positions are equal across sources.</p>
+<p>Ordered portable views, such as the bundled catalogue, and Python <code>OrderedFold</code> process contributions in ingestion order within a key. Source offsets do not sort records across sources; timestamps do not reorder an existing fold. Applications choose domain order before ingestion and replay that order.</p>
+<p>Portable maps receive document payloads only. Their host tracks IDs, source positions, deduplication, and ingestion order. Callback maps receive complete <code>Document</code> records and can inspect that metadata. Include needed domain metadata inside portable payloads.</p>
+<p>The callback API's numeric <code>Envelope</code> has a separate ordering contract: declared source position plus deterministic source/identity/emission tie breaking. It does not imply that the portable metrics module or all custom views use envelope ordering.</p>
 
 <h2 id="regeneration">Keep the source outside the cache</h2>
-<p>The database file is derived storage. Retain resolved documents, exact map/fold behavior, reducer versions, and declared reference inputs outside it.</p>
-<pre data-run="python"><code>from foldlitedb import Count, View
+<p>Retain resolved documents and exact computation artifacts outside derived storage. Native <code>documents()</code> and browser <code>export()</code> expose retained records, but exporting a copy is the application's responsibility.</p>
+<pre data-run="python"><code>from foldlitedb import PortableView
 
-count = View("count", "1", lambda document: [("all", 1)], Count())
-with Database("live.db") as live:
-    live.register(count)
-    retained = live.add_many([{"value": 4}, {"value": 8}])
-    expected = list(live.rows("count"))[0].result
+view = PortableView.bundled("metrics")
+with PortableDatabase("live.db", view) as live:
+    live.add_many([
+        {"metric": "loss", "value": 4},
+        {"metric": "loss", "value": 8},
+    ])
+    retained = tuple(live.documents())
+    expected = [(r.key, r.state, r.result) for r in live.rows()]
 
-# Retained records stand in for your application's authoritative archive.
-with Database("rebuilt.db") as rebuilt:
+with PortableDatabase("rebuilt.db", view) as rebuilt:
     rebuilt.ingest(retained)
-    rebuilt.register(count)
-    assert list(rebuilt.rows("count"))[0].result == expected</code></pre>
-<p>Replay in original ingestion order. Keeping only payloads and generating new IDs can change identity-sensitive maps and numeric tie positions. An identifier for a lost taxonomy or snapshot does not reproduce its contents.</p>
+    assert [(r.key, r.state, r.result) for r in rebuilt.rows()] == expected
+    assert rebuilt.ingest(retained).replayed == 2</code></pre>
+<p>Keeping payloads alone and assigning new identities does not preserve the source replay contract. It can also change callback computations that inspect document identity or numeric envelope tie positions. A label for a lost taxonomy or reference snapshot cannot reproduce its contents.</p>
+<p>Portable <code>add</code> implementations must give equivalent results for the same ordered contributions split across successive batches. Preserve batch boundaries if exact engine sequence values matter: a sequence includes committed document and group-state records. Replayed databases have new identities and cursors even when their computed states match. Browser <code>replay()</code> retains the original batches and compares keys, states, and results.</p>
 
-<h2 id="versions">Versions are promises</h2>
-<p>A map's view version identifies its code and behavior. A fold has its own explicit version. Changing a callable, a captured input, or a reference version requires updating the declared definition.</p>
-<p>Compatible definitions reuse cached checkpoints. A different descriptor rebuilds that view atomically and invalidates its old cursors. Maps and folds are trusted application code, not a sandbox for arbitrary programs.</p>
+<h2 id="versions">Module changes and callback versions</h2>
+<p><strong>Portable views:</strong> the SHA-256 digest identifies the complete compiled map, reducer, state schema, and SDK runtime. Native storage reopens only with the exact same bytes. Changed modules require a fresh database plus retained-document replay. Update the view version for changed behavior and the state version for incompatible formats; rebuild the manifest too. Matching labels do not override a different digest. Compiler changes can also alter the digest.</p>
+<p><strong>Python callbacks:</strong> <code>View.version</code> identifies map behavior; the fold and reducer have their own versions, and <code>references</code> declares captured external inputs. Registering a compatible definition reuses checkpoints. A changed definition rebuilds that callback view atomically from retained documents and invalidates its old cursors. Changing a callable or captured input requires updating its declared definition.</p>
+<p>Python callbacks are trusted application code. Portable modules have no host imports and run with bounded memory and execution, but they must still be deterministic: use explicit inputs and state rather than mutable global data. Hosts instantiate portable modules afresh for operations. Neither path automatically makes arbitrary state mergeable.</p>
+
+<h2 id="persistence">Native persistence and browser memory</h2>
+<p><code>PortableDatabase</code> uses the Rust engine's SQLite WAL storage. Documents, source checkpoints, states, and history survive a close and reopen. Different native connections coordinate writes through SQLite. The callback API uses a separate Python/SQLite schema; its files and cursors are not interchangeable with portable storage.</p>
+<p>The browser host executes the same Wasm computation, while JavaScript retains documents, grouped states, and history in a dedicated worker. It currently uses no IndexedDB or persistent browser database. Reloading the page, closing the client, or a worker deadline discards state. Export resolved records before closing, then ingest them into a new worker to restore the view.</p>
+<p>Native storage grows with retained documents, keys, and history. The browser preview instead rejects batches that exceed its document, key, history, and byte limits; see <a href="portable.html#contract">exact component limits</a>. A 16 MiB Wasm linear-memory limit is not a limit on the entire host process.</p>
 
 <h2 id="atomicity">Atomic commits and stable reads</h2>
-<p>Each append batch commits document identities, source checkpoints, reduced states, and change records together. Failure rolls back the whole batch. Separate writers coordinate through SQLite.</p>
-<p>A snapshot cursor identifies a view revision and a committed ingestion prefix. Bounded pages retain that prefix while ingestion continues. Row iterators release transactions between pages; a sufficiently long pause may outlive your application's retained history.</p>
-<p>Compaction discards old changes under an explicit caller-selected boundary. It does not discard cached source documents needed for view rebuilds. Storage still grows with documents, distinct keys, and retained history.</p>
+<p>A batch commits identities, checkpoints, reduced states, and change records together. A validation, map, reducer, or limit error rolls back the whole current batch. <code>ingest_many</code> commits separate batches as you iterate; earlier successful batches survive a later error.</p>
+<p>A snapshot cursor identifies a database, computation revision, and committed prefix. Snapshot pages retain that prefix while new documents arrive. Continue a query with both its cursor and after token, then use the snapshot cursor for later changes. Changes carry complete resulting key states, coalesced per key within each batch.</p>
+<p>Portable cursors belong to their original database identity and module. Native connections and reopens of the same file with the same module can reuse cursors; a new browser worker or rebuilt database has a new identity and cannot reuse them. Row iterators release transactions between pages. The portable API currently retains all history and exposes no compaction. Callback <code>Database.compact</code> can discard old changes at an explicit caller-selected boundary, expiring older readers while retaining documents for rebuilds.</p>
 
 <h2 id="numerical-contract">Numerical reproducibility</h2>
-<p>Count and envelope states have exact merge contracts within their input bounds. Floating-point sum and mean use non-associative arithmetic: arbitrary merge trees need not produce identical bits.</p>
-<p>Native and WASM execution use the same Rust mathematical core. Preserve the declared order and partition plan when exact cross-runtime agreement matters. Do not merge finalized means; merge their compatible states with disjoint coverage.</p>
-<p>The JSON protocol preserves large finite floating-point states when they round trip through serialization. A bundled reducer update changes its module identity; compatible applications rebuild affected cached views and expire their old cursors through the normal view-version rules.</p>
+<p>Portable payloads, keys, states, and results use finite IEEE-754 doubles, matching JavaScript numbers. Python rejects integer inputs that cannot be represented exactly as a double. Large exactly representable values still use double semantics; encode arbitrary-precision identifiers as strings. Positions and engine sequences must remain in the nonnegative JavaScript-safe integer range. JSON nesting is bounded to 64 levels.</p>
+<p>The same compiled AssemblyScript module runs in both native and browser portable hosts, using shared canonical key representation. Neither host adds Python arbitrary-precision arithmetic. Floating-point addition is not associative: arbitrary merge trees can change sum or mean rounding. Preserve input order and the declared partition/merge plan when exact agreement matters. Merge compatible states with disjoint coverage, rather than finalized means.</p>
+<p>The callback API's bundled numeric reducers are a separate Rust mathematical kernel compiled to Wasm. Its count and envelope have exact merge contracts within their input bounds; sum and mean have floating-point merge limits. That reducer-only ABI is distinct from the complete AssemblyScript view ABI. A bundled module change can affect each API's cached-state identity through its respective upgrade rules.</p>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#identity">Names are optional</a>
 <a href="#positions">Positions track a source</a>
 <a href="#ingestion-order">Ingestion order is separate</a>
 <a href="#regeneration">Keep the source outside the cache</a>
-<a href="#versions">Versions are promises</a>
+<a href="#versions">Module changes and callback versions</a>
+<a href="#persistence">Native persistence and browser memory</a>
 <a href="#atomicity">Atomic commits and stable reads</a>
 <a href="#numerical-contract">Numerical reproducibility</a></aside>
   </div>

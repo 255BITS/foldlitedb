@@ -18,7 +18,7 @@
       <span>foldlite<span class="brand-db">db</span></span>
     </a>
     <span class="development-badge">Development preview</span>
-    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
     <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
   </header>
   <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
@@ -40,13 +40,17 @@
     <main id="content" tabindex="-1"><p class="eyebrow">CouchDB-inspired views, from Python to the browser</p>
 <h1>Write a view once.<br>Run it in either environment.</h1>
 <p class="lead">A portable view contains both its map and its reducer. AssemblyScript compiles them into one WebAssembly module, executed by the Rust engine or a browser worker.</p>
-<div class="hero-actions"><a class="button" href="playground.html">Try the browser playground</a><a class="button secondary" href="#python">Use it from Python</a></div>
-<div class="note preview"><p><strong>Development API.</strong> PortableDatabase is the native single-view engine. The existing Database API continues to support Python callbacks and multiple views. Browser view state is currently held in memory; export resolved documents before closing the page.</p></div>
+<div class="hero-actions"><a class="button" href="playground.html">Try the browser playground</a><a class="button secondary" href="#authoring">Write a custom view</a></div>
+<div class="note preview"><p><strong>Development API.</strong> This portable API has not been released on PyPI. Build this checkout or install a wheel built from it. The native engine currently holds one view per database; the browser host keeps state in memory. The existing <a href="api.html#database">callback Database API</a> remains available separately.</p></div>
 
 <h2 id="python">A native database from Python</h2>
-<p>Prebuilt wheels contain the Rust extension and compiled example modules. Installing a matching wheel needs no Rust or Node compiler. Building this source checkout requires Rust 1.90 or newer; editing AssemblyScript views also requires Node 20 or newer.</p>
+<p>Build prerequisites are Python 3.11+, Rust/Cargo 1.90+, and a platform C compiler and linker. From the repository root:</p>
+
 <pre><code>python -m pip install .
 python examples/portable_metrics.py</code></pre>
+
+<p>SQLite and the precompiled modules are included. Node is needed only for authoring or rebuilding AssemblyScript. To produce a wheel locally, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>. Installing the resulting wheel on a matching platform needs no compiler. See <a href="index.html#install">environment setup</a> for virtual-environment and Windows notes. Start the following example with fresh database files:</p>
+
 <pre data-run="python"><code>from foldlitedb import PortableDatabase, PortableView
 
 view = PortableView.bundled("metrics")
@@ -57,49 +61,213 @@ with PortableDatabase("portable-metrics.db", view) as db:
     ])
     assert list(db.rows())[0].result["mean"] == 6
     snapshot = db.query()
-    documents += (db.add({"metric": "loss", "value": 3}),)
+    db.add({"metric": "loss", "value": 3})
     assert db.changes(since=snapshot.cursor).rows[0].result["mean"] == 5
-</code></pre>
-<p>Rust owns document identity, SQLite transactions, source checkpoints, state storage, snapshots, and changes. A bounded Wasm interpreter executes both map and reduce; Python does not execute callbacks in this path. Each database contains one view module.</p>
+    retained = tuple(db.documents())</code></pre>
 
-<h2 id="browser">A complete view in your browser</h2>
-<p>The <a href="playground.html">playground</a> is a static website. Its worker loads the exact compiled module used above, groups emitted contributions, and maintains in-memory states. No application server processes your documents. Import a JSON array or JSONL file, append measurements, export resolved source records, and rebuild the view to verify replay.</p>
-<p>The installed package exposes the browser files through <code>foldlitedb.portable_assets()</code>. Copy these resources into a static website and serve them over HTTP or HTTPS. The worker client owns a deadline and terminates an unresponsive worker.</p>
+<p>Rust owns document identity, SQLite transactions, checkpoints, group states, snapshots, and changes. Its bounded Wasm interpreter executes both mapping and reduction, with no Python callbacks or Python Wasmtime dependency. <code>rows()</code> follows paginated snapshots; explicit <code>query()</code> and <code>changes()</code> support resumable reads. The <a href="api.html#portable-database">Python reference</a> covers every portable method.</p>
 
-<h2 id="authoring">Author and build a view</h2>
-<p>Start with the example sources in <code>views/assembly/</code>. The SDK handles UTF-8 buffers, dynamic JSON values, validation, dispatch, and error responses. Authors implement mapping, initial state, batched updates, and finalization. Mergeable aggregations can additionally implement merge; ordered lifecycle folds preserve ingestion order.</p>
+<h2 id="bundled">Two bundled views</h2>
+<p><strong>Metrics</strong> accepts payloads with a string <code>metric</code> and finite numeric <code>value</code>. Valid documents emit one number under their metric key; malformed shapes, missing fields, nulls, and nonnumeric values emit nothing. States contain <code>{count,sum,min,max}</code>; finalized results add <code>mean</code>. Empty states use null minimum, maximum, and mean. This view supports merge. Invalid contributions, states, and numeric overflow fail.</p>
+<p><strong>Catalogue</strong> accepts <code>{category:string,id:string,title:string,deleted?:boolean}</code>. Each category folds item IDs to their latest titles. An event with <code>{category,id,deleted:true}</code> removes that item. Finalization returns <code>{count,items:{id:title}}</code>. Event order matters, so this view does not support merge. Malformed documents emit nothing; item IDs are limited to 65,535 UTF-16 code units.</p>
+
+<h2 id="authoring">Author a complete view</h2>
+<p>Use Node.js 20+ and the pinned SDK dependencies. The bundled build handles exactly <code>metrics</code> and <code>catalogue</code>; it does not discover additional files:</p>
+
 <pre><code>npm ci --prefix views
 npm run build --prefix views
 npm test --prefix views
 npm run check --prefix views</code></pre>
-<p>The build emits module bytes and a SHA-256 manifest into <code>src/foldlitedb/portable_assets/</code>. Load your compiled module with <code>PortableView("path/to/view.wasm", sha256="expected digest")</code>. AssemblyScript has a stricter type system than TypeScript; the example SDK exposes JSON helpers for structured documents and state.</p>
 
-<h2 id="contract">The computation contract</h2>
-<div class="table-wrap"><table><thead><tr><th scope="col">Operation</th><th scope="col">Input</th><th scope="col">Output</th></tr></thead><tbody>
-<tr><td><code>descriptor</code></td><td>Module request</td><td>Name, version, state version, ABI, merge capability</td></tr>
+<p>For a custom module, save this complete source as <code>views/assembly/examples/metric-totals.ts</code>. It groups numeric values by metric and returns a running total. The SDK handles UTF-8 buffers, finite JSON, allocation, dispatch, and error envelopes.</p>
+
+<pre><code>import { JSON, View, Emission, object, numeric, number, dispatch } from "../sdk";
+export { abi_version, input_ptr, input_capacity, output_ptr } from "../sdk";
+
+class MetricTotals extends View {
+  constructor() { super("metric-totals", false, "1", "1"); }
+
+  map(document: JSON.Value): Emission[] {
+    const doc = object(document);
+    if (doc == null) return [];
+    const metric = doc.get("metric");
+    const value = doc.get("value");
+    if (metric == null || metric.type != JSON.Types.String || !numeric(value)) {
+      return [];
+    }
+    return [new Emission(metric, value!)];
+  }
+
+  identity(): JSON.Value { return JSON.Value.from&lt;f64&gt;(0); }
+
+  add(state: JSON.Value, values: JSON.Arr): JSON.Value {
+    if (!numeric(state)) return this.fail("Invalid total state");
+    let total = number(state);
+    for (let i = 0; i &lt; values.length; i++) {
+      const value = values.at(i);
+      if (!numeric(value)) return this.fail("Expected a numeric contribution");
+      total += number(value);
+    }
+    if (!isFinite(total)) return this.fail("Total overflowed");
+    return JSON.Value.from(total);
+  }
+
+  finalize(state: JSON.Value): JSON.Value {
+    if (!numeric(state)) return this.fail("Invalid total state");
+    return state;
+  }
+}
+
+const view = new MetricTotals();
+export function execute(length: i32): i32 { return dispatch(view, length); }</code></pre>
+
+<p>Compile from <code>views/</code> using the same compiler settings as the bundled modules. These are POSIX-shell commands:</p>
+
+<pre><code>cd views
+mkdir -p .build
+JSON_MODE=naive node node_modules/assemblyscript/bin/asc.js \
+    assembly/examples/metric-totals.ts \
+    --outFile .build/metric-totals.wasm \
+    --transform json-as --runtime incremental \
+    --maximumMemory 256 --initialMemory 16 --stackSize 32768 \
+    --use abort=assembly/sdk/index/abort \
+    --optimizeLevel 3 --shrinkLevel 1</code></pre>
+
+<p>While still in <code>views/</code>, generate the digest manifest used by the browser. The descriptor is read from the compiled module, so it matches the view name, version, state version, and merge capability:</p>
+
+<pre><code>node --input-type=module &lt;&lt;'JS'
+import { readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+
+const bytes = await readFile('.build/metric-totals.wasm');
+const module = new WebAssembly.Module(bytes);
+if (WebAssembly.Module.imports(module).length) throw new Error('Unexpected imports');
+const { exports: api } = new WebAssembly.Instance(module);
+const input = new TextEncoder().encode('{"op":"descriptor"}');
+new Uint8Array(api.memory.buffer).set(input, api.input_ptr());
+const length = api.execute(input.length);
+const response = JSON.parse(new TextDecoder().decode(
+  new Uint8Array(api.memory.buffer, api.output_ptr(), length)));
+if (!response.ok) throw new Error(response.error);
+const manifest = {
+  abi: 1, module: 'metric-totals.wasm',
+  sha256: createHash('sha256').update(bytes).digest('hex'),
+  descriptor: response.ok,
+};
+await writeFile('.build/metric-totals.json', JSON.stringify(manifest, null, 2) + '\n');
+JS
+cd ..</code></pre>
+
+<p>Back at the repository root, load the same bytes from Python. This example follows the custom compilation steps above:</p>
+
+<pre><code>import json
+from pathlib import Path
+from foldlitedb import PortableDatabase, PortableView
+
+manifest = json.loads(Path("views/.build/metric-totals.json").read_text())
+custom = PortableView("views/.build/metric-totals.wasm", sha256=manifest["sha256"])
+with PortableDatabase(":memory:", custom) as db:
+    db.add_many([{"metric": "loss", "value": 4}, {"metric": "loss", "value": 8}])
+    assert list(db.rows())[0].result == 12</code></pre>
+
+<p>The map receives payloads only, not host IDs or positions. Include domain metadata inside the payload if your computation needs it. Keys, states, and contributions can be structured JSON. State is passed explicitly to every update; requests must not depend on mutable module globals, clocks, randomness, or undeclared external data. Hosts instantiate the module afresh for operations.</p>
+<p><code>add</code> must preserve contribution order and produce equivalent state when an input sequence is split into successive batches. Implement <code>merge</code> and set <code>mergeable=true</code> only when compatible independent states can be combined correctly. The example leaves merge disabled. Bump the view version for changed behavior and the state version for incompatible formats; rebuild the module and manifest together. A new compiler can also change the module digest.</p>
+
+<h2 id="browser">Use the module on a static website</h2>
+<p>The <a href="playground.html">playground</a> imports JSON arrays or JSONL, appends measurements, streams simulated updates, exports resolved records, and verifies replay. All document processing stays in its worker. The same module bytes power the Python example; JavaScript owns browser grouping and storage. The Rust SQLite engine itself is not part of the browser build.</p>
+<p>To create your own page, copy the installed package's browser files and bundled modules. Run this Python from the repository root:</p>
+
+<pre data-run="python"><code>from pathlib import Path
+from foldlitedb import portable_assets
+
+target = Path("browser-demo/portable")
+target.mkdir(parents=True, exist_ok=True)
+for resource in portable_assets().iterdir():
+    if resource.is_file():
+        (target / resource.name).write_bytes(resource.read_bytes())</code></pre>
+
+<p>Save this as <code>browser-demo/index.html</code>. Browser methods are asynchronous; <code>addMany</code> returns a batch-result object, while Python's <code>add_many</code> returns a tuple of documents.</p>
+
+<pre><code>&lt;!doctype html&gt;
+&lt;meta charset="utf-8"&gt;
+&lt;title&gt;Foldlite DB in the browser&lt;/title&gt;
+&lt;pre id="output"&gt;Loading…&lt;/pre&gt;
+&lt;script type="module"&gt;
+import { BrowserDatabase } from './portable/client.js';
+
+const db = await BrowserDatabase.connect({name: 'metrics'});
+try {
+  await db.addMany([
+    {metric: 'loss', value: 4},
+    {metric: 'loss', value: 8},
+  ]);
+  const snapshot = await db.query();
+  await db.add({metric: 'loss', value: 3});
+  const updates = await db.changes(snapshot.cursor);
+  const retained = await db.export(); // Save these records outside the worker.
+  const replay = await db.replay();
+  document.querySelector('#output').textContent = JSON.stringify({
+    rows: await db.rows(), updates, documents: retained.length, replay,
+  }, null, 2);
+} finally {
+  db.close();
+}
+&lt;/script&gt;</code></pre>
+
+<pre><code>python -m http.server 8000 --directory browser-demo</code></pre>
+
+<p>Open <code>http://localhost:8000</code>; opening the file directly is insufficient for module workers and fetch. Production deployments can serve these files over HTTPS. Keep <code>client.js</code>, <code>worker.js</code>, and <code>host.js</code> together.</p>
+<p>For the custom totals view, copy <code>views/.build/metric-totals.wasm</code> and <code>metric-totals.json</code> into <code>browser-demo/portable/</code>, then change the connection to:</p>
+
+<pre><code>const db = await BrowserDatabase.connect({
+  name: 'metric-totals',
+  base: new URL('./portable/', import.meta.url),
+});</code></pre>
+
+<p>The browser verifies the manifest's SHA-256 and descriptor before execution. <code>db.info</code> contains initial stats; <code>await db.stats()</code> exposes the current module digest, descriptor, checkpoints, document count, cursor, and Wasm memory size. Compare <code>module_sha256</code> with Python's <code>PortableView.sha256</code> to confirm the exact artifact.</p>
+<p><code>query({limit,cursor,after,key})</code> returns snapshot pages; continue with both returned cursor and after. <code>rows({limit,key})</code> collects all pages into an array. <code>changes(cursor,{limit})</code> returns one change page; continue with its returned cursor until complete. <code>ingest(resolvedDocuments)</code> replays exported records with their retained identities and positions. <code>add(payload,{id,source,position})</code> accepts an optional explicit identity. <code>export()</code> returns all resolved records. <code>replay()</code> rebuilds with original committed batches and reports equivalence of keys, states, and results.</p>
+
+<h2 id="contract">The computation contract and limits</h2>
+<div class="table-wrap"><table><thead><tr><th>Operation</th><th>Input</th><th>Output</th></tr></thead><tbody>
+<tr><td><code>descriptor</code></td><td>Module request</td><td>Name, view version, state version, ABI, merge capability</td></tr>
 <tr><td><code>map</code></td><td>A batch of document payloads</td><td>An emission array per document, including zero emissions</td></tr>
-<tr><td><code>identity</code></td><td>Empty request</td><td>Initial JSON state for one group</td></tr>
+<tr><td><code>identity</code></td><td>Empty request</td><td>Initial JSON state for a group</td></tr>
 <tr><td><code>add</code></td><td>State and ordered contributions</td><td>Updated JSON state</td></tr>
 <tr><td><code>finalize</code></td><td>State</td><td>Public JSON result</td></tr>
-<tr><td><code>merge</code></td><td>Two compatible states</td><td>Combined state, where declared supported</td></tr>
+<tr><td><code>merge</code></td><td>Two compatible states</td><td>Combined state, when supported</td></tr>
 </tbody></table></div>
-<p>The v1 ABI accepts UTF-8 JSON through fixed buffers with a 256 KiB request and response limit. Modules have no host imports and declare at most 16 MiB of linear memory. Native execution has a fuel limit. Browser execution runs in a dedicated worker with an external timeout. Hosts retain grouping, document identity, scheduling, checkpoints, and storage.</p>
-<p>Portable JSON numbers use IEEE-754 double precision, as in JavaScript. Python rejects integer inputs that cannot be represented exactly in that format; encode large identifiers as strings. Source positions and cursor sequences are restricted to nonnegative JavaScript-safe integers.</p>
+<p>The v1 ABI uses UTF-8 JSON with a 256 KiB request limit and a separate 256 KiB response limit, both including envelopes. Modules have no host imports and at most 16 MiB of linear memory. The native host imposes a fuel budget. The browser client runs a dedicated worker with a 15-second default deadline, configurable through <code>timeoutMs</code> from 1 through 60,000 milliseconds. Expiry terminates the worker and loses its in-memory state.</p>
+<p>Both hosts limit an ingestion batch to 1024 documents and 4096 emissions, and snapshot pages to 1024 entries. Encoded map and per-group add requests can reach the ABI byte limit earlier. The browser additionally caps retained documents at 20,000 and 16 MiB of encoded records, distinct groups at 4096, and history at 100,000 entries and 32 MiB of encoded rows. Its public request envelope is capped at 4 MiB. These are component limits, not a bound on the whole browser process. A failing batch does not commit a prefix.</p>
+<p>Portable JSON numbers use IEEE-754 double precision, as in JavaScript. Python rejects integer inputs that cannot be represented exactly as doubles; use strings for exact large identifiers. Positions and cursor sequences are nonnegative JavaScript-safe integers. Floating-point sums preserve ordered inputs; arbitrary merge trees can change rounding. See <a href="concepts.html#numerical-contract">numerical reproducibility</a>.</p>
 
 <h2 id="replay">Retain documents; regenerate views</h2>
-<p>The module digest identifies the exact map, reducer, and state schema. Reopening a database with different module bytes fails explicitly. To upgrade a view, create a new database and replay retained documents with the new module. Resolved IDs, source positions, and ingestion order remain part of the replay contract.</p>
+<p>Keep resolved documents and the exact compiled module outside derived storage. Reopen native storage with identical module bytes to reuse checkpoints; to change the module, open a fresh database and replay in original ingestion order. A matching human version label does not override a changed digest.</p>
+
 <pre data-run="python"><code>with PortableDatabase("portable-rebuilt.db", view) as rebuilt:
-    rebuilt.ingest(documents)
-    assert list(rebuilt.rows())[0].result["mean"] == 5
-</code></pre>
-<p>Query cursors belong to their database generation and module revision. Bounded snapshot pages keep a fixed committed prefix; change pages advance from that prefix. Floating-point aggregations preserve their declared input order; arbitrary merge trees can change rounding.</p>
-<p>For larger retained streams, iterate <code>db.ingest_many(documents, batch_size=100)</code>. Each yielded result is a separately committed batch; choose a smaller batch size when document payloads approach the Wasm byte limit. <code>db.documents(limit=100)</code> exports resolved records in ingestion order at a pinned snapshot.</p>
-<p>The in-memory browser preview also caps retained documents, groups, and change history. It reports a limit error atomically and lets you export your retained records. Persistent browser storage, history compaction, and multiple native views in one database remain future extensions.</p>
+    rebuilt.ingest(retained)
+    assert list(rebuilt.rows())[0].result["mean"] == 5</code></pre>
+
+<p>For larger streams, iterate <code>db.ingest_many(records, batch_size=100)</code>; each yielded result commits one bounded batch. <code>db.documents(limit=100)</code> exports resolved records at a pinned snapshot. Browser exports include an additional engine sequence field; Python accepts them after constructing <code>Document</code> objects:</p>
+
+<pre><code>import json
+from pathlib import Path
+from foldlitedb import Document, PortableDatabase, PortableView
+
+view = PortableView.bundled("metrics")
+records = json.loads(Path("exported-documents.json").read_text(), parse_int=float)
+documents = [Document(r["id"], r["payload"], int(r["position"]), r["source"]) for r in records]
+with PortableDatabase("from-browser.db", view) as db:
+    for result in db.ingest_many(documents):
+        print(result.inserted, result.replayed)</code></pre>
+
+<p>The final snippet expects an exported JSON array from the metrics view. Browser payload numbers use IEEE-754 doubles; <code>parse_int=float</code> preserves those semantics even when a large double is serialized without a decimal point. Safe source positions are converted back to Python integers when constructing documents. Preserve input order; preserve batch boundaries too if exact engine sequence values matter. Compare computation outputs rather than database-local cursors. A new database receives a new identity, so its cursors differ even when results match.</p>
+<p>Native storage persists across reopen; browser state is in memory and is discarded on reload or <code>close()</code>. Export before closing and ingest those records into a new worker to restore it. Persistent browser storage, portable history compaction, and multiple native views per database remain future extensions. The <a href="concepts.html">replay model</a> explains how this differs from callback view rebuilds.</p>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#python">A native database from Python</a>
-<a href="#browser">A complete view in your browser</a>
-<a href="#authoring">Author and build a view</a>
-<a href="#contract">The computation contract</a>
+<a href="#bundled">Two bundled views</a>
+<a href="#authoring">Author a complete view</a>
+<a href="#browser">Use the module on a static website</a>
+<a href="#contract">The computation contract and limits</a>
 <a href="#replay">Retain documents; regenerate views</a></aside>
   </div>
   <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>

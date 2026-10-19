@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Documents, atomic batches, views, reducers, snapshots, and change feeds.">
+  <meta name="description" content="PortableDatabase and PortableView reference, plus the existing Python callback Database API.">
   <meta name="color-scheme" content="light">
   <title>Python API · Foldlite DB</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -18,7 +18,7 @@
       <span>foldlite<span class="brand-db">db</span></span>
     </a>
     <span class="development-badge">Development preview</span>
-    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
     <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
   </header>
   <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
@@ -39,9 +39,90 @@
   <div class="page-layout">
     <main id="content" tabindex="-1"><p class="eyebrow">Reference · development API</p>
 <h1>The Python API</h1>
-<p class="lead">Start with <code>add</code>, <code>add_many</code>, and <code>rows</code>. Explicit documents and cursors are available when your application owns a log or a resumable feed.</p>
+<p class="lead"><code>PortableDatabase</code> runs a complete Wasm map/reduce view in Rust. The existing <a href="#database"><code>Database</code> API</a> runs Python callbacks. Both expose immutable documents, atomic batches, snapshots, and changes.</p>
 
-<h2 id="database">Database</h2>
+<h2 id="portable-view">PortableView and packaged assets</h2>
+<pre class="signature"><code>PortableView(module, *, sha256=None)
+PortableView.bundled(name="metrics") → PortableView
+portable_assets() → importlib.resources Traversable</code></pre>
+<p>Import these names from <code>foldlitedb</code>. <code>module</code> accepts Wasm bytes or a filesystem path. <code>PortableView</code> stores immutable <code>module</code> bytes and their <code>sha256</code>; an optional digest must match exactly. Module size is 1 byte through 16 MiB. Exports, imports, ABI, and descriptor are validated when the native database opens.</p>
+<p><code>bundled</code> accepts <code>"metrics"</code> or <code>"catalogue"</code> and verifies the packaged manifest digest. Metrics returns <code>{count,sum,min,max,mean}</code>; catalogue returns <code>{count,items}</code> after its ordered item fold. The <a href="portable.html#bundled">portable guide</a> describes accepted payloads. <code>portable_assets()</code> exposes both modules and manifests plus the buildless browser hosts. Copy its files using their resource <code>read_bytes()</code> methods; resources need not be ordinary filesystem paths.</p>
+
+<h2 id="portable-database">PortableDatabase</h2>
+<pre class="signature"><code>PortableDatabase(path, view=None)</code></pre>
+<p>A Rust/SQLite database executing one complete portable view. <code>view</code> accepts a <code>PortableView</code>, Wasm bytes, or a module path. Omit it to use the bundled metrics view. <code>path</code> accepts a filesystem path or <code>":memory:"</code>. Parent directories must already exist.</p>
+<p>Use a context manager or <code>close()</code>. Closing is idempotent; later operations raise <code>DatabaseError</code>. Reopening the same file and exact module reuses persisted state. Different module bytes fail: create a new file and replay retained documents to upgrade. Cursors bind to a database identity and exact module digest.</p>
+<pre data-run="python"><code>from foldlitedb import PortableDatabase, PortableView
+
+with PortableDatabase(":memory:", PortableView.bundled("metrics")) as portable:
+    original = portable.add({"metric": "loss", "value": 4}, id="a")
+    assert portable.add(original.payload, id="a") == original
+    snapshot = portable.query()
+    portable.add({"metric": "loss", "value": 8})
+    assert portable.changes(since=snapshot.cursor).rows[0].result["mean"] == 6
+    retained = tuple(portable.documents())
+    assert portable.stats()["documents"] == 2
+
+with PortableDatabase(":memory:") as replay:
+    assert replay.ingest(retained).inserted == 2
+    assert replay.ingest(retained).replayed == 2</code></pre>
+
+<h3 id="portable-appends">Append and replay</h3>
+<pre class="signature"><code>db.add(payload, *, id=None, source="default", position=None) → Document
+db.add_many(payloads, *, source="default") → tuple[Document, ...]
+db.ingest(documents) → IngestResult
+db.ingest_many(documents, *, batch_size=100) → iterator[IngestResult]</code></pre>
+<p><code>add</code> appends one finite JSON payload and returns its resolved <code>Document(id, payload, position, source)</code>. Omitted IDs are generated; omitted positions start at zero and advance per source. An identical named add or replay at an existing source position reuses the original document. Conflicting reuse fails; previously unseen positions must advance that source's checkpoint. IDs and sources are nonempty strings of at most 4096 UTF-8 bytes. Positions range from zero through <code>2**53 - 1</code>.</p>
+<p><code>add_many</code> eagerly consumes one iterable of payloads and commits atomically, returning resolved records in input order. Each member is one JSON payload, including an entire array. Empty input returns <code>()</code>; retrying unnamed payloads appends new records. <code>ingest</code> instead requires <code>Document</code> instances with retained identities, positions, and payloads; its result contains <code>inserted</code>, <code>replayed</code>, and <code>sequence</code>. Identical replay skips map execution.</p>
+<p><code>ingest_many</code> is lazy. Iterating commits separate batches of 1–1024 documents, defaulting to 100. A later error preserves previously committed batches. All atomic ingestion calls are limited to 1024 documents and 4096 map emissions. The complete map request, including its envelope and all newly inserted payloads, must fit 256 KiB; per-group add requests, states, and results must also fit their Wasm buffers. Reduce batch size for larger payloads. Map, reducer, validation, and limit errors roll back the whole current batch.</p>
+<p>Portable JSON uses IEEE-754 double precision and at most 64 nesting levels. Python rejects integer inputs that cannot be represented exactly as a double. Encode identifiers requiring arbitrary integer precision as strings. Nonfinite numbers and invalid Unicode scalar values fail before execution.</p>
+
+<h3 id="portable-reads">Rows, snapshot pages, and changes</h3>
+<pre class="signature"><code>db.rows(*, key=&lt;omitted&gt;, limit=100) → iterator[Row]
+db.query(*, key=&lt;omitted&gt;, limit=100, cursor=None, after=None) → Snapshot
+db.changes(*, since, limit=100) → ChangePage</code></pre>
+<p>Portable reads omit a view name. <code>rows</code> lazily follows snapshot pages, pinning the committed prefix on first iteration. <code>limit</code> is a page size from 1 through 1024, not a total row limit. Omit <code>key</code> for every group or supply any JSON key, including null, for exact filtering. Rows follow canonical JSON lexical order consistent with the browser host. No transaction spans a yield to application code.</p>
+<p>A <code>Row</code> contains <code>key</code>, reducer <code>state</code>, finalized <code>result</code>, and committed <code>sequence</code>. A <code>Snapshot</code> contains <code>rows</code>, <code>cursor</code>, <code>after</code>, and <code>complete</code>. Continue with both returned <code>cursor</code> and <code>after</code>, keeping the same key filter. New documents do not change that snapshot.</p>
+<pre data-run="python"><code>with PortableDatabase(":memory:") as portable:
+    portable.add_many([
+        {"metric": "a", "value": 2},
+        {"metric": "b", "value": 8},
+    ])
+    page = portable.query(limit=1)
+    snapshot_cursor = page.cursor
+    rows = list(page.rows)
+    while not page.complete:
+        page = portable.query(limit=1, cursor=page.cursor, after=page.after)
+        rows.extend(page.rows)
+    assert [row.key for row in rows] == ["a", "b"]
+
+    portable.add({"metric": "a", "value": 4})
+    changes = portable.changes(since=snapshot_cursor, limit=1)
+    assert changes.rows[0].result["mean"] == 3
+    while not changes.complete:
+        changes = portable.changes(since=changes.cursor, limit=1)</code></pre>
+<p><code>changes</code> reads committed group postimages after a snapshot or change cursor. Pass <code>since=0</code> to read retained history from the start. A page contains <code>rows</code>, a continuation <code>cursor</code>, and <code>complete</code>; continue with that cursor. Multiple updates to one key in a batch coalesce into one postimage. A page can split a batch's group updates. Zero-emission documents still advance progress. Cursors belong to their original database and cannot be transferred to a replayed database.</p>
+
+<h3 id="portable-export">Export and inspect</h3>
+<pre class="signature"><code>db.documents(*, limit=100) → iterator[Document]
+db.stats() → dict
+db.close()</code></pre>
+<p><code>documents</code> exports resolved source records in original ingestion order at a fixed snapshot, pinned on first iteration. Its page size is 1–1024. Retain these records outside the derived cache and feed them to <code>ingest</code> or <code>ingest_many</code> for replay.</p>
+<p><code>stats</code> returns <code>documents</code> (count), <code>sequence</code>, <code>cursor</code>, <code>module_sha256</code>, <code>descriptor</code>, and <code>checkpoints</code> (source-to-position mapping). Engine sequence includes document and group-state records, so it is not a document count. Snapshot and sequence values can differ when replay uses different batch boundaries.</p>
+<p>The native engine uses SQLite WAL with full synchronous commits and a five-second busy timeout. Separate connections coordinate writes through SQLite; calls on a native engine are serialized. Retained documents and view history grow on disk. This API currently exposes no compaction, callback registration, reset, or in-place module rebuild.</p>
+
+<h2 id="api-comparison">Choose a computation path</h2>
+<div class="table-wrap"><table><thead><tr><th>Capability</th><th>PortableDatabase</th><th>Database</th></tr></thead><tbody>
+<tr><td>Map input</td><td>JSON payload inside Wasm</td><td><code>Document</code> in a Python callback</td></tr>
+<tr><td>View setup</td><td>One module passed to the constructor</td><td>One or more <code>View</code> registrations</td></tr>
+<tr><td>Read methods</td><td><code>rows()</code>, <code>query()</code>, <code>changes(since=...)</code></td><td>Same methods with a view name</td></tr>
+<tr><td>Changed computation</td><td>New database plus replay</td><td>Changed declared definition rebuilds its view</td></tr>
+<tr><td>Browser execution</td><td>Same compiled map/reduce module</td><td>Bundled numeric reducers only; Python callbacks stay in Python</td></tr>
+<tr><td>Runtime dependency</td><td>Packaged native Rust extension</td><td>Python SQLite; Wasmtime extra for numeric reducers</td></tr>
+</tbody></table></div>
+<p>Use separate files: the two APIs have different schemas and cursor formats. Neither API selects the other backend implicitly. The remaining reference describes the callback API.</p>
+
+<h2 id="database">Database: Python callbacks</h2>
 <pre class="signature"><code>Database(path, *, generation="default", reset=False,
          max_batch=1024, max_batch_bytes=8 * 1024 * 1024,
          max_value_bytes=1024 * 1024, max_key_bytes=4096,
@@ -69,6 +150,7 @@ Sum(*, runtime=None, positioned=False)
 Count(*, runtime=None, positioned=False)
 Envelope(*, runtime=None, positioned=False)
 RustReducer(name, *, runtime=None, positioned=False)</code></pre>
+<p>Install the callback numeric runtime from your checkout with <code>python -m pip install '.[reducers]'</code>. The source build requires Rust; installing a matching wheel does not.</p>
 <p>The named constructors use the same descriptors and state formats as their explicit reducer IDs. They load the optional runtime when computation needs it. Ordinary maps emit finite numbers or null; null contributes nothing.</p>
 <div class="table-wrap"><table><thead><tr><th>Constructor</th><th>Reducer ID</th><th>Result</th></tr></thead><tbody><tr><td><code>Mean()</code></td><td><code>mean/v1</code></td><td><code>{"count": n, "value": mean}</code>; empty value is null.</td></tr><tr><td><code>Sum()</code></td><td><code>sum/v1</code></td><td>Count and sum; empty sum is zero.</td></tr><tr><td><code>Count()</code></td><td><code>count/v1</code></td><td>Count and count value; counts non-null numeric emissions.</td></tr><tr><td><code>Envelope()</code></td><td><code>envelope/v1</code></td><td>Count and first/min/max/last points, each with value and position.</td></tr></tbody></table></div>
 <p>Map a document to <code>1</code> to count it. Envelope order uses source positions plus deterministic identity/emission tie breaking. <code>positioned=True</code> accepts explicitly positioned portable contributions; it is intended for adapters that already own that position schema.</p>
@@ -99,9 +181,13 @@ with Database(":memory:") as db:
 <dl><dt><code>get(identifier, *, source="default") → Document | None</code></dt><dd>Read a cached immutable document with a freshly decoded payload.</dd><dt><code>checkpoint(source="default") → int | None</code></dt><dd>Read the highest committed source position.</dd><dt><code>refresh(name)</code></dt><dd>Explicitly catch a registered view up to retained documents. Ordinary reads do this automatically.</dd><dt><code>compact(name, *, before)</code></dt><dd>Discard older change history while preserving the chosen snapshot boundary. The caller owns reader retention.</dd><dt><code>stats()</code></dt><dd>Return document, source, view, state, history counts and current ingestion sequence.</dd></dl>
 
 <h2 id="errors">Errors</h2>
+<p>For the portable API, validation and Wasm failures raise <code>DatabaseError</code>; conflicting replay, source ordering, and invalid cursors use <code>DocumentConflict</code>, <code>SourceOrderError</code>, and <code>CursorExpired</code> where identified. A missing native extension raises an actionable <code>RuntimeError</code>.</p>
 <p><code>DatabaseError</code> extends <code>ValueError</code>. Its specialized errors are <code>DocumentConflict</code>, <code>SourceOrderError</code>, <code>CursorExpired</code>, and <code>GenerationMismatch</code>. Failing callbacks propagate their exceptions and roll back their transaction. Missing numeric runtime support raises an actionable <code>RuntimeError</code>.</p>
 </main>
-    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#database">Database</a>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#portable-view">PortableView and packaged assets</a>
+<a href="#portable-database">PortableDatabase</a>
+<a href="#api-comparison">Choose a computation path</a>
+<a href="#database">Database: Python callbacks</a>
 <a href="#documents">Adding documents</a>
 <a href="#views">Views and reducers</a>
 <a href="#reads">Rows, snapshots, and changes</a>

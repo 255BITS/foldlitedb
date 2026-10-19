@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="The experimental Rust engine, storage backends, and fair performance comparisons.">
+  <meta name="description" content="Historical numeric field-map experiments, storage comparisons, and their distinction from the portable engine.">
   <meta name="color-scheme" content="light">
   <title>Native experiments · Foldlite DB</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -18,7 +18,7 @@
       <span>foldlite<span class="brand-db">db</span></span>
     </a>
     <span class="development-badge">Development preview</span>
-    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
     <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
   </header>
   <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
@@ -39,16 +39,16 @@
   <div class="page-layout">
     <main id="content" tabindex="-1"><p class="eyebrow">Engineering notes</p>
 <h1>Native experiments <span class="tag">Experimental</span></h1>
-<p class="lead">Explore execution, data layout, and storage costs while preserving a clear reference contract. The Python API remains the supported starting point.</p>
+<p class="lead">Historical measurements compare Python callback views with a separate native numeric field-map prototype. These reports describe those implementations, not the newer portable-view engine.</p>
 
-<h2 id="supported-path">The current path</h2>
-<p>The Python database uses SQLite for document identity, ordered retention, state, history, and checkpoints. Trusted Python maps and ordered folds run in Python; bundled numeric reducers run the shared Rust core through WebAssembly.</p>
-<p>The unreleased convenience API changes how callers append and read. It does not silently select a new backend or promise parallel callback execution.</p>
+<h2 id="supported-path">The callback baseline and newer portable path</h2>
+<p>The measured callback <code>Database</code> baseline uses Python SQLite for document identity, ordered retention, state, history, and checkpoints. Trusted Python maps and ordered folds run in Python; bundled numeric reducers run the shared Rust core through WebAssembly.</p>
+<p>The newer <a href="portable.html">portable engine</a> runs complete AssemblyScript maps and reducers through Rust and exposes <code>PortableDatabase</code>. It is separate from both this callback baseline and the field-projection experiment below. These historical throughput results do not benchmark that new engine. Neither Python API silently switches backends.</p>
 
 <h2 id="native-scope">A deliberately limited prototype</h2>
 <p>The experimental engine runs native Rust with optional Python bindings, using the same reducer core across SQLite and a durable custom log. Its view contract is a single declarative numeric view over top-level fields, rather than arbitrary Python maps or ordered folds.</p>
 <div class="note"><p><strong>Separate experiment.</strong> Backend compatibility, durability, worker ordering, and numerical behavior need explicit verification. Prototype throughput is not a performance promise for the full Python database API.</p></div>
-<p>Install the base development checkout first, then build the optional native package separately. This step requires a Rust toolchain; the ordinary Python/WASM installation does not.</p>
+<p>To reproduce the experiment, install this checkout with the callback numeric extra, then build the experimental package separately. Both source builds require Rust and a platform C toolchain. Installing a matching prebuilt main-package wheel needs no compiler; this development API has not been released on PyPI.</p>
 <pre><code>python -m pip install '.[reducers]'
 python -m pip install ./experimental/python</code></pre>
 <pre data-run="native-python"><code>from foldlitedb_experimental import NativeDatabase, NativeView
@@ -70,7 +70,7 @@ with NativeDatabase("native.log", metrics, backend="log", workers=4) as db:
     }</code></pre>
 <p>Choose <code>backend="sqlite"</code> for the experimental SQLite journal. The native query methods omit a view name because a database has one view. <code>NativeView</code> also accepts a version, synthetic map-work amount, and emission count for controlled experiments.</p>
 <h3 id="prototype-limits">Current limits</h3>
-<ul><li>Only numeric field projections and the mean, sum, count, and envelope reducers are supported. Python callbacks, ordered folds, multiple views, in-place view rebuilds, and compaction are outside this prototype.</li><li>Rust document mapping and emission use 1–64 workers. Grouping and per-key reduction currently run serially and preserve contribution order. The default worker count follows available CPUs, capped at 64.</li><li>The expanded batch of emissions is buffered before reduction. Up to 1024 documents with 1024 emissions each can require substantial memory; streaming backpressure and compact worker shards are not implemented.</li><li>Both backends append commit records and maintain in-memory indexes. Reopening replays the full journal; memory and retained history grow with data.</li><li>Both backends hold an exclusive process lock. This is not the production Python database's concurrent-reader deployment model.</li><li>The experimental SQLite backend uses a journal-plus-memory layout, so storage comparisons do not isolate SQLite library overhead from all data-layout differences.</li><li>Float-valued grouping keys, including floats nested in structured keys, use deterministic Rust JSON ordering that can differ from Python canonical JSON ordering because exponent formatting differs. Grouping and exact lookup still work; universal cross-engine row-order parity is not promised.</li></ul>
+<ul><li>Only numeric field projections and the mean, sum, count, and envelope reducers are supported. Python callbacks, ordered folds, multiple views, in-place view rebuilds, and compaction are outside this prototype.</li><li>Rust document mapping and emission use 1–64 workers. Grouping and per-key reduction currently run serially and preserve contribution order. The default worker count follows available CPUs, capped at 64.</li><li>The expanded batch of emissions is buffered before reduction. Up to 1024 documents with 1024 emissions each can require substantial memory; streaming backpressure and compact worker shards are not implemented.</li><li>Both backends append commit records and maintain in-memory indexes. Reopening replays the full journal; memory and retained history grow with data.</li><li>Both backends hold an exclusive process lock. The callback database instead supports concurrent readers through SQLite.</li><li>The experimental SQLite backend uses a journal-plus-memory layout, so storage comparisons do not isolate SQLite library overhead from all data-layout differences.</li><li>Float-valued grouping keys, including floats nested in structured keys, use deterministic Rust JSON ordering that can differ from Python canonical JSON ordering because exponent formatting differs. Grouping and exact lookup still work; universal cross-engine row-order parity is not promised.</li></ul>
 
 <h2 id="measured-results">Measured worker scaling</h2>
 <p>Local medians from 156 fresh-process trials, with 2 repeats per configuration. The illustrated uniform workload has 4,096 documents, 128 keys, 512-document durable batches, and 8 live updates using <code>mean/v1</code>. The host exposes 24 logical CPUs; storage is <code>ext4 / /dev/mapper/nvme4tb</code>.</p>
@@ -134,7 +134,7 @@ python scripts/benchmark_database.py \
 <ul><li>Out-of-order worker completion must preserve document and emission order where required.</li><li>Duplicate, overlapping, missing, and retried worker ranges must not double-count or advance progress past unfinished work.</li><li>Failure, cancellation, process exit, and torn writes must preserve the promised commit boundary.</li><li>Snapshot pages and change feeds must expose committed prefixes and retain explicit cursor expiry.</li><li>Count and envelope require exact agreement; sum and mean need a declared numerical contract and deterministic merge plan.</li><li>Slow tasks and high-cardinality keys must not create unbounded queues or memory growth.</li></ul>
 <p>Parallel key reduction and parallel mapping are different capabilities. Python ordered folds cannot use arbitrary partial-state merging. Any future fast path must state the semantics it supports.</p>
 </main>
-    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#supported-path">The current path</a>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#supported-path">The callback baseline and newer portable path</a>
 <a href="#native-scope">A deliberately limited prototype</a>
 <a href="#measured-results">Measured worker scaling</a>
 <a href="#payload-probe">Payload size probe</a>
