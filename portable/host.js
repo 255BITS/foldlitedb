@@ -135,7 +135,7 @@ function memoryLimits(binary) {
 
 export class ViewModule {
   static async load(base = new URL('./', import.meta.url), name = 'metrics') {
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new ViewError('Invalid module name');
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name)) throw new ViewError('Invalid module name');
     const response = await fetch(new URL(`${name}.json`, base));
     if (!response.ok) throw new ViewError('Cannot load view manifest');
     const spec = await response.json();

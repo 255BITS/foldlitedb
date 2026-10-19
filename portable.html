@@ -71,12 +71,9 @@ with Database("metrics.fold", view) as db:
 <p><strong>Catalogue</strong> accepts <code>{category:string,id:string,title:string,deleted?:boolean}</code>. Each category folds item IDs to their latest titles. An event with <code>{category,id,deleted:true}</code> removes that item. Finalization returns <code>{count,items:{id:title}}</code>. Event order matters, so this view does not support merge. Malformed documents emit nothing; item IDs are limited to 65,535 UTF-16 code units.</p>
 
 <h2 id="authoring">Author a complete view</h2>
-<p>Use Node.js 20+ and the pinned SDK dependencies. The bundled build handles exactly <code>metrics</code> and <code>catalogue</code>; it does not discover additional files:</p>
+<p>Use Node.js 20+ and install the pinned SDK dependencies from the repository root:</p>
 
-<pre><code>npm ci --prefix views
-npm run build --prefix views
-npm test --prefix views
-npm run check --prefix views</code></pre>
+<pre><code>npm ci --prefix views</code></pre>
 
 <p>For a custom module, save this complete source as <code>views/assembly/examples/metric-totals.ts</code>. It groups numeric values by metric and returns a running total. The SDK handles UTF-8 buffers, finite JSON, allocation, dispatch, and error envelopes.</p>
 
@@ -120,44 +117,14 @@ class MetricTotals extends View {
 const view = new MetricTotals();
 export function execute(length: i32): i32 { return dispatch(view, length); }</code></pre>
 
-<p>Compile from <code>views/</code> using the same compiler settings as the bundled modules. These are POSIX-shell commands:</p>
+<p>From the repository root, compile the source and generate its digest manifest with one command:</p>
 
-<pre><code>cd views
-mkdir -p .build
-JSON_MODE=naive node node_modules/assemblyscript/bin/asc.js \
-    assembly/examples/metric-totals.ts \
-    --outFile .build/metric-totals.wasm \
-    --transform json-as --runtime incremental \
-    --maximumMemory 256 --initialMemory 16 --stackSize 32768 \
-    --use abort=assembly/sdk/index/abort \
-    --optimizeLevel 3 --shrinkLevel 1</code></pre>
+<pre><code>npm run build:view --prefix views -- assembly/examples/metric-totals.ts --out-dir .build</code></pre>
 
-<p>While still in <code>views/</code>, generate the digest manifest used by the browser. The descriptor is read from the compiled module, so it matches the view name, version, state version, and merge capability:</p>
+<p>Both path arguments are relative to <code>views/</code>, regardless of the caller's working directory; absolute paths also work. The output directory is created if needed. The source filename determines the outputs: <code>views/.build/metric-totals.wasm</code> and <code>views/.build/metric-totals.json</code>. Use letters, digits, underscores, dots, or hyphens in the source filename. The manifest records the compiled descriptor and SHA-256; its descriptor name may differ from the filename. Browser <code>connect({name})</code> uses the artifact filename stem.</p>
+<p>The command applies the same pinned compiler settings as the bundled build and ignores ambient <code>JSON_*</code> settings. It validates the ABI and descriptor before replacing successful outputs; compilation or validation errors leave existing artifacts intact. Choose a separate output directory such as <code>.build</code>; SDK, dependency, script, and bundled asset directories are protected. The ordinary <code>npm run build --prefix views</code> still builds only the two bundled examples.</p>
 
-<pre><code>node --input-type=module &lt;&lt;'JS'
-import { readFile, writeFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
-
-const bytes = await readFile('.build/metric-totals.wasm');
-const module = new WebAssembly.Module(bytes);
-if (WebAssembly.Module.imports(module).length) throw new Error('Unexpected imports');
-const { exports: api } = new WebAssembly.Instance(module);
-const input = new TextEncoder().encode('{"op":"descriptor"}');
-new Uint8Array(api.memory.buffer).set(input, api.input_ptr());
-const length = api.execute(input.length);
-const response = JSON.parse(new TextDecoder().decode(
-  new Uint8Array(api.memory.buffer, api.output_ptr(), length)));
-if (!response.ok) throw new Error(response.error);
-const manifest = {
-  abi: 1, module: 'metric-totals.wasm',
-  sha256: createHash('sha256').update(bytes).digest('hex'),
-  descriptor: response.ok,
-};
-await writeFile('.build/metric-totals.json', JSON.stringify(manifest, null, 2) + '\n');
-JS
-cd ..</code></pre>
-
-<p>Back at the repository root, load the same bytes from Python. This example follows the custom compilation steps above:</p>
+<p>From the repository root, load the same bytes from Python:</p>
 
 <pre><code>import json
 from pathlib import Path
@@ -215,7 +182,7 @@ try {
 
 <pre><code>python -m http.server 8000 --directory browser-demo</code></pre>
 
-<p>Open <code>http://localhost:8000</code>; opening the file directly is insufficient for module workers and fetch. Production deployments can serve these files over HTTPS. Keep <code>client.js</code>, <code>worker.js</code>, and <code>host.js</code> together.</p>
+<p>Open <code>http://localhost:8000</code>; opening the file directly is insufficient for module workers and fetch. Production deployments can serve these files over HTTPS. Copy the entire resource directory, including <code>client.js</code>, <code>worker.js</code>, <code>host.js</code>, and <code>errors.js</code>, so their module imports resolve.</p>
 <p>For the custom totals view, copy <code>views/.build/metric-totals.wasm</code> and <code>metric-totals.json</code> into <code>browser-demo/portable/</code>, then change the connection to:</p>
 
 <pre><code>const db = await BrowserDatabase.connect({
@@ -223,8 +190,34 @@ try {
   base: new URL('./portable/', import.meta.url),
 });</code></pre>
 
-<p>The browser verifies the manifest's SHA-256 and descriptor before execution. <code>db.info</code> contains initial stats; <code>await db.stats()</code> exposes the current module digest, descriptor, checkpoints, document count, cursor, and Wasm memory size. Compare <code>module_sha256</code> with Python's <code>View.sha256</code> to confirm the exact artifact.</p>
-<p><code>query({limit,cursor,after,key})</code> returns snapshot pages; continue with both returned cursor and after. <code>rows({limit,key})</code> collects all pages into an array. <code>changes(cursor,{limit})</code> returns one change page; continue with its returned cursor until complete. <code>ingest(resolvedDocuments)</code> replays exported records with their retained identities and positions. <code>add(payload,{id,source,position})</code> accepts an optional explicit identity. <code>export()</code> returns all resolved records. <code>replay()</code> rebuilds with original committed batches and reports equivalence of keys, states, and results.</p>
+<p>The browser verifies the manifest's SHA-256 and descriptor before execution. <code>db.info</code> contains initial stats. Compare <code>(await db.stats()).module_sha256</code> with Python's <code>View.sha256</code> to confirm the exact artifact.</p>
+<p>Every method below returns a Promise. A resolved document is <code>{id,payload,position,source,sequence}</code>; a batch result is <code>{documents,inserted,replayed,sequence,cursor}</code>. <code>inserted</code> and <code>replayed</code> are counts, and <code>documents</code> contains the resolved input records in order.</p>
+
+<pre class="signature"><code>db.add(payload, {id?, source?, position?} = {}) → resolved document
+db.addMany(payloads, {source?} = {}) → batch result
+db.ingest(records) → batch result
+db.preview(payload) → [{key,value}, ...]
+db.export() → resolved document[]
+db.stats() → {documents,sequence,cursor,module_sha256,descriptor,
+                checkpoints,storage:"memory",memory_bytes}
+db.replay() → {equivalent,documents,groups,module_sha256}</code></pre>
+
+<p><code>add</code> accepts an optional identity; unnamed appends create new observations. <code>addMany</code> commits one bounded batch. <code>ingest</code> retains supplied IDs, sources, and positions; identical re-imports count as replays. Exported <code>sequence</code> fields describe progress in the current worker and are regenerated on import. Preserve <code>id</code>, <code>payload</code>, <code>position</code>, and <code>source</code>; compare keys, states, and results across databases rather than sequence fields or cursors.</p>
+<p><code>preview</code> maps one payload without appending documents, advancing progress, or running the reducer. Use it to diagnose an empty view: <code>await db.preview({metric:'loss',value:4})</code> returns <code>[{key:'loss',value:4}]</code>, while an incompatible payload may return <code>[]</code>. Python exposes the same diagnostic as <code>db.preview(payload)</code>. A successful preview checks mapping only; an actual append can still fail reduction or host limits.</p>
+<p><code>query({limit,cursor,after,key})</code> returns <code>{rows,cursor,after,complete}</code>; continue with both returned cursor and after. Each row contains <code>{key,state,result,sequence}</code>. <code>rows({limit,key})</code> collects all snapshot pages into an array. <code>changes(cursor,{limit})</code> returns <code>{rows,cursor,complete}</code>; continue with its returned cursor until complete. <code>replay()</code> uses the original committed batches to compare keys, states, and results, reporting the boolean <code>equivalent</code> without changing current cursors.</p>
+<p>Browser failures reject with <code>DatabaseError</code> or its subclasses <code>DocumentConflict</code>, <code>SourceOrderError</code>, and <code>CursorExpired</code>, exported from <code>client.js</code>. Each has a stable <code>code</code> and <code>name</code> matching its class name, plus a descriptive <code>message</code>. Use a class or code instead of parsing message text:</p>
+
+<pre><code>import { DocumentConflict } from './portable/client.js';
+
+try {
+  await db.add({metric: 'loss', value: 4}, {id: 'observation-1'});
+} catch (error) {
+  if (error instanceof DocumentConflict) {
+    console.error(error.code, error.message);
+  } else {
+    throw error;
+  }
+}</code></pre>
 
 <h2 id="contract">The computation contract and limits</h2>
 <div class="table-wrap"><table><thead><tr><th>Operation</th><th>Input</th><th>Output</th></tr></thead><tbody>

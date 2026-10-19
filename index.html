@@ -85,6 +85,7 @@ with Database("metrics.fold", metrics) as db:
     assert updates.rows[0].result["mean"] == 4
     db.checkpoint()</code></pre>
 <p>Validation, mapping, and reduction finish before a batch is committed. A view error leaves the current batch uncommitted. Checkpoints are optional accelerators, written on request or clean close.</p>
+<p>For a multi-metric consumer, collect every snapshot and change page. The <a href="api.html#change-consumer">persistent consumer example</a> also replaces its application state from a fresh snapshot when a cursor expires.</p>
 
 <h2 id="rebuild">A cache can always be reconstructed</h2>
 <p>Keep the document log and exact view module; the cache can be discarded. Reopening verifies the complete log, reuses a valid checkpoint, and executes Wasm only for its uncached suffix. Missing or incompatible checkpoints rebuild from the original batches. Opening with a different module rebuilds its derived view from the same documents.</p>
@@ -99,6 +100,7 @@ with Database("metrics.fold", metrics) as db:
 <p>The <a href="portable.html#browser">browser example</a> includes resource copying and a complete static page. Browser persistence, log/history compaction, and multiple native views per database remain future work.</p>
 
 <h2 id="where-next">Keep exploring</h2>
+<p>Run the <a href="examples/telemetry.py">telemetry collector</a> for 2,500 readings, safe source retries, and cache-loss recovery, or the <a href="examples/catalogue.py">catalogue example</a> for an ordered item lifecycle. Use <a href="api.html#preview"><code>preview(payload)</code></a> to inspect a view's map output when a document produces no rows.</p>
 <div class="cards"><a class="card" href="portable.html"><strong>Write a portable view <span aria-hidden="true">↗</span></strong><span>A complete AssemblyScript module, custom build, and browser integration.</span></a><a class="card" href="api.html#database"><strong>The native Python API <span aria-hidden="true">↗</span></strong><span>Appends, snapshots, changes, checkpoint, and rebuild.</span></a><a class="card" href="concepts.html"><strong>Documents and caches <span aria-hidden="true">↗</span></strong><span>Identity, deterministic folds, durability, and cache validation.</span></a></div>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#install">Install from your checkout</a>

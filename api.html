@@ -49,6 +49,12 @@ portable_assets() → importlib.resources Traversable</code></pre>
 <p><code>bundled</code> accepts <code>"metrics"</code> or <code>"catalogue"</code> and verifies the manifest digest. Metrics returns <code>{count,sum,min,max,mean}</code>; catalogue returns <code>{count,items}</code>. See <a href="portable.html#bundled">accepted payloads</a>. <code>portable_assets()</code> exposes modules, manifests, and browser hosts; copy files with each resource's <code>read_bytes()</code> method.</p>
 <p><code>PortableView</code> is an exact alias of <code>View</code>. It does not select another engine.</p>
 
+<h2 id="document">Document: a named source observation</h2>
+<pre class="signature"><code>Document(id, payload, position=None, source="default")</code></pre>
+<p>Import <code>Document</code> from <code>foldlitedb</code> to construct records for <code>ingest</code> or <code>ingest_many</code>. Construction alone writes nothing. <code>id</code> is a stable, nonempty string naming one observation within its <code>source</code>; <code>payload</code> is its finite JSON value. The same ID in another source names a different observation.</p>
+<p>Supply <code>position</code> when the upstream source already has ordered offsets. New positions must advance that source, with gaps allowed. If the source has stable IDs but no offsets, omit <code>position</code>: ingestion assigns one automatically. An identical named retry with <code>position=None</code> reuses the original position, even after newer records arrive. Input objects are not mutated; use <code>documents()</code> to export their assigned positions. Records returned by <code>add</code>, <code>add_many</code>, or <code>documents</code> always have resolved integer positions.</p>
+<p>The fields are <code>id</code>, <code>payload</code>, <code>position</code>, and <code>source</code>. Returned payloads are independent copies; changing a copy cannot update a stored document. Reusing an ID or position with conflicting content raises <code>DocumentConflict</code>. Append a new named observation to express a change.</p>
+
 <h2 id="database">Database</h2>
 <span id="portable-database"></span>
 <pre class="signature"><code>Database(path, view=None)</code></pre>
@@ -78,9 +84,51 @@ db.ingest(documents) → IngestResult
 db.ingest_many(documents, *, batch_size=100) → iterator[IngestResult]</code></pre>
 <p><code>add</code> appends one finite JSON payload and returns its resolved <code>Document(id, payload, position, source)</code>. Omitted IDs are generated; omitted positions start at zero and advance per source. An identical named add or replay at an existing source position reuses the original document. Conflicting reuse fails; previously unseen positions must advance that source. IDs and sources are nonempty strings of at most 4096 UTF-8 bytes; positions range from zero through <code>2**53 - 1</code>.</p>
 <p><code>add_many</code> eagerly consumes one iterable of payloads and commits atomically. Its returned records preserve input order. Every member is one payload, including an entire array; empty input returns <code>()</code>. Retrying unnamed payloads appends new observations. Documents are immutable; append a new observation to express a change.</p>
-<p><code>ingest</code> takes explicit <code>Document</code> instances with retained identities, positions, and payloads. Its result contains <code>inserted</code>, <code>replayed</code>, and <code>sequence</code>. Identical replay performs no map work. <code>ingest_many</code> is lazy: each yielded result commits a separate batch of 1–1024 records, defaulting to 100. A later error preserves earlier committed batches.</p>
+<p><code>ingest</code> takes <a href="#document"><code>Document</code></a> instances with stable identities, payloads, and optional upstream positions. Its result contains <code>inserted</code>, <code>replayed</code>, and <code>sequence</code>. Identical replay performs no map work.</p>
+<p><strong><code>ingest_many</code> is lazy: you must iterate its results to write anything.</strong> Each yielded result commits a separate batch of 1–1024 records, defaulting to 100. A later error preserves earlier committed batches; the complete import is not one atomic transaction.</p>
 <p>An atomic batch has at most 1024 documents and 4096 emissions. The complete map request, including its envelope and newly inserted payloads, must fit 256 KiB; per-group add requests, states, and results must fit their own buffers. The log frame limit is 8 MiB. Reduce batch size for larger payloads. Validation, map, reducer, and limit errors leave the current batch uncommitted; successful persistent batches are synced before acknowledgement.</p>
 <p>Finite JSON uses IEEE-754 doubles and at most 64 nesting levels. Python rejects integer inputs not exactly representable as doubles. Nonfinite values and invalid Unicode scalar strings fail. Use strings for arbitrary-precision identifiers.</p>
+
+<h3 id="bulk-import">Retry-safe source batches</h3>
+<p>If your telemetry export has offsets, retain them along with the source and stable reading IDs. Fully iterating the import below commits 25 batches; resending an old batch counts no readings twice:</p>
+<pre data-run="python"><code>from foldlitedb import Database, Document
+
+source_records = [
+    {"id": f"gateway-07:{offset}", "offset": offset,
+     "metric": "temperature.c", "value": 20 + (offset % 20) * 0.25}
+    for offset in range(2500)
+]
+records = [Document(r["id"], {"metric": r["metric"], "value": r["value"]},
+                    position=r["offset"], source="gateway-07")
+           for r in source_records]
+with Database(":memory:") as imported:
+    results = list(imported.ingest_many(records, batch_size=100))
+    assert sum(result.inserted for result in results) == 2500
+    retry = imported.ingest(records[100:200])
+    assert retry.inserted == 0 and retry.replayed == 100
+    assert list(imported.rows())[0].result["count"] == 2500</code></pre>
+<p>If upstream provides IDs but no offsets, use named records with automatic positions instead. Do not invent new offsets from each export's row numbers:</p>
+<pre data-run="python"><code>named = [
+    Document("probe-a:reading-1", {"metric": "temperature.c", "value": 20}, source="probe-a"),
+    Document("probe-a:reading-2", {"metric": "temperature.c", "value": 21}, source="probe-a"),
+]
+with Database(":memory:") as automatic:
+    assert sum(r.inserted for r in automatic.ingest_many(named)) == 2
+    automatic.add({"metric": "temperature.c", "value": 22}, id="probe-a:reading-3", source="probe-a")
+    assert automatic.ingest(named).replayed == 2
+    assert [record.position for record in automatic.documents()] == [0, 1, 2]</code></pre>
+<p>For JSONL, construct each <code>Document</code> while iterating the file and pass that iterator to <code>ingest_many</code>. Keep source order, and retain resolved records when exporting. The complete <a href="examples/telemetry.py">telemetry example</a> verifies summaries against a Python oracle, follows live changes, and reopens after deleting the cache.</p>
+
+<h2 id="preview">Inspect a payload's map output</h2>
+<pre class="signature"><code>db.preview(payload) → list[{"key": JSON, "value": JSON}]</code></pre>
+<p><code>preview</code> runs only the current view's map function without appending a document or changing source progress, rows, or history. It does not run the reducer or guarantee that a later ingestion batch fits its limits. Use it to inspect unexpected zero-emission payloads:</p>
+<pre data-run="python"><code>with Database(":memory:") as inspection:
+    assert inspection.preview({"metric": "temperature.c", "value": 21}) == [
+        {"key": "temperature.c", "value": 21},
+    ]
+    assert inspection.preview({"kind": "heartbeat"}) == []
+    assert inspection.stats()["documents"] == 0</code></pre>
+<p>Zero emissions are intentional filtering, not a rejection: ingestion still retains a valid document and advances its source progress. The bundled metrics view ignores shapes without a string <code>metric</code> and finite numeric <code>value</code>. Validate your application schema before ingestion if every retained document should contribute a reading.</p>
 
 <h2 id="reads">Rows, snapshots, and changes</h2>
 <span id="portable-reads"></span>
@@ -110,6 +158,51 @@ db.changes(*, since, limit=100) → ChangePage</code></pre>
 <p><code>changes</code> returns committed group postimages after a snapshot or change cursor. <code>since=0</code> reads retained history from the start. A page has <code>rows</code>, continuation <code>cursor</code>, and <code>complete</code>; continue with that cursor. Repeated changes to a key in one batch coalesce. A page can split group updates from one batch. Zero-emission documents still advance progress.</p>
 <p>Cursors bind to the database generation and exact module. Checkpointed reopen can reuse them; rebuild, cache reconstruction, or module replacement expires them. A new database or browser worker cannot reuse another's cursor. There is no history compaction API.</p>
 
+<h3 id="change-consumer">A persistent changes consumer that recovers</h3>
+<p>Save a consumer's cursor together with the application state it describes. Change rows contain whole resulting group states, so replace each key's result. If the cursor expires, collect a fresh stable snapshot and <strong>replace the entire application state</strong>. Replaying from <code>since=0</code> onto existing totals would double count.</p>
+<pre data-run="python"><code>from pathlib import Path
+from tempfile import TemporaryDirectory
+from foldlitedb import CursorExpired
+
+def collect_snapshot(db):
+    page = db.query(limit=1)
+    state, cursor = {}, page.cursor
+    while True:
+        state.update((row.key, row.result) for row in page.rows)
+        if page.complete:
+            return state, cursor
+        page = db.query(limit=1, cursor=page.cursor, after=page.after)
+
+def poll_changes(db, state, cursor):
+    try:
+        while True:
+            page = db.changes(since=cursor, limit=1)
+            state.update((row.key, row.result) for row in page.rows)
+            cursor = page.cursor
+            if page.complete:
+                return state, cursor
+    except CursorExpired:
+        return collect_snapshot(db)  # New dict replaces all old application state.
+
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "consumer.fold"
+    with Database(path) as db:
+        db.add_many([{"metric": "cpu.percent", "value": 20},
+                     {"metric": "temperature.c", "value": 21}])
+        state, cursor = collect_snapshot(db)
+        db.add({"metric": "temperature.c", "value": 23})
+        state, cursor = poll_changes(db, state, cursor)
+        assert state["temperature.c"]["mean"] == 22
+    with Database(path) as db:  # Clean close kept this cursor valid.
+        assert db.changes(since=cursor).rows == ()
+    Path(str(path) + ".cache").unlink()
+    with Database(path) as db:
+        previous_state = state
+        state, cursor = poll_changes(db, state, cursor)
+        assert state is not previous_state
+        assert state == {row.key: row.result for row in db.rows()}</code></pre>
+<p>The <a href="examples/telemetry.py">runnable telemetry collector</a> also persists its consumer checkpoint and proves that cache reconstruction preserves every resolved source record and summary.</p>
+
 <h2 id="maintenance">Checkpoint, rebuild, export, and inspect</h2>
 <span id="portable-export"></span>
 <pre class="signature"><code>db.checkpoint() → dict
@@ -126,15 +219,26 @@ db.close()</code></pre>
     assert [(row.key, row.state, row.result) for row in db.rows()] == expected</code></pre>
 <p><code>documents</code> exports resolved records in original ingestion order at a snapshot pinned on first iteration. Page size is 1–1024. Back up these records or the log and retain exact view artifacts; the cache can be regenerated. Re-import through <code>ingest</code> or <code>ingest_many</code>.</p>
 <p><code>stats</code> includes <code>documents</code>, <code>groups</code>, <code>sequence</code>, <code>cursor</code>, <code>generation</code>, <code>module_sha256</code>, <code>descriptor</code>, and source <code>checkpoints</code>. <code>storage</code> is <code>"append-only-log"</code> or <code>"memory"</code>. The <code>cache</code> object reports <code>status</code>, <code>bytes</code>, and <code>log_offset</code>; <code>replay</code> reports processed <code>batches</code> and <code>documents</code>; <code>log</code> reports <code>bytes</code>, <code>batches</code>, and <code>recovered_tail_bytes</code>.</p>
-<p>Engine sequence counts inserted documents and changed group states, rather than documents alone. Cache status describes checkpoint handling; replay counts make uncached reconstruction visible. Reopening always verifies the complete log, even with a valid cache. Current retained documents, indexes, and view history grow in host memory; there is no compaction or bounded total-memory guarantee.</p>
+<p>Engine sequence counts inserted documents and changed group states, rather than documents alone. Reopening always verifies the complete log, even with a valid cache. Current retained documents, indexes, and view history grow in host memory; there is no compaction or bounded total-memory guarantee.</p>
+<p><code>cache.status</code> describes startup or the most recent checkpoint operation, not whether the in-memory view is usable. For example, <code>status="missing"</code>, <code>bytes=0</code>, and <code>replay.documents=2513</code> is healthy after rebuilding from a missing cache. The status stays <code>"missing"</code> until <code>checkpoint()</code> or clean close writes a cache. <code>cache.bytes</code> is the cache file size inspected or last written, not the memory used by the view; <code>cache.log_offset</code> is the reused or checkpointed log prefix.</p>
+<table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>memory</code></td><td>An in-memory database has no cache file.</td></tr>
+<tr><td><code>missing</code></td><td>No cache was found on open; the log was replayed.</td></tr>
+<tr><td><code>invalid</code></td><td>A cache could not be validated or did not match the log; the log was replayed.</td></tr>
+<tr><td><code>module-mismatch</code></td><td>The cached view used different module bytes; the log was replayed through the current module.</td></tr>
+<tr><td><code>loaded</code></td><td>A valid cached prefix was reused, with any remaining log suffix replayed.</td></tr>
+<tr><td><code>checkpointed</code></td><td>A new persistent cache was written by <code>checkpoint()</code> or <code>rebuild()</code>.</td></tr>
+</tbody></table>
 
 <h2 id="errors">Errors and recovery</h2>
 <p><code>DatabaseError</code> extends <code>ValueError</code>. Validation and Wasm failures raise it; conflicting replay, source ordering, and invalid cursors use <code>DocumentConflict</code>, <code>SourceOrderError</code>, and <code>CursorExpired</code> where identified. A missing compiled extension raises an actionable <code>RuntimeError</code>.</p>
 <p>Opening an already-owned log fails. Complete log corruption fails rather than skipping records; only an incomplete final frame is recoverable as an interrupted append. A cache failure can be repaired by reconstruction. If an I/O error makes an append's acknowledgement uncertain, close, reopen, and retry using explicit resolved identities. Keep backups of source data.</p>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#view">View and packaged assets</a>
+<a href="#document">Document: a named source observation</a>
 <a href="#database">Database</a>
 <a href="#append">Append and replay</a>
+<a href="#preview">Inspect a payload&#x27;s map output</a>
 <a href="#reads">Rows, snapshots, and changes</a>
 <a href="#maintenance">Checkpoint, rebuild, export, and inspect</a>
 <a href="#errors">Errors and recovery</a></aside>

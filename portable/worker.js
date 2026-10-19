@@ -1,6 +1,7 @@
 /* One view, one isolated worker. Retained documents and committed view state are
    in memory; reload the page to discard them, or export documents for replay. */
 import {ViewModule, ViewError, canonical, finiteJSON} from './host.js';
+import {DocumentConflict, SourceOrderError, CursorExpired, serializeError} from './errors.js';
 
 const utf8 = new TextEncoder();
 const MAX_DOCUMENTS = 20000, MAX_BATCH = 1024, MAX_GROUPS = 4096, MAX_EVENTS = 100000;
@@ -22,6 +23,25 @@ function keyCompare(a, b) {
   return left.length - right.length;
 }
 
+// Preview and ingestion validate the same map output. Empty emissions can be
+// intentional; preview makes filtering visible before retaining source facts.
+function mapPayloads(view, documents) {
+  const mapped = view.map(documents);
+  if (!Array.isArray(mapped) || mapped.length !== documents.length) throw new ViewError('Map must return one contribution array per document');
+  let emissions = 0;
+  return mapped.map(contributions => {
+    if (!Array.isArray(contributions)) throw new ViewError('Map must return contribution arrays');
+    emissions += contributions.length;
+    if (emissions > 4096) throw new ViewError('Map exceeds 4096 contributions per batch');
+    return contributions.map(contribution => {
+      if (!contribution || typeof contribution !== 'object' || Array.isArray(contribution) || !Object.hasOwn(contribution, 'key') || !Object.hasOwn(contribution, 'value')) throw new ViewError('Map emissions need a key and value');
+      return {key: contribution.key, value: contribution.value};
+    });
+  });
+}
+
+const cursorRecovery = ' Obtain a fresh snapshot with await db.query() and replace the previous results before resuming changes.';
+
 class MemoryDatabase {
   constructor(view) {
     this.view = view;
@@ -32,11 +52,12 @@ class MemoryDatabase {
   cursor(sequence = this.sequence) { return `${this.epoch}:${this.view.spec.sha256}:${sequence}`; }
   readCursor(cursor = this.cursor()) {
     if (cursor === 0 || cursor === null) return 0;
-    if (typeof cursor !== 'string' || !cursor.startsWith(`${this.epoch}:${this.view.spec.sha256}:`)) throw new ViewError('Cursor belongs to another database or view module');
+    if (typeof cursor !== 'string' || !cursor.startsWith(`${this.epoch}:${this.view.spec.sha256}:`)) throw new CursorExpired('Cursor belongs to another database or view module.' + cursorRecovery);
     const tail = cursor.slice(cursor.lastIndexOf(':') + 1);
-    if (!/^(0|[1-9][0-9]*)$/.test(tail)) throw new ViewError('Invalid cursor');
-    const sequence = nonnegative(Number(tail), 'Cursor sequence');
-    if (sequence > this.sequence) throw new ViewError('Cursor is ahead of committed state');
+    if (!/^(0|[1-9][0-9]*)$/.test(tail)) throw new CursorExpired('Invalid cursor.' + cursorRecovery);
+    const sequence = Number(tail);
+    if (!Number.isSafeInteger(sequence)) throw new CursorExpired('Invalid cursor sequence.' + cursorRecovery);
+    if (sequence > this.sequence) throw new CursorExpired('Cursor is ahead of committed state.' + cursorRecovery);
     return sequence;
   }
   ingest(input) {
@@ -54,7 +75,7 @@ class MemoryDatabase {
         name(supplied.id, 'Document id');
         const previous = identities.get(canonical([source, supplied.id]));
         if (previous) {
-          if (canonical(previous.payload) !== payloadText || (supplied.position !== undefined && supplied.position !== previous.position)) throw new ViewError('DocumentConflict: document identity already has different contents or position');
+          if (canonical(previous.payload) !== payloadText || (supplied.position !== undefined && supplied.position !== previous.position)) throw new DocumentConflict('DocumentConflict: document identity already has different contents or position');
           resolved.push(previous); replayed++; continue;
         }
       }
@@ -62,10 +83,10 @@ class MemoryDatabase {
       nonnegative(position, 'Source position');
       const atPosition = positions.get(canonical([source, position]));
       if (atPosition) {
-        if (canonical(atPosition.payload) !== payloadText || (supplied.id !== undefined && supplied.id !== atPosition.id)) throw new ViewError('DocumentConflict: source position already has different contents');
+        if (canonical(atPosition.payload) !== payloadText || (supplied.id !== undefined && supplied.id !== atPosition.id)) throw new DocumentConflict('DocumentConflict: source position already has different contents');
         resolved.push(atPosition); replayed++; continue;
       }
-      if (position <= (checkpoints.get(source) ?? -1)) throw new ViewError('Source positions must increase; an older position is not a retained replay');
+      if (position <= (checkpoints.get(source) ?? -1)) throw new SourceOrderError('Source positions must increase; an older position is not a retained replay');
       const id = supplied.id === undefined ? (globalThis.crypto?.randomUUID?.() || `doc-${this.epoch}-${position}-${Math.random().toString(36).slice(2)}`) : supplied.id;
       if (this.documents.length + appended.length >= MAX_DOCUMENTS) throw new ViewError('In-memory document limit reached; export your documents');
       const document = {id, source, position, payload, sequence: ++sequence};
@@ -76,15 +97,9 @@ class MemoryDatabase {
     }
     const groups = new Map();
     if (appended.length) {
-      const mapped = this.view.map(appended.map(document => document.payload));
-      if (!Array.isArray(mapped) || mapped.length !== appended.length) throw new ViewError('Map must return one contribution array per document');
-      let emissions = 0;
+      const mapped = mapPayloads(this.view, appended.map(document => document.payload));
       for (const contributions of mapped) {
-        if (!Array.isArray(contributions)) throw new ViewError('Map must return contribution arrays');
-        emissions += contributions.length;
-        if (emissions > 4096) throw new ViewError('Map exceeds 4096 contributions per batch');
         for (const contribution of contributions) {
-          if (!contribution || !Object.hasOwn(contribution, 'key') || !Object.hasOwn(contribution, 'value')) throw new ViewError('Map emissions need a key and value');
           const key = canonical(contribution.key);
           if (!groups.has(key)) groups.set(key, {key: contribution.key, values: []});
           groups.get(key).values.push(contribution.value);
@@ -153,6 +168,10 @@ class MemoryDatabase {
     finiteJSON(request);
     switch (request.op) {
       case 'ingest': return this.ingest(request.documents);
+      case 'preview': {
+        if (!Object.hasOwn(request, 'payload')) throw new ViewError('Preview requires a payload');
+        return mapPayloads(this.view, [request.payload])[0];
+      }
       case 'query': return this.page(request, 'query');
       case 'documents': return this.page(request, 'documents');
       case 'changes': return this.changes(request);
@@ -179,5 +198,9 @@ self.onmessage = async ({data}) => {
       result = database.request(data);
     }
     self.postMessage({id, ok: result});
-  } catch (error) { self.postMessage({id, error: error.message || String(error)}); }
+  } catch (error) {
+    const failure = serializeError(error);
+    // Keep the text field readable by earlier clients during an asset refresh.
+    self.postMessage({id, error: failure.message, errorCode: failure.code});
+  }
 };

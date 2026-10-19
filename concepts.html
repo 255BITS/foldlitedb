@@ -60,10 +60,12 @@ with Database(":memory:") as db:
     else:
         raise AssertionError("New records cannot arrive behind the checkpoint")</code></pre>
 <p>IDs and positions are scoped to a source. An existing position can identify a replay without a supplied ID; payload and any supplied ID must match. Previously unseen positions behind committed progress fail. Positions range from zero through <code>2**53 - 1</code>. Avoid mixing generated positions with external offsets unless they share a progression.</p>
+<p>For bulk input, use <a href="api.html#document"><code>Document</code></a> records with the upstream offsets you already have. When the source has stable IDs but no offsets, omit the position and let ingestion assign it; an identical named retry keeps its original assignment. See the <a href="api.html#bulk-import">retry-safe bulk import examples</a>. <code>ingest_many</code> performs work only as you iterate its results, and each batch commits separately.</p>
 
 <h2 id="ingestion-order">Order belongs to the input</h2>
 <p>Per-key reduction follows ingestion order, including document and emission order inside a batch. Source offsets do not sort documents across sources; timestamps do not reorder an existing fold. Applications choose domain order before ingestion and preserve it during replay.</p>
 <p>Maps receive payloads; the host owns identities, source positions, deduplication, and batches. Include needed domain metadata inside a payload. The bundled catalogue demonstrates a structured lifecycle fold whose answer can change if events are reordered.</p>
+<p>A map can intentionally emit nothing. Such a document is still retained and advances source progress; it simply contributes no view row. Use <a href="api.html#preview"><code>preview(payload)</code></a> to inspect map output without storing a document, and validate application-specific reading schemas before ingestion when needed.</p>
 <p>Views must give equivalent state when the same ordered contribution sequence is split across successive <code>add</code> calls. Batch boundaries cannot define application semantics. Engine sequence values do depend on batches because they include document and changed-group records. The native log retains original accepted batches for exact internal reconstruction.</p>
 
 <h2 id="persistence">The document log is durable</h2>
@@ -74,6 +76,7 @@ with Database(":memory:") as db:
 <h2 id="regeneration">A checkpoint is a hint</h2>
 <p>Document indexes, source checkpoints, reduced states, results, and history can all be derived again. <code>checkpoint()</code> atomically writes their current snapshot, and clean close also checkpoints. Encoded snapshots are capped at 1 GiB; checkpoint errors are reported even on close, while accepted log data remains intact. A failed close releases its native handle. The engine checks cache format, log identity, exact module digest, and the verified log-prefix offset and digest before reuse.</p>
 <p>With a valid snapshot, reopen loads its prefix and executes Wasm only for uncached suffix batches. Missing, corrupt, or incompatible cache data causes reconstruction from the document log. The log still must be read and verified linearly on every reopen; a checkpoint avoids computation, not that validation read. Checksums detect corruption, rather than authenticate files against someone who can rewrite them.</p>
+<p>After a successful reconstruction, <code>stats()["cache"]["status"]</code> can still be <code>"missing"</code> or <code>"invalid"</code>: it describes how startup handled the disk cache. The in-memory view is ready, and <code>replay</code> reports the work performed. A later checkpoint or clean close writes a new cache. Cache byte counts describe a disk file, not the view's memory use; the <a href="api.html#maintenance">API reference lists each status</a>.</p>
 <pre data-run="python"><code>from foldlitedb import View
 
 view = View.bundled("metrics")
@@ -102,7 +105,7 @@ with Database("copy.fold", view) as copied:
 
 <h2 id="atomicity">Stable reads and generation boundaries</h2>
 <p>A snapshot cursor names a database generation, exact module, and committed prefix. Continue a query with both its cursor and after token; new documents do not change that snapshot. Changes carry resulting key states after the chosen cursor, coalesced per key within a batch. A page can split a batch's group updates; zero-emission documents still advance progress.</p>
-<p>A valid native checkpoint preserves generation and cursors across reopen. Explicit rebuild, a missing or invalid checkpoint requiring reconstruction, or a changed module starts a new generation and expires old cursors. A fresh browser worker also has a new identity. Obtain a new snapshot after reconstruction rather than transferring cursors.</p>
+<p>A valid native checkpoint preserves generation and cursors across reopen. Explicit rebuild, a missing or invalid checkpoint requiring reconstruction, or a changed module starts a new generation and expires old cursors. A fresh browser worker also has a new identity. On <code>CursorExpired</code>, obtain a fresh complete snapshot and replace the consumer's entire application state before following its new cursor. The <a href="api.html#change-consumer">persistent consumer example</a> shows stable snapshot pagination and this replacement branch.</p>
 <p>Row and document iterators release the engine between pages. No operation lock spans a yield into application code, although a persistent database retains its file-ownership lock until close. History is currently retained; there is no history compaction or reader-expiry policy.</p>
 
 <h2 id="browser">The same computation; browser memory</h2>
