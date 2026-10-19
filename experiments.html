@@ -103,6 +103,17 @@ with NativeDatabase("native.log", metrics, backend="log", workers=4) as db:
 <p>No OS page-cache eviction was performed. These small, two-repeat measurements do not establish large-history reopen cost, bounded memory, or production latency. The Python/native comparison also changes data layout and algorithms; worker-count comparisons within one native backend isolate parallelism more closely.</p>
 <p><a href="experimental-native-report.json">Download the complete NVMe/ext4 report</a> for every distribution, individual sample, latency, phase cost, and source hash. The separate tmpfs run is supplementary CPU-oriented evidence and is not used in these storage tables.</p>
 
+<h2 id="payload-probe">Payload size probe</h2>
+<p>A separate 30-trial NVMe/ext4 probe adds unused ASCII padding of 0, 1 KiB, or 16 KiB per document while preserving numeric map results. Each configuration uses 512 documents plus 8 live records, 64-document durable batches, 128 keys, and two repeats. Compare sizes within this probe; its batch size differs from the worker-scaling matrix.</p>
+<div class="table-wrap"><table><thead><tr><th scope="col">Padding / document</th><th scope="col">Python SQLite docs/s</th><th scope="col">Native SQLite, 1 worker</th><th scope="col">Native SQLite, 4 workers</th><th scope="col">Native log, 1 worker</th><th scope="col">Native log, 4 workers</th></tr></thead><tbody>
+<tr><th scope="row">0 B</th><td>5,031</td><td>38,219</td><td>39,102</td><td>41,660</td><td>40,202</td></tr>
+<tr><th scope="row">1 KiB</th><td>4,736</td><td>26,932</td><td>29,268</td><td>31,304</td><td>32,499</td></tr>
+<tr><th scope="row">16 KiB</th><td>3,296</td><td>4,884</td><td>4,883</td><td>6,324</td><td>6,936</td></tr>
+</tbody></table></div>
+<p>Actual encoded fixture sizes, including identities and live records, are 47,880, 587,120, 8,574,320 bytes respectively. At 16 KiB padding, median whole-process peak RSS for one worker is Python: 97.9 MiB, native SQLite: 58.6 MiB, native log: 54.9 MiB.</p>
+<p>Larger ignored payloads exercise JSON serialization, validation, copying, retained storage, and durability together; these timings do not isolate one cause. Peak RSS also includes fixture objects, encoded input, and the Python host. This small padding probe does not establish behavior for every nested document shape or high-fanout map.</p>
+<p><a href="experimental-payloads-report.json">Download the complete payload probe</a>. The original 156-trial results remain unchanged, with their measured runner hash and source commit preserved in the primary report; the new padding option is additive and defaults to zero.</p>
+
 <h2 id="measurements">Measure complete workloads</h2>
 <p>The existing deterministic benchmark measures document construction, mapping, numeric reduction, transactions, queries, reopening, and regeneration:</p>
 <pre><code>mkdir -p .benchmark-storage
@@ -124,6 +135,7 @@ python scripts/benchmark_database.py \
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#supported-path">The current path</a>
 <a href="#native-scope">A deliberately limited prototype</a>
 <a href="#measured-results">Measured worker scaling</a>
+<a href="#payload-probe">Payload size probe</a>
 <a href="#measurements">Measure complete workloads</a>
 <a href="#matrix">The comparison matrix</a>
 <a href="#correctness">Correctness before speedups</a></aside>
