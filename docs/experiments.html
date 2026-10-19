@@ -36,6 +36,9 @@ with NativeDatabase("native.log", metrics, backend="log", workers=4) as db:
 <h2 id="measured-results">Measured worker scaling</h2>
 {{performance}}
 
+<h2 id="payload-probe">Payload size probe</h2>
+{{payload_performance}}
+
 <h2 id="measurements">Measure complete workloads</h2>
 <p>The existing deterministic benchmark measures document construction, mapping, numeric reduction, transactions, queries, reopening, and regeneration:</p>
 <pre><code>mkdir -p .benchmark-storage

@@ -135,8 +135,11 @@ Final local verification includes 149 base Python tests (also against the instal
 wheel), 39 optional native-binding tests, six browser reducer tests, and separately
 built base/native distributions. The primary NVMe/ext4 report contains 156
 fresh-process trials with two repeats per configuration; matched fixture and
-result hashes agree. Nine additional storage-accounting probes cover both native
-backends and the Python reference. A separate tmpfs run is supplementary evidence.
+result hashes agree. A separate 30-trial NVMe/ext4 probe varies unused payload
+padding through zero, 1 KiB, and 16 KiB, recording actual encoded sizes and matched
+results; the original 156-trial runner provenance remains preserved. Nine additional
+storage-accounting probes cover both native backends and the Python reference.
+A separate tmpfs run is supplementary evidence.
 
 Only native document mapping/emission is parallel. Grouping and per-key reduction
 remain serial, expanded emissions are buffered, native indexes/history grow in

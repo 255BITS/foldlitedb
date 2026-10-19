@@ -1,5 +1,6 @@
 include LICENSE README.md DESIGN.md
 include reports/experimental-native-2026-10-19.json
+include reports/experimental-payloads-2026-10-19.json
 recursive-include reducers *.rs *.toml Cargo.lock *.md
 recursive-include scripts *.py
 recursive-include tests *.py

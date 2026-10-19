@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.metadata
+import itertools
 import json
 import math
 import os
@@ -52,7 +53,8 @@ def reference(spec, reducer):
     return View(spec.name, spec.version, mapping, reducer)
 
 
-def fixture(count, shape, keys, start=0):
+def fixture(count, shape, keys, start=0, payload_bytes=0):
+    padding = "x" * payload_bytes
     for position in range(start, start + count):
         if shape == "unique":
             key = position
@@ -62,8 +64,10 @@ def fixture(count, shape, keys, start=0):
             key = position % keys
         # Include cancellation and mixed magnitudes rather than only exact integer sums.
         values = [1e16, 1.0, -1e16, 1e-100, -3.25, 7.5, None, 2.0]
-        yield Document(f"document-{position}", {"key": key, "value": values[position % len(values)]},
-                       position, "benchmark")
+        payload = {"key": key, "value": values[position % len(values)]}
+        if payload_bytes:
+            payload["padding"] = padding
+        yield Document(f"document-{position}", payload, position, "benchmark")
 
 
 def encode_documents(documents):
@@ -91,9 +95,11 @@ def trial(configuration):
                       work=configuration["work"])
     engine = configuration["engine"]
     build_started = time.perf_counter()
-    retained = list(fixture(configuration["documents"], configuration["shape"], configuration["keys"]))
+    padding = configuration.get("payload_bytes", 0)
+    retained = list(fixture(configuration["documents"], configuration["shape"], configuration["keys"],
+                            payload_bytes=padding))
     suffix = list(fixture(configuration["live_documents"], configuration["shape"],
-                          configuration["keys"], start=len(retained)))
+                          configuration["keys"], start=len(retained), payload_bytes=padding))
     input_build_seconds = time.perf_counter() - build_started
     fixture_json = json.dumps(encode_documents(retained + suffix), sort_keys=True,
                               separators=(",", ":"), allow_nan=False)
@@ -189,6 +195,10 @@ def trial(configuration):
         return {
             **configuration,
             "fixture_sha256": hashlib.sha256(fixture_json.encode()).hexdigest(),
+            "fixture_json_bytes": len(fixture_json.encode("utf-8")),
+            "payload_json_bytes": sum(len(json.dumps(document.payload, sort_keys=True,
+                                                        separators=(",", ":"), allow_nan=False).encode("utf-8"))
+                                      for document in retained + suffix),
             "result_sha256": hashlib.sha256(row_json.encode()).hexdigest(),
             "result_rows": len(expected),
             "initial_result_rows": len(initial_rows),
@@ -234,6 +244,8 @@ def main():
     parser.add_argument("--maps", default="cheap,synthetic")
     parser.add_argument("--reducer", default="mean/v1")
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--payload-bytes", default="0",
+                        help="comma-separated sizes of an unused deterministic padding field; default 0 preserves existing fixtures")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--storage-root", type=Path,
                         default=ROOT / "experimental/engine/target/benchmarks",
@@ -261,9 +273,12 @@ def main():
     if source_wrapper.read_bytes() != Path(foldlitedb_experimental.__file__).read_bytes():
         raise RuntimeError("Installed native Python wrapper is stale; rebuild before measuring")
     workers = [int(value) for value in arguments.workers.split(",")]
+    payload_sizes = [int(value) for value in arguments.payload_bytes.split(",")]
     if min(arguments.documents, arguments.keys, arguments.batch_size, arguments.live_documents,
            arguments.repeats, *workers) < 1 or max(workers) > 64 or arguments.batch_size > 1024:
         parser.error("positive sizes, batch<=1024 and workers1..64 required")
+    if not payload_sizes or min(payload_sizes) < 0 or max(payload_sizes) > 1024 * 1024 - 1024:
+        parser.error("payload padding must be in 0..1047552 bytes; document and batch limits still apply")
     results = []
     for shape in arguments.shapes.split(","):
         if shape not in {"uniform", "hot", "unique"}:
@@ -274,7 +289,7 @@ def main():
             rounds = arguments.synthetic_work if map_name == "synthetic" else 0
             cases = [("python-sqlite", 1)] + [(backend, count) for backend in ["rust-sqlite", "rust-log"]
                                              for count in workers]
-            for repeat in range(arguments.repeats):
+            for payload_bytes, repeat in itertools.product(payload_sizes, range(arguments.repeats)):
                 expected = None
                 for engine, count in cases:
                     configuration = {
@@ -283,6 +298,7 @@ def main():
                         "shape": shape, "map": map_name, "work": rounds,
                         "reducer": arguments.reducer, "engine": engine, "workers": count,
                         "repeat": repeat,
+                        "payload_bytes": payload_bytes,
                         "storage_root": str(arguments.storage_root.resolve()),
                     }
                     started = time.perf_counter()
@@ -298,7 +314,7 @@ def main():
                     if identity != expected:
                         raise AssertionError(f"Result mismatch: {configuration}: {identity} != {expected}")
                     results.append(result)
-                    print(f"{shape}/{map_name} {engine} workers={count}: "
+                    print(f"{shape}/{map_name} padding={payload_bytes} {engine} workers={count}: "
                           f"{result['ingest_documents_per_second']:.0f} docs/s, "
                           f"{result['result_rows']} rows", flush=True)
                     # Preserve completed measurements even if a later trial fails.

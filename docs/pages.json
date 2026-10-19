@@ -2,5 +2,5 @@
   {"file": "index.html", "title": "Get started", "description": "Append JSON documents and keep map/reduce views current with Foldlite DB."},
   {"file": "api.html", "title": "Python API", "description": "Documents, atomic batches, views, reducers, snapshots, and change feeds."},
   {"file": "concepts.html", "title": "Replay and ordering", "description": "Document identity, source positions, regeneration, and versioned computation."},
-  {"file": "experiments.html", "title": "Native experiments", "description": "The experimental Rust engine, storage backends, and fair performance comparisons.", "benchmark_report": "reports/experimental-native-2026-10-19.json"}
+  {"file": "experiments.html", "title": "Native experiments", "description": "The experimental Rust engine, storage backends, and fair performance comparisons.", "benchmark_report": "reports/experimental-native-2026-10-19.json", "payload_report": "reports/experimental-payloads-2026-10-19.json"}
 ]

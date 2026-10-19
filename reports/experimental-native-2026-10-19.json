@@ -11207,6 +11207,16 @@
       "publication_sha256": "9cacf1312d2609ea1e6bf5eb6c1dcdb0653c753b4ea99fc6a87f8d7b731f7070",
       "remeasurement_required": false,
       "measured_sha256": "d0b45b7ba64e9d4db71d6053821a5fd349739db5517d26578e00427c2c01c1ce"
+    },
+    {
+      "path": "scripts/benchmark_experimental.py",
+      "change": "Add optional --payload-bytes fixture padding and actual fixture-size reporting; default padding is zero. A fixture-hash check confirms the original default documents are unchanged.",
+      "measured_sha256": "d80b0450357b1f04e011d8dfc7041019f7c9951ef34001fcf56dff7b4d544363",
+      "original_runner_source_commit": "6d350a6b0713072848ffaae853ef85dab6f2786c",
+      "publication_sha256": "675b7f472776a30d3b8fba5d78577f3849680b91de8f34b976d4afd6eecf07c6",
+      "focused_payload_report": "reports/experimental-payloads-2026-10-19.json",
+      "remeasurement_required": false
     }
-  ]
+  ],
+  "measurement_runner_source_commit": "6d350a6b0713072848ffaae853ef85dab6f2786c"
 }

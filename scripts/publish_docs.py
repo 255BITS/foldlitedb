@@ -97,10 +97,17 @@ def publish(site, repository, message):
     if current.get("build_type") != "legacy" or current.get("source") != {"branch": branch, "path": "/"}:
         command(["gh", "api", "--method", method, endpoint, "-f", "build_type=legacy",
                  "-f", f"source[branch]={branch}", "-f", "source[path]=/"])
-    queued = command(["gh", "api", "--method", "POST", endpoint + "/builds"], capture=True)
+    latest = subprocess.run(["gh", "api", endpoint + "/builds/latest"],
+                            text=True, capture_output=True)
+    if latest.returncode and "404" not in latest.stderr:
+        raise RuntimeError(latest.stderr.strip())
+    build = json.loads(latest.stdout) if latest.returncode == 0 else {}
+    if build.get("commit") != commit or build.get("status") not in ("queued", "building", "built"):
+        build = json.loads(command(["gh", "api", "--method", "POST", endpoint + "/builds"],
+                                   capture=True).stdout)
     pages = json.loads(command(["gh", "api", endpoint], capture=True).stdout)
     print(json.dumps({"commit": commit, "url": pages["html_url"],
-                      "build": json.loads(queued.stdout)}, indent=2))
+                      "build": build}, indent=2))
 
 
 if __name__ == "__main__":

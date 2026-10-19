@@ -235,6 +235,12 @@ end-to-end throughput relative to one native worker; cheap maps showed no
 consistent multicore benefit. SQLite and the custom log were close in this
 fixture. These local measurements do not establish production guarantees.
 
+A separate [30-trial payload probe](reports/experimental-payloads-2026-10-19.json)
+varies unused padding from zero to 1 KiB and 16 KiB per document. Larger payloads
+reduce throughput and increase whole-process memory across this small fixture;
+JSON, copying, retained storage, and durability costs change together. This does
+not isolate one cause or model every nested payload shape.
+
 The version is an initial implementation with HyperGAN as its first consumer.
 See [DESIGN.md](DESIGN.md) for the architecture and acceptance contract, and
 [reducers/core/README.md](reducers/core/README.md) for the reducer ABI and build.
