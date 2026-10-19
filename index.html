@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Append JSON documents and keep map/reduce views current with Foldlite DB.">
+  <meta name="color-scheme" content="light">
+  <title>Get started · Foldlite DB</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="Foldlite DB home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 5h22v7H12v6h12v7H5z" fill="currentColor"/><path d="m12 12 15-7v7z" fill="#81b697"/></svg>
+      <span>foldlite<span class="brand-db">db</span></span>
+    </a>
+    <span class="development-badge">Development preview</span>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  </header>
+  <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+    <form class="search" role="search" action="api.html">
+      <label for="doc-search">Search documentation</label>
+      <input id="doc-search" type="search" placeholder="Find an API or concept…" autocomplete="off" aria-controls="search-results">
+      <div id="search-results" class="search-results" aria-live="polite" hidden></div>
+    </form>
+    <p class="nav-label">Documentation</p>
+    <nav><a href="index.html" aria-current="page">Get started</a>
+<a href="api.html">Python API</a>
+<a href="concepts.html">Replay and ordering</a>
+<a href="experiments.html">Native experiments</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Regenerable.<br><span>Python API · shared Rust core</span></div>
+  </aside>
+  <div class="page-layout">
+    <main id="content" tabindex="-1"><p class="eyebrow">An embedded engine for realtime views</p>
+<h1 class="hero">Documents in.<br>Live views out.</h1>
+<p class="lead">Append JSON, map it into groups, and read the current result. Foldlite DB maintains versioned reductions in a local database you can regenerate.</p>
+<div class="hero-actions"><a class="button" href="#quickstart">Start with Python <span aria-hidden="true">↓</span></a><a class="button secondary" href="api.html">Explore the API</a></div>
+<div class="flow" aria-label="Documents are mapped into groups and reduced into live views"><div><strong>01 &nbsp; Append</strong><small>Any finite JSON value</small></div><span aria-hidden="true">→</span><div><strong>02 &nbsp; Map</strong><small>Emit a key and contribution</small></div><span aria-hidden="true">→</span><div><strong>03 &nbsp; Reduce</strong><small>Read the current group state</small></div></div>
+
+<div class="note preview"><p><strong>Unreleased development API.</strong> These pages describe the changes in the working development tree. The current default branch and published packages may not contain every API shown. Installation below assumes a checkout containing these changes.</p></div>
+
+<h2 id="install">Install in your checkout</h2>
+<p>Python 3.11 or newer is required. Install the optional numeric runtime to use the shared Rust/WASM reducers. The bundled WebAssembly artifact needs no Rust compiler at installation.</p>
+<pre><code>python -m pip install '.[reducers]'</code></pre>
+<p>The base package has no external runtime dependencies. Python <a href="api.html#ordered-fold">ordered folds</a> work without the numeric extra.</p>
+
+<h2 id="quickstart">A metric in a few lines</h2>
+<p>The map sees a document and emits a group key plus a value. <code>Mean()</code> keeps the count and mean current as documents arrive.</p>
+<pre data-run="python"><code>from foldlitedb import Database, Mean, View
+
+def measurements(document):
+    yield document.payload["metric"], document.payload["value"]
+
+metrics = View("metrics", "1", measurements, Mean())
+
+with Database("metrics.db") as db:
+    db.register(metrics)
+    documents = db.add_many([
+        {"metric": "loss", "value": 4},
+        {"metric": "loss", "value": 8},
+    ])
+    result = [(row.key, row.result) for row in db.rows("metrics")]
+    assert result == [("loss", {"count": 2, "value": 6.0})]</code></pre>
+<p>There are no required document names or positions. <code>add_many</code> returns the resolved documents in input order, including generated identities and source positions. Save those records outside the database if you need to regenerate it.</p>
+
+<h2 id="append-or-name">Append freely. Name when useful.</h2>
+<p>Use <code>add(payload)</code> for one JSON value. Every unnamed call appends a new document. Supply an optional unique name when identical retries should count once.</p>
+<pre data-run="python"><code>with Database("metrics.db") as db:
+    db.register(metrics)
+    saved = db.add({"metric": "loss", "value": 3}, id="measurement-3")
+    assert db.add(saved.payload, id="measurement-3") == saved
+    assert db.get("measurement-3") == saved</code></pre>
+<p>Documents are immutable: changing an existing name's contents raises <code>DocumentConflict</code>. Names are scoped to a source. For external logs, an explicit source and offset can supply the replay identity instead.</p>
+
+<h2 id="live-updates">Read once, follow changes</h2>
+<p><code>rows</code> handles ordinary reads with bounded snapshot pages. Use <code>query</code> when you also need a cursor for a change feed.</p>
+<pre data-run="python"><code>with Database("metrics.db") as db:
+    db.register(metrics)
+    snapshot = db.query("metrics")
+    fourth = db.add({"metric": "loss", "value": 1})
+    updates = db.changes("metrics", since=snapshot.cursor)
+    assert updates.rows[0].result == {"count": 4, "value": 4.0}</code></pre>
+<p>An append commits documents, checkpoints, view states, and change records together. Snapshot pages keep one committed prefix while new documents arrive.</p>
+
+<h2 id="where-next">Keep exploring</h2>
+<div class="cards"><a class="card" href="api.html"><strong>The Python API <span aria-hidden="true">↗</span></strong><span>Appends, batches, rows, reducers, snapshots, and explicit control.</span></a><a class="card" href="concepts.html"><strong>Replay and ordering <span aria-hidden="true">↗</span></strong><span>How identities, offsets, versions, and regeneration fit together.</span></a><a class="card" href="api.html#ordered-fold"><strong>Structured state <span aria-hidden="true">↗</span></strong><span>Track lifecycle state with a Python fold in ingestion order.</span></a><a class="card" href="experiments.html"><strong>Native experiments <span aria-hidden="true">↗</span></strong><span>Explore Rust execution and storage work with explicit limits.</span></a></div>
+</main>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#install">Install in your checkout</a>
+<a href="#quickstart">A metric in a few lines</a>
+<a href="#append-or-name">Append freely. Name when useful.</a>
+<a href="#live-updates">Read once, follow changes</a>
+<a href="#where-next">Keep exploring</a></aside>
+  </div>
+  <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>
+</body>
+</html>

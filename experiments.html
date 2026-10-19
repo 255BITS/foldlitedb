@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="The experimental Rust engine, storage backends, and fair performance comparisons.">
+  <meta name="color-scheme" content="light">
+  <title>Native experiments · Foldlite DB</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="Foldlite DB home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 5h22v7H12v6h12v7H5z" fill="currentColor"/><path d="m12 12 15-7v7z" fill="#81b697"/></svg>
+      <span>foldlite<span class="brand-db">db</span></span>
+    </a>
+    <span class="development-badge">Development preview</span>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  </header>
+  <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+    <form class="search" role="search" action="api.html">
+      <label for="doc-search">Search documentation</label>
+      <input id="doc-search" type="search" placeholder="Find an API or concept…" autocomplete="off" aria-controls="search-results">
+      <div id="search-results" class="search-results" aria-live="polite" hidden></div>
+    </form>
+    <p class="nav-label">Documentation</p>
+    <nav><a href="index.html">Get started</a>
+<a href="api.html">Python API</a>
+<a href="concepts.html">Replay and ordering</a>
+<a href="experiments.html" aria-current="page">Native experiments</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Regenerable.<br><span>Python API · shared Rust core</span></div>
+  </aside>
+  <div class="page-layout">
+    <main id="content" tabindex="-1"><p class="eyebrow">Engineering notes</p>
+<h1>Native experiments <span class="tag">Experimental</span></h1>
+<p class="lead">Explore execution, data layout, and storage costs while preserving a clear reference contract. The Python API remains the supported starting point.</p>
+
+<h2 id="supported-path">The current path</h2>
+<p>The Python database uses SQLite for document identity, ordered retention, state, history, and checkpoints. Trusted Python maps and ordered folds run in Python; bundled numeric reducers run the shared Rust core through WebAssembly.</p>
+<p>The unreleased convenience API changes how callers append and read. It does not silently select a new backend or promise parallel callback execution.</p>
+
+<h2 id="native-scope">A deliberately limited prototype</h2>
+<p>The experimental engine work targets native Rust execution with optional Python bindings, using the same reducer core across SQLite and a durable custom log. Its initial view contract is a single declarative numeric view with field mapping, rather than arbitrary Python maps or ordered folds.</p>
+<div class="note"><p><strong>Separate experiment.</strong> Backend compatibility, durability, worker ordering, and numerical behavior need explicit verification. Prototype throughput is not a performance promise for the full Python database API.</p></div>
+<p>Read the repository's experimental source and its current tests before depending on it. Build instructions and measured comparisons will be tied to the reviewed source revision when the prototype is ready.</p>
+
+<h2 id="measurements">Measure complete workloads</h2>
+<p>The existing deterministic benchmark measures document construction, mapping, numeric reduction, transactions, queries, reopening, and regeneration:</p>
+<pre><code>python scripts/benchmark_database.py \
+    --documents 100000 --keys 128 --batch-size 1024 \
+    --live-documents 100 --output /tmp/foldlite-database.json</code></pre>
+<p>Its initial ingestion includes lazy runtime compilation. Live operations reuse that instance; same-process reopening and regeneration reuse the compiled module but create fresh instances. Its “rebuild” timing means registering before ingestion, not rebuilding a view over an already retained history.</p>
+<p>Compare native and WASM execution with storage held constant, then compare storage with computation held constant. Report startup separately from warmed operation and match the durable acknowledgment boundary.</p>
+
+<h2 id="matrix">The comparison matrix</h2>
+<div class="table-wrap"><table><thead><tr><th>Dimension</th><th>Cases to distinguish</th></tr></thead><tbody><tr><td>Data</td><td>Low/high key cardinality; uniform, hot-key, and clustered distributions; small and nested payloads.</td></tr><tr><td>Computation</td><td>Count, envelope, sum, mean; cheap/expensive maps; zero, one, and many emissions.</td></tr><tr><td>Execution</td><td>Batch sizes; worker counts; native/WASM boundaries; queue and merge costs.</td></tr><tr><td>Storage</td><td>Durable SQLite and custom log with equivalent acknowledgment semantics; memory-only results reported separately.</td></tr><tr><td>Lifecycle</td><td>Historical registration, live reads, change feeds, restart, suffix catch-up, and regeneration.</td></tr><tr><td>Evidence</td><td>Throughput, latency distributions, total process memory, disk/log size, runtime versions, fixture hash, and numerical agreement.</td></tr></tbody></table></div>
+
+<h2 id="correctness">Correctness before speedups</h2>
+<ul><li>Out-of-order worker completion must preserve document and emission order where required.</li><li>Duplicate, overlapping, missing, and retried worker ranges must not double-count or advance progress past unfinished work.</li><li>Failure, cancellation, process exit, and torn writes must preserve the promised commit boundary.</li><li>Snapshot pages and change feeds must expose committed prefixes and retain explicit cursor expiry.</li><li>Count and envelope require exact agreement; sum and mean need a declared numerical contract and deterministic merge plan.</li><li>Slow tasks and high-cardinality keys must not create unbounded queues or memory growth.</li></ul>
+<p>Parallel key reduction and parallel mapping are different capabilities. Python ordered folds cannot use arbitrary partial-state merging. Any future fast path must state the semantics it supports.</p>
+</main>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#supported-path">The current path</a>
+<a href="#native-scope">A deliberately limited prototype</a>
+<a href="#measurements">Measure complete workloads</a>
+<a href="#matrix">The comparison matrix</a>
+<a href="#correctness">Correctness before speedups</a></aside>
+  </div>
+  <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>
+</body>
+</html>
