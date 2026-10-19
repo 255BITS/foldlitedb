@@ -1,0 +1,36 @@
+name: Experimental native engine
+
+on: [workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.90.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install native build tools and reference engine
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          python -m pip install '.[reducers,test]' 'maturin>=1.9,<2'
+      - name: Test the shared native core and both storage backends
+        run: cargo test --locked --manifest-path experimental/engine/Cargo.toml
+      - name: Build and install the optional native wheel
+        run: |
+          maturin build --release --locked --manifest-path experimental/python/Cargo.toml --out native-wheels
+          python -m pip install --no-deps native-wheels/*.whl
+          python -c 'from foldlitedb_experimental import NativeDatabase, NativeView'
+      - name: Verify installed native bindings and supported-subset conformance
+        run: python -m pytest experimental/python/tests
+      - name: Verify the comparable end-to-end benchmark
+        run: python scripts/benchmark_experimental.py --documents 128 --batch-size 64 --live-documents 2 --workers 1,2 --maps cheap --shapes uniform --output native-benchmark-smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-benchmark-smoke
+          path: native-benchmark-smoke.json
