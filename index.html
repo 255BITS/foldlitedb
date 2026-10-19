@@ -18,7 +18,7 @@
       <span>foldlite<span class="brand-db">db</span></span>
     </a>
     <span class="development-badge">Development preview</span>
-    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
     <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
   </header>
   <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
@@ -41,15 +41,18 @@
 <div class="hero-actions"><a class="button" href="#quickstart">Start with Python <span aria-hidden="true">↓</span></a><a class="button secondary" href="api.html">Explore the API</a></div>
 <div class="flow" aria-label="Documents are mapped into groups and reduced into live views"><div><strong>01 &nbsp; Append</strong><small>Any finite JSON value</small></div><span aria-hidden="true">→</span><div><strong>02 &nbsp; Map</strong><small>Emit a key and contribution</small></div><span aria-hidden="true">→</span><div><strong>03 &nbsp; Reduce</strong><small>Read the current group state</small></div></div>
 
-<div class="note preview"><p><strong>Unreleased development API.</strong> These pages describe the changes in the working development tree. The current default branch and published packages may not contain every API shown. Installation below assumes a checkout containing these changes.</p></div>
+<div class="note preview"><p><strong>Unreleased development API.</strong> Use the reviewed source branch below. The default branch and published packages may not contain every API shown.</p></div>
 
-<h2 id="install">Install in your checkout</h2>
+<h2 id="install">Install the development source</h2>
 <p>Python 3.11 or newer is required. Install the optional numeric runtime to use the shared Rust/WASM reducers. The bundled WebAssembly artifact needs no Rust compiler at installation.</p>
-<pre><code>python -m pip install '.[reducers]'</code></pre>
+<pre><code>git clone --branch api-native-prototype-2026-10-19 \
+    https://github.com/255BITS/foldlitedb.git
+cd foldlitedb
+python -m pip install '.[reducers]'</code></pre>
 <p>The base package has no external runtime dependencies. Python <a href="api.html#ordered-fold">ordered folds</a> work without the numeric extra.</p>
 
 <h2 id="quickstart">A metric in a few lines</h2>
-<p>The map sees a document and emits a group key plus a value. <code>Mean()</code> keeps the count and mean current as documents arrive.</p>
+<p>The map sees a document and emits a group key plus a value. <code>Mean()</code> keeps the count and mean current as documents arrive. These examples start with a fresh <code>metrics.db</code> file.</p>
 <pre data-run="python"><code>from foldlitedb import Database, Mean, View
 
 def measurements(document):
@@ -89,7 +92,7 @@ with Database("metrics.db") as db:
 <h2 id="where-next">Keep exploring</h2>
 <div class="cards"><a class="card" href="api.html"><strong>The Python API <span aria-hidden="true">↗</span></strong><span>Appends, batches, rows, reducers, snapshots, and explicit control.</span></a><a class="card" href="concepts.html"><strong>Replay and ordering <span aria-hidden="true">↗</span></strong><span>How identities, offsets, versions, and regeneration fit together.</span></a><a class="card" href="api.html#ordered-fold"><strong>Structured state <span aria-hidden="true">↗</span></strong><span>Track lifecycle state with a Python fold in ingestion order.</span></a><a class="card" href="experiments.html"><strong>Native experiments <span aria-hidden="true">↗</span></strong><span>Explore Rust execution and storage work with explicit limits.</span></a></div>
 </main>
-    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#install">Install in your checkout</a>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#install">Install the development source</a>
 <a href="#quickstart">A metric in a few lines</a>
 <a href="#append-or-name">Append freely. Name when useful.</a>
 <a href="#live-updates">Read once, follow changes</a>

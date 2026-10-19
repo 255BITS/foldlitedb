@@ -18,7 +18,7 @@
       <span>foldlite<span class="brand-db">db</span></span>
     </a>
     <span class="development-badge">Development preview</span>
-    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
     <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
   </header>
   <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
@@ -44,17 +44,75 @@
 <p>The unreleased convenience API changes how callers append and read. It does not silently select a new backend or promise parallel callback execution.</p>
 
 <h2 id="native-scope">A deliberately limited prototype</h2>
-<p>The experimental engine work targets native Rust execution with optional Python bindings, using the same reducer core across SQLite and a durable custom log. Its initial view contract is a single declarative numeric view with field mapping, rather than arbitrary Python maps or ordered folds.</p>
+<p>The experimental engine runs native Rust with optional Python bindings, using the same reducer core across SQLite and a durable custom log. Its view contract is a single declarative numeric view over top-level fields, rather than arbitrary Python maps or ordered folds.</p>
 <div class="note"><p><strong>Separate experiment.</strong> Backend compatibility, durability, worker ordering, and numerical behavior need explicit verification. Prototype throughput is not a performance promise for the full Python database API.</p></div>
-<p>Read the repository's experimental source and its current tests before depending on it. Build instructions and measured comparisons will be tied to the reviewed source revision when the prototype is ready.</p>
+<p>Install the base development checkout first, then build the optional native package separately. This step requires a Rust toolchain; the ordinary Python/WASM installation does not.</p>
+<pre><code>python -m pip install '.[reducers]'
+python -m pip install ./experimental/python</code></pre>
+<pre data-run="native-python"><code>from foldlitedb_experimental import NativeDatabase, NativeView
+
+metrics = NativeView("metrics", "metric", "value", reducer="mean/v1")
+with NativeDatabase("native.log", metrics, backend="log", workers=4) as db:
+    retained = db.add_many([
+        {"metric": "loss", "value": 4},
+        {"metric": "loss", "value": 8},
+    ])
+    assert list(db.rows())[0].result == {"count": 2, "value": 6.0}
+
+with NativeDatabase("native.log", metrics, backend="log", workers=4) as db:
+    assert db.ingest(retained).replayed == 2
+    snapshot = db.query()
+    db.add({"metric": "loss", "value": 3})
+    assert db.changes(since=snapshot.cursor).rows[0].result == {
+        "count": 3, "value": 5.0,
+    }</code></pre>
+<p>Choose <code>backend="sqlite"</code> for the experimental SQLite journal. The native query methods omit a view name because a database has one view. <code>NativeView</code> also accepts a version, synthetic map-work amount, and emission count for controlled experiments.</p>
+<h3 id="prototype-limits">Current limits</h3>
+<ul><li>Only numeric field projections and the mean, sum, count, and envelope reducers are supported. Python callbacks, ordered folds, multiple views, in-place view rebuilds, and compaction are outside this prototype.</li><li>Rust document mapping and emission use 1–64 workers. Grouping and per-key reduction currently run serially and preserve contribution order. The default worker count follows available CPUs, capped at 64.</li><li>The expanded batch of emissions is buffered before reduction. Up to 1024 documents with 1024 emissions each can require substantial memory; streaming backpressure and compact worker shards are not implemented.</li><li>Both backends append commit records and maintain in-memory indexes. Reopening replays the full journal; memory and retained history grow with data.</li><li>Both backends hold an exclusive process lock. This is not the production Python database's concurrent-reader deployment model.</li><li>The experimental SQLite backend uses a journal-plus-memory layout, so storage comparisons do not isolate SQLite library overhead from all data-layout differences.</li><li>Float-valued grouping keys, including floats nested in structured keys, use deterministic Rust JSON ordering that can differ from Python canonical JSON ordering because exponent formatting differs. Grouping and exact lookup still work; universal cross-engine row-order parity is not promised.</li></ul>
+
+<h2 id="measured-results">Measured worker scaling</h2>
+<p>Local medians from 156 fresh-process trials, with 2 repeats per configuration. The illustrated uniform workload has 4,096 documents, 128 keys, 512-document durable batches, and 8 live updates using <code>mean/v1</code>. The host exposes 24 logical CPUs; storage is <code>ext4 / /dev/mapper/nvme4tb</code>.</p>
+<p>Ingestion timings exclude numeric runtime warm-up and include the same batch boundaries and durable acknowledgments. Within each matched workload, fixture and result hashes agree across engines and worker counts.</p>
+<h3>Cheap field mapping</h3>
+<div class="table-wrap"><table><thead><tr><th scope="col">Workers</th><th scope="col">Native SQLite docs/s</th><th scope="col">vs. 1 worker</th><th scope="col">Native log docs/s</th><th scope="col">vs. 1 worker</th></tr></thead><tbody>
+<tr><th scope="row">1</th><td>71,582</td><td>1.00×</td><td>72,002</td><td>1.00×</td></tr>
+<tr><th scope="row">2</th><td>72,838</td><td>1.02×</td><td>74,964</td><td>1.04×</td></tr>
+<tr><th scope="row">4</th><td>70,102</td><td>0.98×</td><td>73,277</td><td>1.02×</td></tr>
+<tr><th scope="row">8</th><td>73,162</td><td>1.02×</td><td>73,858</td><td>1.03×</td></tr>
+<tr><th scope="row">12</th><td>76,799</td><td>1.07×</td><td>75,263</td><td>1.05×</td></tr>
+<tr><th scope="row">24</th><td>68,904</td><td>0.96×</td><td>75,437</td><td>1.05×</td></tr>
+</tbody></table></div>
+<h3>Synthetic CPU-heavy mapping</h3>
+<p>The artificial map performs 10,000 integer-mixing rounds per document. This measures available map parallelism, not an application speed guarantee.</p>
+<div class="table-wrap"><table><thead><tr><th scope="col">Workers</th><th scope="col">Native SQLite docs/s</th><th scope="col">vs. 1 worker</th><th scope="col">Native log docs/s</th><th scope="col">vs. 1 worker</th></tr></thead><tbody>
+<tr><th scope="row">1</th><td>33,543</td><td>1.00×</td><td>32,192</td><td>1.00×</td></tr>
+<tr><th scope="row">2</th><td>44,420</td><td>1.32×</td><td>46,593</td><td>1.45×</td></tr>
+<tr><th scope="row">4</th><td>54,858</td><td>1.64×</td><td>57,267</td><td>1.78×</td></tr>
+<tr><th scope="row">8</th><td>62,924</td><td>1.88×</td><td>66,470</td><td>2.06×</td></tr>
+<tr><th scope="row">12</th><td>66,808</td><td>1.99×</td><td>68,871</td><td>2.14×</td></tr>
+<tr><th scope="row">24</th><td>67,607</td><td>2.02×</td><td>67,426</td><td>2.09×</td></tr>
+</tbody></table></div>
+<p>Cheap maps show no consistent multicore benefit. The synthetic case improves end-to-end ingestion by roughly two times, while its map phase scales further. Serial grouping, reduction, serialization, and commit costs remain. SQLite and the custom log are close in this fixture; neither is a categorical winner.</p>
+<h3>Startup and memory remain part of the cost</h3>
+<p>These one-worker rows use the cheap uniform workload. Setup includes explicit numeric runtime warm-up plus database opening; whole-process peak memory includes the Python host. The native backends replay their full journal on reopening.</p>
+<div class="table-wrap"><table><thead><tr><th scope="col">Engine</th><th scope="col">Setup + warm-up</th><th scope="col">Reopen + full query</th><th scope="col">Peak RSS</th><th scope="col">Storage</th></tr></thead><tbody>
+<tr><th scope="row">Python / SQLite + WASM</th><td>67.22 ms</td><td>13.36 ms</td><td>82.2 MiB</td><td>668 KiB</td></tr>
+<tr><th scope="row">Native / SQLite</th><td>5.67 ms</td><td>8.37 ms</td><td>37.3 MiB</td><td>552 KiB</td></tr>
+<tr><th scope="row">Native / log</th><td>1.37 ms</td><td>9.45 ms</td><td>34.8 MiB</td><td>534 KiB</td></tr>
+</tbody></table></div>
+<p>No OS page-cache eviction was performed. These small, two-repeat measurements do not establish large-history reopen cost, bounded memory, or production latency. The Python/native comparison also changes data layout and algorithms; worker-count comparisons within one native backend isolate parallelism more closely.</p>
+<p><a href="experimental-native-report.json">Download the complete NVMe/ext4 report</a> for every distribution, individual sample, latency, phase cost, and source hash. The separate tmpfs run is supplementary CPU-oriented evidence and is not used in these storage tables.</p>
 
 <h2 id="measurements">Measure complete workloads</h2>
 <p>The existing deterministic benchmark measures document construction, mapping, numeric reduction, transactions, queries, reopening, and regeneration:</p>
-<pre><code>python scripts/benchmark_database.py \
+<pre><code>mkdir -p .benchmark-storage
+python scripts/benchmark_database.py \
     --documents 100000 --keys 128 --batch-size 1024 \
-    --live-documents 100 --output /tmp/foldlite-database.json</code></pre>
+    --live-documents 100 --storage-root .benchmark-storage \
+    --output /tmp/foldlite-database.json</code></pre>
 <p>Its initial ingestion includes lazy runtime compilation. Live operations reuse that instance; same-process reopening and regeneration reuse the compiled module but create fresh instances. Its “rebuild” timing means registering before ingestion, not rebuilding a view over an already retained history.</p>
 <p>Compare native and WASM execution with storage held constant, then compare storage with computation held constant. Report startup separately from warmed operation and match the durable acknowledgment boundary.</p>
+<p>Choose the filesystem you mean to measure explicitly: temporary directories can be backed by memory. Keep tmpfs results separate from measurements on a persistent storage device.</p>
 
 <h2 id="matrix">The comparison matrix</h2>
 <div class="table-wrap"><table><thead><tr><th>Dimension</th><th>Cases to distinguish</th></tr></thead><tbody><tr><td>Data</td><td>Low/high key cardinality; uniform, hot-key, and clustered distributions; small and nested payloads.</td></tr><tr><td>Computation</td><td>Count, envelope, sum, mean; cheap/expensive maps; zero, one, and many emissions.</td></tr><tr><td>Execution</td><td>Batch sizes; worker counts; native/WASM boundaries; queue and merge costs.</td></tr><tr><td>Storage</td><td>Durable SQLite and custom log with equivalent acknowledgment semantics; memory-only results reported separately.</td></tr><tr><td>Lifecycle</td><td>Historical registration, live reads, change feeds, restart, suffix catch-up, and regeneration.</td></tr><tr><td>Evidence</td><td>Throughput, latency distributions, total process memory, disk/log size, runtime versions, fixture hash, and numerical agreement.</td></tr></tbody></table></div>
@@ -65,6 +123,7 @@
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#supported-path">The current path</a>
 <a href="#native-scope">A deliberately limited prototype</a>
+<a href="#measured-results">Measured worker scaling</a>
 <a href="#measurements">Measure complete workloads</a>
 <a href="#matrix">The comparison matrix</a>
 <a href="#correctness">Correctness before speedups</a></aside>

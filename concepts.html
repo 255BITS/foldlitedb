@@ -18,7 +18,7 @@
       <span>foldlite<span class="brand-db">db</span></span>
     </a>
     <span class="development-badge">Development preview</span>
-    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
     <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
   </header>
   <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
@@ -94,6 +94,7 @@ with Database("rebuilt.db") as rebuilt:
 <h2 id="numerical-contract">Numerical reproducibility</h2>
 <p>Count and envelope states have exact merge contracts within their input bounds. Floating-point sum and mean use non-associative arithmetic: arbitrary merge trees need not produce identical bits.</p>
 <p>Native and WASM execution use the same Rust mathematical core. Preserve the declared order and partition plan when exact cross-runtime agreement matters. Do not merge finalized means; merge their compatible states with disjoint coverage.</p>
+<p>The JSON protocol preserves large finite floating-point states when they round trip through serialization. A bundled reducer update changes its module identity; compatible applications rebuild affected cached views and expire their old cursors through the normal view-version rules.</p>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#identity">Names are optional</a>
 <a href="#positions">Positions track a source</a>
