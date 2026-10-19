@@ -1,0 +1,55 @@
+{
+  "kind": "before/after shared numeric JSON transport diagnostic",
+  "request": {
+    "op": "add",
+    "state": {
+      "reducer": "mean/v1",
+      "version": 1,
+      "count": 12,
+      "sum": 1.2000000000042133e+17
+    },
+    "values": []
+  },
+  "wasm_response": {
+    "count": 12,
+    "reducer": "mean/v1",
+    "sum": 1.2000000000042131e+17,
+    "version": 1
+  },
+  "existing_native_protocol_response": {
+    "ok": {
+      "count": 12,
+      "reducer": "mean/v1",
+      "sum": 1.2000000000042131e+17,
+      "version": 1
+    }
+  },
+  "expected_noop_sum": 1.2000000000042133e+17,
+  "wasm_noop_sum": 1.2000000000042131e+17,
+  "sum_delta": -16.0,
+  "input_float_hex": "0x1.aa535d3d126ddp+56",
+  "output_float_hex": "0x1.aa535d3d126dcp+56",
+  "native_protocol_agrees_with_wasm": true,
+  "wasm_module_sha256": "864115d9bb62750c69b26313573764ced77bcc7cc7439f62b1b5d516b33da148",
+  "python": "3.14.8",
+  "note": "Before/after diagnostic of a shared JSON float parser defect. float_roundtrip now preserves the zero-contribution state, and the bundled module SHA invalidates incompatible cached view state.",
+  "fixed": {
+    "wasm_response": {
+      "count": 12,
+      "reducer": "mean/v1",
+      "sum": 1.2000000000042133e+17,
+      "version": 1
+    },
+    "native_protocol_response": {
+      "ok": {
+        "count": 12,
+        "reducer": "mean/v1",
+        "sum": 1.2000000000042133e+17,
+        "version": 1
+      }
+    },
+    "noop_sum_preserved": true,
+    "wasm_module_sha256": "9dd46363bff51a768c86613f4eb7b3c74d64f748e759f2ada7acc77d478e7a90",
+    "change": "Enable serde_json float_roundtrip in shared Rust core; rebuild bundled WASM and manifest."
+  }
+}

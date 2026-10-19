@@ -13,7 +13,7 @@ import json
 import math
 import sqlite3
 import threading
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 import uuid
 
 
@@ -85,6 +85,7 @@ def _untoken(value: str) -> Any:
 class Document:
     """An immutable source record; IDs and increasing positions are source scoped.
 
+    :meth:`Database.add` assigns either value when it is omitted by the caller.
     Positions may have gaps, for example byte offsets or a filtered upstream log.
     The database preserves ingestion order across sources for ordered folds.
     """
@@ -159,6 +160,34 @@ class RustReducer:
 
     def finalize(self, state):
         return self.runtime.finalize(state)
+
+
+class Mean(RustReducer):
+    """The bundled mean reducer, with the same state and adapter as mean/v1."""
+
+    def __init__(self, *, runtime=None, positioned: bool = False):
+        super().__init__("mean/v1", runtime=runtime, positioned=positioned)
+
+
+class Sum(RustReducer):
+    """The bundled sum reducer, with the same state and adapter as sum/v1."""
+
+    def __init__(self, *, runtime=None, positioned: bool = False):
+        super().__init__("sum/v1", runtime=runtime, positioned=positioned)
+
+
+class Count(RustReducer):
+    """The bundled non-null count reducer, using the count/v1 adapter."""
+
+    def __init__(self, *, runtime=None, positioned: bool = False):
+        super().__init__("count/v1", runtime=runtime, positioned=positioned)
+
+
+class Envelope(RustReducer):
+    """The bundled first/min/max/last reducer, using the envelope/v1 adapter."""
+
+    def __init__(self, *, runtime=None, positioned: bool = False):
+        super().__init__("envelope/v1", runtime=runtime, positioned=positioned)
 
 
 class OrderedFold:
@@ -525,6 +554,46 @@ class Database:
                 self._connection.execute("ROLLBACK")
                 raise
 
+    def add(self, payload: Any, *, id: str | None = None, source: str = "default",
+            position: int | None = None) -> Document:
+        """Append JSON and return its resolved identity, position and copied payload.
+
+        An omitted ID is generated, and an omitted position follows the source's
+        checkpoint. A supplied ID or source position makes an identical retry
+        idempotent; reusing either with changed contents raises DocumentConflict.
+        Save the returned Document to preserve generated metadata when rebuilding.
+        """
+        if id is not None:
+            _identity(id, "document ID")
+        _identity(source, "document source")
+        if position is not None and (type(position) is not int or not 0 <= position <= MAX_POSITION):
+            raise DatabaseError("Document position must be a nonnegative safe integer")
+        encoded = self._encode(payload, "document payload")
+        return self._ingest_encoded([(source, id, position, encoded)], return_documents=True)[0]
+
+    def add_many(self, payloads: Iterable[Any], *, source: str = "default") -> tuple[Document, ...]:
+        """Append one bounded atomic batch of JSON payloads and return its documents.
+
+        Each iterable member is one payload, including JSON arrays. All documents
+        receive generated IDs and increasing source positions. A repeated call
+        appends new documents; use ingest with retained Documents for replay.
+        """
+        _identity(source, "document source")
+        encoded = []
+        byte_count = 0
+        source_bytes = len(source.encode("utf-8"))
+        for index, payload in enumerate(payloads):
+            if index >= self.max_batch:
+                raise DatabaseError("Batch exceeds max_batch")
+            payload = self._encode(payload, "document payload")
+            # Generated UUID hex IDs use 32 ASCII bytes. Bound the eager input
+            # before allocating identities or opening the transaction.
+            byte_count += len(payload.encode("utf-8")) + source_bytes + 32
+            if byte_count > self.max_batch_bytes:
+                raise DatabaseError("Batch exceeds max_batch_bytes")
+            encoded.append((source, None, None, payload))
+        return self._ingest_encoded(encoded, return_documents=True)
+
     def ingest(self, documents: Iterable[Document]) -> IngestResult:
         """Atomically ingest one bounded batch; replay must match ID, position and payload.
 
@@ -547,27 +616,57 @@ class Database:
             if byte_count > self.max_batch_bytes:
                 raise DatabaseError("Batch exceeds max_batch_bytes")
             encoded.append((document.source, document.id, document.position, payload))
+        return self._ingest_encoded(encoded)
+
+    def _ingest_encoded(self, encoded, *, return_documents=False):
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 inserted = replayed = 0
+                byte_count = 0
+                resolved = []
                 epoch = self._connection.execute("SELECT value FROM metadata WHERE key='epoch'").fetchone()[0]
                 if epoch != self.epoch:
                     raise CursorExpired("The database was reset; reopen it")
                 for source, identifier, position, payload in encoded:
-                    previous = self._connection.execute("SELECT position,payload FROM documents WHERE source=? AND id=?",
-                                                        (source, identifier)).fetchone()
+                    previous = None
+                    if identifier is not None:
+                        previous = self._connection.execute(
+                            "SELECT position,payload FROM documents WHERE source=? AND id=?",
+                            (source, identifier)).fetchone()
+                    elif position is not None:
+                        at_position = self._connection.execute(
+                            "SELECT id,payload FROM documents WHERE source=? AND position=?",
+                            (source, position)).fetchone()
+                        if at_position:
+                            identifier = at_position[0]
+                            previous = (position, at_position[1])
                     if previous:
-                        if previous != (position, payload):
+                        if previous[1] != payload or (position is not None and previous[0] != position):
                             raise DocumentConflict(f"Document {source!r}/{identifier!r} changed")
+                        position = previous[0]
                         replayed += 1
+                    else:
+                        if identifier is None:
+                            identifier = uuid.uuid4().hex
+                        if position is not None and self._connection.execute(
+                                "SELECT 1 FROM documents WHERE source=? AND position=?", (source, position)).fetchone():
+                            raise DocumentConflict(f"Source {source!r} position {position} already has a different document")
+                        checkpoint = self._connection.execute(
+                            "SELECT position FROM sources WHERE source=?", (source,)).fetchone()
+                        if position is None:
+                            position = checkpoint[0] + 1 if checkpoint else 0
+                            if position > MAX_POSITION:
+                                raise DatabaseError("Document position must be a nonnegative safe integer")
+                        elif checkpoint and position <= checkpoint[0]:
+                            raise SourceOrderError(f"New document at {source!r}:{position} is behind checkpoint {checkpoint[0]}")
+                    byte_count += len(payload.encode("utf-8")) + len(identifier.encode()) + len(source.encode())
+                    if byte_count > self.max_batch_bytes:
+                        raise DatabaseError("Batch exceeds max_batch_bytes")
+                    if return_documents:
+                        resolved.append(Document(identifier, json.loads(payload), position, source))
+                    if previous:
                         continue
-                    if self._connection.execute("SELECT 1 FROM documents WHERE source=? AND position=?",
-                                                (source, position)).fetchone():
-                        raise DocumentConflict(f"Source {source!r} position {position} already has a different document")
-                    checkpoint = self._connection.execute("SELECT position FROM sources WHERE source=?", (source,)).fetchone()
-                    if checkpoint and position <= checkpoint[0]:
-                        raise SourceOrderError(f"New document at {source!r}:{position} is behind checkpoint {checkpoint[0]}")
                     self._connection.execute("INSERT INTO documents(source,id,position,payload) VALUES(?,?,?,?)",
                                              (source, identifier, position, payload))
                     self._connection.execute("INSERT INTO sources VALUES(?,?) ON CONFLICT(source) DO UPDATE SET position=excluded.position",
@@ -578,6 +677,8 @@ class Database:
                     view, row = self._view(name)
                     self._catch_up(view, row[1], head)
                 self._connection.execute("COMMIT")
+                if return_documents:
+                    return tuple(resolved)
                 return IngestResult(inserted, replayed, head)
             except BaseException:
                 self._connection.execute("ROLLBACK")
@@ -679,6 +780,23 @@ class Database:
             except BaseException:
                 self._connection.execute("ROLLBACK")
                 raise
+
+    def rows(self, name: str, *, key=_MISSING, limit: int = 100) -> Iterator[Row]:
+        """Iterate one stable snapshot in bounded pages without retaining a transaction.
+
+        The first iteration pins the snapshot; limit controls the page size.
+        Normal cursor expiry rules apply if history is compacted or the view is
+        rebuilt while iteration is paused.
+        """
+        if key is not _MISSING:
+            key = json.loads(self._encode_key(key))
+        page = self.query(name, key=key, limit=limit)
+        cursor = page.cursor
+        while True:
+            yield from page.rows
+            if page.complete:
+                return
+            page = self.query(name, key=key, limit=limit, cursor=cursor, after=page.after)
 
     def changes(self, name: str, *, since: str, limit: int = 100) -> ChangePage:
         """Poll bounded committed key postimages after a snapshot/change cursor.

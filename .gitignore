@@ -6,6 +6,7 @@ __pycache__/
 build/
 dist/
 target/
+_site/
 *.db
 *.db-shm
 *.db-wal

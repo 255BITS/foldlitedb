@@ -49,3 +49,55 @@ pub fn execute_json(bytes: &[u8]) -> Vec<u8> {
     };
     serde_json::to_vec(&response).expect("bounded serializable response")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(value: Value) -> Value {
+        let response = execute_json(&serde_json::to_vec(&value).unwrap());
+        serde_json::from_slice::<Value>(&response).unwrap()["ok"].clone()
+    }
+
+    #[test]
+    fn empty_add_preserves_every_bit_of_serialized_scalar_state() {
+        let sum = 1.2000000000042133e17_f64;
+        for reducer in ["mean/v1", "sum/v1"] {
+            let state = json!({"reducer":reducer,"version":1,"count":12,"sum":sum});
+            let result = request(json!({"op":"add","state":state,"values":[]}));
+            assert_eq!(result["sum"].as_f64().unwrap().to_bits(), sum.to_bits());
+            assert_eq!(result["count"], 12);
+        }
+    }
+
+    #[test]
+    fn serialized_batches_preserve_ordered_mixed_magnitude_addition() {
+        let initial = 1.2000000000042133e17_f64;
+        let values = [
+            1.0000000000016772e16_f64,
+            1.0000000000030386e16,
+            1.0000000000022584e16,
+            1.0000000000001892e16,
+            -1e17,
+            1.0,
+            1e-200,
+            -1.0,
+        ];
+        for reducer in ["mean/v1", "sum/v1"] {
+            for batch_size in [1, 4, values.len()] {
+                let mut state = json!({"reducer":reducer,"version":1,"count":12,"sum":initial});
+                let mut expected = initial;
+                for (index, batch) in values.chunks(batch_size).enumerate() {
+                    let contributions: Vec<_> = batch.iter().enumerate().map(|(ordinal,value)| {
+                        json!({"value":value,"position":[index * batch_size + ordinal,"record"]})
+                    }).collect();
+                    state = request(json!({"op":"add","state":state,"values":contributions}));
+                    for value in batch {
+                        expected += value;
+                    }
+                    assert_eq!(state["sum"].as_f64().unwrap().to_bits(), expected.to_bits());
+                }
+            }
+        }
+    }
+}

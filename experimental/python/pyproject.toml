@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "foldlitedb-experimental"
+version = "0.1.0"
+description = "Experimental native numeric projection engine for Foldlite DB"
+requires-python = ">=3.11"
+dependencies = ["foldlitedb>=0.1.0"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "foldlitedb_experimental._native"
+bindings = "pyo3"

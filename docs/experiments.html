@@ -1,0 +1,58 @@
+<p class="eyebrow">Engineering notes</p>
+<h1>Native experiments <span class="tag">Experimental</span></h1>
+<p class="lead">Explore execution, data layout, and storage costs while preserving a clear reference contract. The Python API remains the supported starting point.</p>
+
+<h2 id="supported-path">The current path</h2>
+<p>The Python database uses SQLite for document identity, ordered retention, state, history, and checkpoints. Trusted Python maps and ordered folds run in Python; bundled numeric reducers run the shared Rust core through WebAssembly.</p>
+<p>The unreleased convenience API changes how callers append and read. It does not silently select a new backend or promise parallel callback execution.</p>
+
+<h2 id="native-scope">A deliberately limited prototype</h2>
+<p>The experimental engine runs native Rust with optional Python bindings, using the same reducer core across SQLite and a durable custom log. Its view contract is a single declarative numeric view over top-level fields, rather than arbitrary Python maps or ordered folds.</p>
+<div class="note"><p><strong>Separate experiment.</strong> Backend compatibility, durability, worker ordering, and numerical behavior need explicit verification. Prototype throughput is not a performance promise for the full Python database API.</p></div>
+<p>Install the base development checkout first, then build the optional native package separately. This step requires a Rust toolchain; the ordinary Python/WASM installation does not.</p>
+<pre><code>python -m pip install '.[reducers]'
+python -m pip install ./experimental/python</code></pre>
+<pre data-run="native-python"><code>from foldlitedb_experimental import NativeDatabase, NativeView
+
+metrics = NativeView("metrics", "metric", "value", reducer="mean/v1")
+with NativeDatabase("native.log", metrics, backend="log", workers=4) as db:
+    retained = db.add_many([
+        {"metric": "loss", "value": 4},
+        {"metric": "loss", "value": 8},
+    ])
+    assert list(db.rows())[0].result == {"count": 2, "value": 6.0}
+
+with NativeDatabase("native.log", metrics, backend="log", workers=4) as db:
+    assert db.ingest(retained).replayed == 2
+    snapshot = db.query()
+    db.add({"metric": "loss", "value": 3})
+    assert db.changes(since=snapshot.cursor).rows[0].result == {
+        "count": 3, "value": 5.0,
+    }</code></pre>
+<p>Choose <code>backend="sqlite"</code> for the experimental SQLite journal. The native query methods omit a view name because a database has one view. <code>NativeView</code> also accepts a version, synthetic map-work amount, and emission count for controlled experiments.</p>
+<h3 id="prototype-limits">Current limits</h3>
+<ul><li>Only numeric field projections and the mean, sum, count, and envelope reducers are supported. Python callbacks, ordered folds, multiple views, in-place view rebuilds, and compaction are outside this prototype.</li><li>Rust document mapping and emission use 1–64 workers. Grouping and per-key reduction currently run serially and preserve contribution order. The default worker count follows available CPUs, capped at 64.</li><li>The expanded batch of emissions is buffered before reduction. Up to 1024 documents with 1024 emissions each can require substantial memory; streaming backpressure and compact worker shards are not implemented.</li><li>Both backends append commit records and maintain in-memory indexes. Reopening replays the full journal; memory and retained history grow with data.</li><li>Both backends hold an exclusive process lock. This is not the production Python database's concurrent-reader deployment model.</li><li>The experimental SQLite backend uses a journal-plus-memory layout, so storage comparisons do not isolate SQLite library overhead from all data-layout differences.</li><li>Float-valued grouping keys, including floats nested in structured keys, use deterministic Rust JSON ordering that can differ from Python canonical JSON ordering because exponent formatting differs. Grouping and exact lookup still work; universal cross-engine row-order parity is not promised.</li></ul>
+
+<h2 id="measured-results">Measured worker scaling</h2>
+{{performance}}
+
+<h2 id="payload-probe">Payload size probe</h2>
+{{payload_performance}}
+
+<h2 id="measurements">Measure complete workloads</h2>
+<p>The existing deterministic benchmark measures document construction, mapping, numeric reduction, transactions, queries, reopening, and regeneration:</p>
+<pre><code>mkdir -p .benchmark-storage
+python scripts/benchmark_database.py \
+    --documents 100000 --keys 128 --batch-size 1024 \
+    --live-documents 100 --storage-root .benchmark-storage \
+    --output /tmp/foldlite-database.json</code></pre>
+<p>Its initial ingestion includes lazy runtime compilation. Live operations reuse that instance; same-process reopening and regeneration reuse the compiled module but create fresh instances. Its “rebuild” timing means registering before ingestion, not rebuilding a view over an already retained history.</p>
+<p>Compare native and WASM execution with storage held constant, then compare storage with computation held constant. Report startup separately from warmed operation and match the durable acknowledgment boundary.</p>
+<p>Choose the filesystem you mean to measure explicitly: temporary directories can be backed by memory. Keep tmpfs results separate from measurements on a persistent storage device.</p>
+
+<h2 id="matrix">The comparison matrix</h2>
+<div class="table-wrap"><table><thead><tr><th>Dimension</th><th>Cases to distinguish</th></tr></thead><tbody><tr><td>Data</td><td>Low/high key cardinality; uniform, hot-key, and clustered distributions; small and nested payloads.</td></tr><tr><td>Computation</td><td>Count, envelope, sum, mean; cheap/expensive maps; zero, one, and many emissions.</td></tr><tr><td>Execution</td><td>Batch sizes; worker counts; native/WASM boundaries; queue and merge costs.</td></tr><tr><td>Storage</td><td>Durable SQLite and custom log with equivalent acknowledgment semantics; memory-only results reported separately.</td></tr><tr><td>Lifecycle</td><td>Historical registration, live reads, change feeds, restart, suffix catch-up, and regeneration.</td></tr><tr><td>Evidence</td><td>Throughput, latency distributions, total process memory, disk/log size, runtime versions, fixture hash, and numerical agreement.</td></tr></tbody></table></div>
+
+<h2 id="correctness">Correctness before speedups</h2>
+<ul><li>Out-of-order worker completion must preserve document and emission order where required.</li><li>Duplicate, overlapping, missing, and retried worker ranges must not double-count or advance progress past unfinished work.</li><li>Failure, cancellation, process exit, and torn writes must preserve the promised commit boundary.</li><li>Snapshot pages and change feeds must expose committed prefixes and retain explicit cursor expiry.</li><li>Count and envelope require exact agreement; sum and mean need a declared numerical contract and deterministic merge plan.</li><li>Slow tasks and high-cardinality keys must not create unbounded queues or memory growth.</li></ul>
+<p>Parallel key reduction and parallel mapping are different capabilities. Python ordered folds cannot use arbitrary partial-state merging. Any future fast path must state the semantics it supports.</p>
