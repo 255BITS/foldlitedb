@@ -1,0 +1,60 @@
+<p class="eyebrow">The model</p>
+<h1>Replay and ordering</h1>
+<p class="lead">Documents are immutable observations. Views are the changing state derived from them. Identities and positions make that state recoverable.</p>
+
+<h2 id="identity">Names are optional</h2>
+<p><code>add(payload)</code> assigns an internal ID. Two equal payloads still represent two observations. A caller-supplied name tells the database that a repeated call refers to the same observation.</p>
+<p>An identical named retry does no map work and keeps its original position, even after the source advances. Changing that name's payload is a conflict rather than an update. Model a changing lifecycle by appending a new observation and folding its status.</p>
+
+<h2 id="positions">Positions track a source</h2>
+<p>A position means “this document's offset in its source.” Automatic positions start at zero and follow that source's committed checkpoint. External logs can supply their own monotonically increasing offsets, with gaps.</p>
+<pre data-run="python"><code>from foldlitedb import Database, DocumentConflict, SourceOrderError
+
+with Database(":memory:") as db:
+    first = db.add({"value": 4}, source="training.log", position=10)
+    db.add({"value": 8}, source="training.log", position=40)
+    assert db.add({"value": 4}, source="training.log", position=10) == first
+    assert db.checkpoint("training.log") == 40
+    try:
+        db.add({"value": 3}, source="training.log", position=30)
+    except SourceOrderError:
+        pass
+    else:
+        raise AssertionError("New records cannot arrive behind the checkpoint")</code></pre>
+<p>IDs and positions are scoped to a source. A supplied source and position can identify a replay without a caller-supplied ID. An unseen record behind the checkpoint fails; a record at an already used position must match.</p>
+<p>Positions range from zero through <code>2**53 - 1</code>. Avoid mixing automatic positions with an external log's offsets unless they share the same progression.</p>
+
+<h2 id="ingestion-order">Ingestion order is separate</h2>
+<p>Ordered Python folds process persisted ingestion order. A source offset does not sort records across sources, and a measurement timestamp does not reorder an existing fold. Applications choose the domain order before ingestion.</p>
+<p>Numeric envelopes use the declared source position plus a stable hash of source, document identity, and emission ordinal. This provides deterministic first/last ordering and min/max tie breaking, even when positions are equal across sources.</p>
+
+<h2 id="regeneration">Keep the source outside the cache</h2>
+<p>The database file is derived storage. Retain resolved documents, exact map/fold behavior, reducer versions, and declared reference inputs outside it.</p>
+<pre data-run="python"><code>from foldlitedb import Count, View
+
+count = View("count", "1", lambda document: [("all", 1)], Count())
+with Database("live.db") as live:
+    live.register(count)
+    retained = live.add_many([{"value": 4}, {"value": 8}])
+    expected = list(live.rows("count"))[0].result
+
+# Retained records stand in for your application's authoritative archive.
+with Database("rebuilt.db") as rebuilt:
+    rebuilt.ingest(retained)
+    rebuilt.register(count)
+    assert list(rebuilt.rows("count"))[0].result == expected</code></pre>
+<p>Replay in original ingestion order. Keeping only payloads and generating new IDs can change identity-sensitive maps and numeric tie positions. An identifier for a lost taxonomy or snapshot does not reproduce its contents.</p>
+
+<h2 id="versions">Versions are promises</h2>
+<p>A map's view version identifies its code and behavior. A fold has its own explicit version. Changing a callable, a captured input, or a reference version requires updating the declared definition.</p>
+<p>Compatible definitions reuse cached checkpoints. A different descriptor rebuilds that view atomically and invalidates its old cursors. Maps and folds are trusted application code, not a sandbox for arbitrary programs.</p>
+
+<h2 id="atomicity">Atomic commits and stable reads</h2>
+<p>Each append batch commits document identities, source checkpoints, reduced states, and change records together. Failure rolls back the whole batch. Separate writers coordinate through SQLite.</p>
+<p>A snapshot cursor identifies a view revision and a committed ingestion prefix. Bounded pages retain that prefix while ingestion continues. Row iterators release transactions between pages; a sufficiently long pause may outlive your application's retained history.</p>
+<p>Compaction discards old changes under an explicit caller-selected boundary. It does not discard cached source documents needed for view rebuilds. Storage still grows with documents, distinct keys, and retained history.</p>
+
+<h2 id="numerical-contract">Numerical reproducibility</h2>
+<p>Count and envelope states have exact merge contracts within their input bounds. Floating-point sum and mean use non-associative arithmetic: arbitrary merge trees need not produce identical bits.</p>
+<p>Native and WASM execution use the same Rust mathematical core. Preserve the declared order and partition plan when exact cross-runtime agreement matters. Do not merge finalized means; merge their compatible states with disjoint coverage.</p>
+<p>The JSON protocol preserves large finite floating-point states when they round trip through serialization. A bundled reducer update changes its module identity; compatible applications rebuild affected cached views and expire their old cursors through the normal view-version rules.</p>

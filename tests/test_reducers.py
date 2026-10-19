@@ -63,6 +63,49 @@ def test_sum_count_and_empty(reducer, kind, expected):
     assert reducer.add(identity, [{"position": [0, "missing"]}]) == identity
 
 
+@pytest.mark.parametrize("kind", ["mean/v1", "sum/v1"])
+def test_empty_add_preserves_large_serialized_float_state(reducer, kind):
+    # This shortest decimal previously parsed one representable step lower,
+    # changing a retained state even when there were no contributions.
+    state = {"reducer": kind, "version": 1, "count": 12,
+             "sum": 1.2000000000042133e17}
+    for _ in range(3):
+        result = reducer.add(state, [])
+        assert result == state
+        assert result["sum"].hex() == state["sum"].hex()
+        state = json.loads(json.dumps(result))
+
+
+@pytest.mark.parametrize("kind", ["mean/v1", "sum/v1"])
+@pytest.mark.parametrize("batch_size", [1, 4, 8])
+def test_transport_preserves_ordered_mixed_magnitude_sum(reducer, kind, batch_size):
+    values = [1.0000000000016772e16, 1.0000000000030386e16,
+              1.0000000000022584e16, 1.0000000000001892e16,
+              -1e17, 1.0, 1e-200, -1.0]
+    state = {"reducer": kind, "version": 1, "count": 12,
+             "sum": 1.2000000000042133e17}
+    expected = state["sum"]
+    for start in range(0, len(values), batch_size):
+        batch = values[start:start + batch_size]
+        state = reducer.add(state, points(batch, start))
+        for value in batch:
+            expected += value
+        assert state["sum"].hex() == expected.hex()
+    result = expected / state["count"] if kind == "mean/v1" else expected
+    assert reducer.finalize(state)["value"].hex() == result.hex()
+
+
+@pytest.mark.parametrize("value", [1.2000000000042133e17, 1e-200,
+                                  5e-324, 1.7976931348623157e308])
+def test_envelope_transport_preserves_finite_float_bits(reducer, value):
+    state = reducer.add(reducer.identity("envelope/v1"), points([value]))
+    for _ in range(2):
+        state = reducer.add(state, [])
+        result = reducer.finalize(state)
+        for field in ("first", "min", "max", "last"):
+            assert result[field]["value"].hex() == value.hex()
+
+
 def test_declared_reducer_capabilities():
     spec = descriptor()
     assert set(spec["reducers"]) == {"mean/v1", "envelope/v1", "sum/v1", "count/v1"}

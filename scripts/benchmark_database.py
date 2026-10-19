@@ -11,6 +11,7 @@ import json
 import platform
 from pathlib import Path
 import statistics
+import subprocess
 import tempfile
 import time
 
@@ -48,6 +49,17 @@ def all_rows(database):
 
 def percentile(values, fraction):
     return sorted(values)[min(len(values) - 1, int((len(values) - 1) * fraction))]
+
+
+def storage_info(root):
+    try:
+        mount = subprocess.run(
+            ['findmnt', '-T', str(root.resolve()), '-J', '-o', 'TARGET,SOURCE,FSTYPE,OPTIONS'],
+            check=True, capture_output=True, text=True)
+        mount = json.loads(mount.stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+        mount = None
+    return {'path': str(root.resolve()), 'mount': mount}
 
 
 def run(root, count, keys, batch_size, live_count):
@@ -113,6 +125,7 @@ def run(root, count, keys, batch_size, live_count):
                      'payload': 'one integer series key and one scalar per document'},
         'runtime': {'python': platform.python_version(), 'platform': platform.platform(),
                     'machine': platform.machine(), 'sqlite': __import__('sqlite3').sqlite_version},
+        'storage': storage_info(root),
         'rebuild_seconds': rebuild_seconds,
         'rebuild_documents_per_second': count / rebuild_seconds,
         'first_query_ms': first_query_ms,
@@ -139,11 +152,15 @@ if __name__ == '__main__':
     parser.add_argument('--keys', type=int, default=128)
     parser.add_argument('--batch-size', type=int, default=1024)
     parser.add_argument('--live-documents', type=int, default=100)
+    parser.add_argument('--storage-root', type=Path,
+                        help='temporary database parent; defaults to the system temporary directory')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if min(args.documents, args.keys, args.batch_size, args.live_documents) < 1:
         parser.error('All workload sizes must be positive')
-    with tempfile.TemporaryDirectory(prefix='foldlitedb-benchmark-') as temporary:
+    if args.storage_root is not None:
+        args.storage_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='foldlitedb-benchmark-', dir=args.storage_root) as temporary:
         result = run(Path(temporary), args.documents, args.keys, args.batch_size,
                      args.live_documents)
     args.output.parent.mkdir(parents=True, exist_ok=True)

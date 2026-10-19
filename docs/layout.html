@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{description}}">
+  <meta name="color-scheme" content="light">
+  <title>{{title}} · Foldlite DB</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="Foldlite DB home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 5h22v7H12v6h12v7H5z" fill="currentColor"/><path d="m12 12 15-7v7z" fill="#81b697"/></svg>
+      <span>foldlite<span class="brand-db">db</span></span>
+    </a>
+    <span class="development-badge">Development preview</span>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  </header>
+  <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+    <form class="search" role="search" action="api.html">
+      <label for="doc-search">Search documentation</label>
+      <input id="doc-search" type="search" placeholder="Find an API or concept…" autocomplete="off" aria-controls="search-results">
+      <div id="search-results" class="search-results" aria-live="polite" hidden></div>
+    </form>
+    <p class="nav-label">Documentation</p>
+    <nav>{{navigation}}</nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Regenerable.<br><span>Python API · shared Rust core</span></div>
+  </aside>
+  <div class="page-layout">
+    <main id="content" tabindex="-1">{{body}}</main>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p>{{toc}}</aside>
+  </div>
+  <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>
+</body>
+</html>

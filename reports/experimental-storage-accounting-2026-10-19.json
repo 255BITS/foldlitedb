@@ -1,0 +1,359 @@
+{
+  "scope": "Storage accounting probe; no performance timing or ranking claims",
+  "storage_root": "/nvme/dev/255bits/foldlitedb/experimental/engine/target/benchmarks",
+  "storage_mount": {
+    "filesystems": [
+      {
+        "target": "/nvme",
+        "source": "/dev/mapper/nvme4tb",
+        "fstype": "ext4",
+        "options": "rw,noatime,seclabel"
+      }
+    ]
+  },
+  "durability": {
+    "python-sqlite": "WAL, synchronous FULL",
+    "rust-sqlite": "WAL, synchronous FULL",
+    "rust-log": "sync_all file and parent directory before acknowledgement"
+  },
+  "note": "Logical file sizes before close include active WAL/SHM; closed sizes reflect SQLite checkpoint/cleanup. Native backends journal identical records and rebuild in-memory indexes on reopen.",
+  "script_sha256": "2aae7e017f7fb4a9cb7327a7be539ea6eae21bb394942fbf46cc9a5da7f99b87",
+  "results": [
+    {
+      "engine": "python-sqlite",
+      "shape": "uniform",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 128,
+      "stats": {
+        "documents": 4104,
+        "sources": 1,
+        "views": 1,
+        "states": 128,
+        "history": 1032,
+        "sequence": 4104
+      },
+      "active_files_bytes": {
+        "database": 4096,
+        "database-wal": 1911712,
+        "database-shm": 32768
+      },
+      "active_total_bytes": 1948576,
+      "closed_files_bytes": {
+        "database": 684032
+      },
+      "closed_total_bytes": 684032
+    },
+    {
+      "engine": "rust-sqlite",
+      "shape": "uniform",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 128,
+      "stats": {
+        "backend": "sqlite",
+        "documents": 4104,
+        "durable": true,
+        "groups": 128,
+        "history_rows": 1032,
+        "last_ingest": {
+          "commit_seconds": 0.000864226,
+          "group_seconds": 3.3e-07,
+          "inserted": 1,
+          "map_seconds": 1.24e-05,
+          "map_workers_observed": 1,
+          "reduce_seconds": 1.19e-06,
+          "replayed": 0
+        },
+        "schema": 1,
+        "sequence": 4104,
+        "sqlite_version": "3.46.0",
+        "storage_bytes": 712576,
+        "workers": 1
+      },
+      "active_files_bytes": {
+        "database": 4096,
+        "database-wal": 675712,
+        "database-shm": 32768,
+        "database.lock": 0
+      },
+      "active_total_bytes": 712576,
+      "closed_files_bytes": {
+        "database": 565248,
+        "database.lock": 0
+      },
+      "closed_total_bytes": 565248
+    },
+    {
+      "engine": "rust-log",
+      "shape": "uniform",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 128,
+      "stats": {
+        "backend": "log",
+        "documents": 4104,
+        "durable": true,
+        "groups": 128,
+        "history_rows": 1032,
+        "last_ingest": {
+          "commit_seconds": 0.000620564,
+          "group_seconds": 2.7e-07,
+          "inserted": 1,
+          "map_seconds": 1.22e-05,
+          "map_workers_observed": 1,
+          "reduce_seconds": 1.04e-06,
+          "replayed": 0
+        },
+        "schema": 1,
+        "sequence": 4104,
+        "sqlite_version": "3.46.0",
+        "storage_bytes": 547315,
+        "workers": 1
+      },
+      "active_files_bytes": {
+        "database": 547315,
+        "database.lock": 0
+      },
+      "active_total_bytes": 547315,
+      "closed_files_bytes": {
+        "database": 547315,
+        "database.lock": 0
+      },
+      "closed_total_bytes": 547315
+    },
+    {
+      "engine": "python-sqlite",
+      "shape": "hot",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 128,
+      "stats": {
+        "documents": 4104,
+        "sources": 1,
+        "views": 1,
+        "states": 128,
+        "history": 426,
+        "sequence": 4104
+      },
+      "active_files_bytes": {
+        "database": 4096,
+        "database-wal": 1689232,
+        "database-shm": 32768
+      },
+      "active_total_bytes": 1726096,
+      "closed_files_bytes": {
+        "database": 610304
+      },
+      "closed_total_bytes": 610304
+    },
+    {
+      "engine": "rust-sqlite",
+      "shape": "hot",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 128,
+      "stats": {
+        "backend": "sqlite",
+        "documents": 4104,
+        "durable": true,
+        "groups": 128,
+        "history_rows": 426,
+        "last_ingest": {
+          "commit_seconds": 0.000737485,
+          "group_seconds": 5.2e-07,
+          "inserted": 1,
+          "map_seconds": 3.301e-05,
+          "map_workers_observed": 1,
+          "reduce_seconds": 1.33e-06,
+          "replayed": 0
+        },
+        "schema": 1,
+        "sequence": 4104,
+        "sqlite_version": "3.46.0",
+        "storage_bytes": 646656,
+        "workers": 1
+      },
+      "active_files_bytes": {
+        "database": 4096,
+        "database-wal": 609792,
+        "database-shm": 32768,
+        "database.lock": 0
+      },
+      "active_total_bytes": 646656,
+      "closed_files_bytes": {
+        "database": 499712,
+        "database.lock": 0
+      },
+      "closed_total_bytes": 499712
+    },
+    {
+      "engine": "rust-log",
+      "shape": "hot",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 128,
+      "stats": {
+        "backend": "log",
+        "documents": 4104,
+        "durable": true,
+        "groups": 128,
+        "history_rows": 426,
+        "last_ingest": {
+          "commit_seconds": 0.000696814,
+          "group_seconds": 2.5e-07,
+          "inserted": 1,
+          "map_seconds": 1.34e-05,
+          "map_workers_observed": 1,
+          "reduce_seconds": 9.9e-07,
+          "replayed": 0
+        },
+        "schema": 1,
+        "sequence": 4104,
+        "sqlite_version": "3.46.0",
+        "storage_bytes": 488043,
+        "workers": 1
+      },
+      "active_files_bytes": {
+        "database": 488043,
+        "database.lock": 0
+      },
+      "active_total_bytes": 488043,
+      "closed_files_bytes": {
+        "database": 488043,
+        "database.lock": 0
+      },
+      "closed_total_bytes": 488043
+    },
+    {
+      "engine": "python-sqlite",
+      "shape": "unique",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 4104,
+      "stats": {
+        "documents": 4104,
+        "sources": 1,
+        "views": 1,
+        "states": 4104,
+        "history": 4104,
+        "sequence": 4104
+      },
+      "active_files_bytes": {
+        "database": 4096,
+        "database-wal": 2916992,
+        "database-shm": 32768
+      },
+      "active_total_bytes": 2953856,
+      "closed_files_bytes": {
+        "database": 1495040
+      },
+      "closed_total_bytes": 1495040
+    },
+    {
+      "engine": "rust-sqlite",
+      "shape": "unique",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 4104,
+      "stats": {
+        "backend": "sqlite",
+        "documents": 4104,
+        "durable": true,
+        "groups": 4104,
+        "history_rows": 4104,
+        "last_ingest": {
+          "commit_seconds": 0.000694815,
+          "group_seconds": 4.7e-07,
+          "inserted": 1,
+          "map_seconds": 1.3e-05,
+          "map_workers_observed": 1,
+          "reduce_seconds": 1.29e-06,
+          "replayed": 0
+        },
+        "schema": 1,
+        "sequence": 4104,
+        "sqlite_version": "3.46.0",
+        "storage_bytes": 1005096,
+        "workers": 1
+      },
+      "active_files_bytes": {
+        "database": 4096,
+        "database-wal": 968232,
+        "database-shm": 32768,
+        "database.lock": 0
+      },
+      "active_total_bytes": 1005096,
+      "closed_files_bytes": {
+        "database": 856064,
+        "database.lock": 0
+      },
+      "closed_total_bytes": 856064
+    },
+    {
+      "engine": "rust-log",
+      "shape": "unique",
+      "map": "cheap",
+      "work": 0,
+      "documents": 4096,
+      "live_documents": 8,
+      "batch_size": 512,
+      "result_rows": 4104,
+      "stats": {
+        "backend": "log",
+        "documents": 4104,
+        "durable": true,
+        "groups": 4104,
+        "history_rows": 4104,
+        "last_ingest": {
+          "commit_seconds": 0.000599334,
+          "group_seconds": 4.7e-07,
+          "inserted": 1,
+          "map_seconds": 1.6401e-05,
+          "map_workers_observed": 1,
+          "reduce_seconds": 1.43e-06,
+          "replayed": 0
+        },
+        "schema": 1,
+        "sequence": 4104,
+        "sqlite_version": "3.46.0",
+        "storage_bytes": 834678,
+        "workers": 1
+      },
+      "active_files_bytes": {
+        "database": 834678,
+        "database.lock": 0
+      },
+      "active_total_bytes": 834678,
+      "closed_files_bytes": {
+        "database": 834678,
+        "database.lock": 0
+      },
+      "closed_total_bytes": 834678
+    }
+  ]
+}
