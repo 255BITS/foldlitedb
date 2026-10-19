@@ -1,0 +1,12 @@
+{
+  "abi": 1,
+  "module": "metrics.wasm",
+  "sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0",
+  "descriptor": {
+    "abi": 1,
+    "name": "metrics",
+    "version": "1",
+    "state_version": "1",
+    "mergeable": true
+  }
+}

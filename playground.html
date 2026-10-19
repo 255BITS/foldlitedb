@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Run AssemblyScript map/reduce views locally in a browser worker, import documents, and verify replay.">
+  <meta name="color-scheme" content="light">
+  <title>Browser playground · Foldlite DB</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="Foldlite DB home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 5h22v7H12v6h12v7H5z" fill="currentColor"/><path d="m12 12 15-7v7z" fill="#81b697"/></svg>
+      <span>foldlite<span class="brand-db">db</span></span>
+    </a>
+    <span class="development-badge">Development preview</span>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb/tree/api-native-prototype-2026-10-19">Source <span aria-hidden="true">↗</span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  </header>
+  <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+    <form class="search" role="search" action="api.html">
+      <label for="doc-search">Search documentation</label>
+      <input id="doc-search" type="search" placeholder="Find an API or concept…" autocomplete="off" aria-controls="search-results">
+      <div id="search-results" class="search-results" aria-live="polite" hidden></div>
+    </form>
+    <p class="nav-label">Documentation</p>
+    <nav><a href="index.html">Get started</a>
+<a href="playground.html" aria-current="page">Browser playground</a>
+<a href="portable.html">Portable views</a>
+<a href="api.html">Python API</a>
+<a href="concepts.html">Replay and ordering</a>
+<a href="experiments.html">Native experiments</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Portable. Replayable.<br><span>Rust · Python · browser</span></div>
+  </aside>
+  <div class="page-layout">
+    <main id="content" tabindex="-1"><link rel="stylesheet" href="playground.css">
+<script type="module" src="playground.js"></script>
+<p class="eyebrow">The same view. A new place to run it.</p>
+<h1 class="hero">Your browser.<br>Your live database.</h1>
+<p class="lead">CouchDB-inspired map/reduce, running right here. An AssemblyScript view maps your documents and reduces each group in WebAssembly. No server required.</p>
+
+<div class="studio" id="playground" aria-busy="true">
+  <div class="studio-topline"><span class="studio-label"><span class="studio-led" aria-hidden="true"></span> Local workspace</span><span id="runtime-state">Starting WebAssembly worker…</span></div>
+  <div class="studio-stats" aria-label="Database statistics">
+    <div><strong id="document-count">0</strong><span>retained documents</span></div>
+    <div><strong id="group-count">0</strong><span>live groups</span></div>
+    <div><strong id="change-count">0</strong><span>committed sequence</span></div>
+    <div><strong id="replay-state">Ready</strong><span>replay verification</span></div>
+  </div>
+  <div class="studio-grid">
+    <section class="studio-input" aria-labelledby="input-title">
+      <div class="studio-section-heading"><span class="step-number">01</span><h2 id="input-title">Bring your documents</h2></div>
+      <div class="file-drop" id="file-drop">
+        <svg viewBox="0 0 40 40" width="38" height="38" fill="none" aria-hidden="true"><path d="M11 5h12l7 7v23H11z" stroke="currentColor" stroke-width="1.5"/><path d="M23 5v8h7M16 21h9m-9 5h9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <strong>Drop a JSON or JSONL file</strong>
+        <span>A document array, or one document per line.</span>
+        <label class="studio-button file-label" for="document-file">Choose a file <span aria-hidden="true">↗</span></label>
+        <input class="visually-hidden" id="document-file" type="file" accept=".json,.jsonl,.ndjson,application/json">
+        <small>Up to 1,024 small documents per import. Files stay in this browser.</small>
+      </div>
+      <form id="measurement-form" class="measurement-form">
+        <div class="studio-subheading">Add a measurement</div>
+        <label for="metric-input">Metric</label><input id="metric-input" name="metric" value="latency_ms" maxlength="128" required list="metric-suggestions" autocomplete="off">
+        <datalist id="metric-suggestions"><option value="latency_ms"><option value="cpu_percent"><option value="error_rate"></datalist>
+        <label for="value-input">Value</label><div class="measurement-value"><input id="value-input" name="value" type="number" value="42" step="any" required><button class="studio-button primary" type="submit" data-work>Add <span aria-hidden="true">+</span></button></div>
+      </form>
+      <details class="paste-documents"><summary>Paste JSON or JSONL</summary><label for="document-text">Raw documents</label><textarea id="document-text" rows="5" spellcheck="false" placeholder='{"metric":"latency_ms","value":42}'></textarea><button class="studio-button" id="import-text" type="button" data-work>Import documents</button></details>
+    </section>
+    <section class="studio-output" aria-labelledby="output-title">
+      <div class="studio-section-heading"><span class="step-number">02</span><h2 id="output-title">Watch your views update</h2></div>
+      <div class="view-toolbar"><span><code>metrics@1</code><small>map → group → reduce</small></span><button class="studio-button stream-button" id="toggle-stream" type="button" aria-pressed="false" data-work><span class="stream-dot" aria-hidden="true"></span><span id="stream-label">Start live stream</span></button></div>
+      <div class="view-table-wrap"><table class="view-table"><caption class="visually-hidden">Live metrics computed by the WebAssembly view</caption><thead><tr><th scope="col">Metric</th><th scope="col">Count</th><th scope="col">Mean</th><th scope="col">Min</th><th scope="col">Max</th></tr></thead><tbody id="view-rows"><tr><td colspan="5" class="empty-state">Loading the example…</td></tr></tbody></table></div>
+      <div class="range-heading"><span>Observed range</span><span>min <span aria-hidden="true">— ● —</span> max · dot = mean</span></div><div class="metric-ranges" id="metric-ranges"></div>
+      <div class="view-actions"><button class="studio-button" id="replay-button" type="button" data-work><span aria-hidden="true">↻</span> Rebuild &amp; verify</button><button class="studio-button" id="export-button" type="button" data-work>Export documents <span aria-hidden="true">↓</span></button><button class="studio-text-button" id="reset-button" type="button" data-work>Reset example</button></div>
+      <p class="studio-status" id="playground-status" role="status" aria-live="polite">Loading the shared view module.</p><p class="studio-error" id="playground-error" role="alert" hidden></p>
+    </section>
+  </div>
+  <details class="engine-details"><summary><span class="engine-status" aria-hidden="true">✓</span> AssemblyScript → WebAssembly → dedicated worker <span class="engine-details-hint">Inspect the module</span></summary><div class="engine-details-body"><dl><dt>View</dt><dd id="module-name">Loading…</dd><dt>SHA-256, verified before execution</dt><dd><code id="module-digest">Loading…</code></dd><dt>Storage</dt><dd>In memory. Export documents before reloading this page.</dd><dt>Isolation</dt><dd>No host imports. Maximum 16 MiB of WebAssembly memory. Worker requests have a deadline.</dd></dl><p>JavaScript retains documents and groups emitted keys. The AssemblyScript module performs every map and reduction. This is the same compiled artifact used by the native engine.</p></div></details>
+</div>
+<noscript><div class="note"><p>Enable JavaScript to run this local map/reduce example.</p></div></noscript>
+
+<h2 id="write-once">Write a view once. Run it here or in Python.</h2>
+<p>The <code>metrics</code> module accepts documents with a string <code>metric</code> and a finite numeric <code>value</code>. Its map emits the metric as a key. Its reducer maintains count, sum, minimum, and maximum; finalization computes the mean. Other document shapes are ignored by the map.</p>
+<p>Numbers use double precision in both environments. Keep large identifiers as strings. Strings must be valid Unicode; each module request is limited to 256 KiB of encoded JSON.</p>
+<div class="portable-code-grid"><div><span class="code-label">Browser · no backend</span><pre><code>import { BrowserDatabase } from "./portable/client.js";
+
+const db = await BrowserDatabase.connect();
+await db.add({ metric: "latency_ms", value: 42 });
+const rows = await db.rows();
+console.log(rows[0].result);
+db.close();</code></pre></div><div><span class="code-label">Python · the same metrics.wasm</span><pre><code>from foldlitedb import PortableDatabase, PortableView
+
+view = PortableView.bundled("metrics")
+with PortableDatabase("metrics.db", view) as db:
+    db.add({"metric": "latency_ms", "value": 42})
+    row = list(db.rows())[0]
+    print(row.result)</code></pre></div></div>
+
+<h2 id="replay-anywhere">Your documents are the source of truth</h2>
+<p>Try the live stream, add a few measurements, then select <strong>Rebuild &amp; verify</strong>. A fresh in-memory database replays every retained document through the same module and compares its complete view states and results. Existing views keep their cursors.</p>
+<p>Exported JSON includes document identities, sources, positions, and payloads. Importing it again is an identical replay: each retained document counts once. Changing an existing identity or position fails the whole batch. Use those same records to rebuild the native database.</p>
+<div class="note"><p><strong>A portable computation preview.</strong> This browser database keeps documents and view history in memory. Export them to keep your work. The live stream is simulated locally; this page makes no requests containing your documents. Python provides the persistent Rust-backed engine.</p></div>
+</main>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#input-title">Bring your documents</a>
+<a href="#output-title">Watch your views update</a>
+<a href="#write-once">Write a view once. Run it here or in Python.</a>
+<a href="#replay-anywhere">Your documents are the source of truth</a></aside>
+  </div>
+  <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>
+</body>
+</html>

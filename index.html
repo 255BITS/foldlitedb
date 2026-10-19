@@ -29,22 +29,24 @@
     </form>
     <p class="nav-label">Documentation</p>
     <nav><a href="index.html" aria-current="page">Get started</a>
+<a href="playground.html">Browser playground</a>
+<a href="portable.html">Portable views</a>
 <a href="api.html">Python API</a>
 <a href="concepts.html">Replay and ordering</a>
 <a href="experiments.html">Native experiments</a></nav>
-    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Regenerable.<br><span>Python API · shared Rust core</span></div>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Portable. Replayable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
-    <main id="content" tabindex="-1"><p class="eyebrow">An embedded engine for realtime views</p>
-<h1 class="hero">Documents in.<br>Live views out.</h1>
-<p class="lead">Append JSON, map it into groups, and read the current result. Foldlite DB maintains versioned reductions in a local database you can regenerate.</p>
-<div class="hero-actions"><a class="button" href="#quickstart">Start with Python <span aria-hidden="true">↓</span></a><a class="button secondary" href="api.html">Explore the API</a></div>
+    <main id="content" tabindex="-1"><p class="eyebrow">CouchDB-inspired views · Rust · Python · browser</p>
+<h1 class="hero">Write a view once.<br>Run it anywhere.</h1>
+<p class="lead">Map documents into live views with portable AssemblyScript and WebAssembly. Run the same compiled view in a native Rust database or entirely in a browser worker.</p>
+<div class="hero-actions"><a class="button" href="playground.html">Try it in your browser <span aria-hidden="true">↗</span></a><a class="button secondary" href="portable.html">Build a portable view</a></div>
 <div class="flow" aria-label="Documents are mapped into groups and reduced into live views"><div><strong>01 &nbsp; Append</strong><small>Any finite JSON value</small></div><span aria-hidden="true">→</span><div><strong>02 &nbsp; Map</strong><small>Emit a key and contribution</small></div><span aria-hidden="true">→</span><div><strong>03 &nbsp; Reduce</strong><small>Read the current group state</small></div></div>
 
 <div class="note preview"><p><strong>Unreleased development API.</strong> Use the reviewed source branch below. The default branch and published packages may not contain every API shown.</p></div>
 
 <h2 id="install">Install the development source</h2>
-<p>Python 3.11 or newer is required. Install the optional numeric runtime to use the shared Rust/WASM reducers. The bundled WebAssembly artifact needs no Rust compiler at installation.</p>
+<p>Python 3.11 or newer is required. Matching wheels contain the Rust extension and precompiled Wasm views. Building this checkout requires Rust 1.90 or newer. Install the optional numeric runtime for the Python-callback examples below, or start with the <a href="portable.html#python">native portable API</a>.</p>
 <pre><code>git clone --branch api-native-prototype-2026-10-19 \
     https://github.com/255BITS/foldlitedb.git
 cd foldlitedb
