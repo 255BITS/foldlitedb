@@ -32,9 +32,8 @@
 <a href="playground.html" aria-current="page">Browser playground</a>
 <a href="portable.html">Portable views</a>
 <a href="api.html">Python API</a>
-<a href="concepts.html">Replay and ordering</a>
-<a href="experiments.html">Native experiments</a></nav>
-    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Portable. Replayable.<br><span>Rust · Python · browser</span></div>
+<a href="concepts.html">Documents and caches</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
     <main id="content" tabindex="-1"><link rel="stylesheet" href="playground.css">
@@ -92,10 +91,10 @@ const db = await BrowserDatabase.connect();
 await db.add({ metric: "latency_ms", value: 42 });
 const rows = await db.rows();
 console.log(rows[0].result);
-db.close();</code></pre></div><div><span class="code-label">Python · the same metrics.wasm</span><pre><code>from foldlitedb import PortableDatabase, PortableView
+db.close();</code></pre></div><div><span class="code-label">Python · the same metrics.wasm</span><pre><code>from foldlitedb import Database, View
 
-view = PortableView.bundled("metrics")
-with PortableDatabase("metrics.db", view) as db:
+view = View.bundled("metrics")
+with Database("metrics.fold", view) as db:
     db.add({"metric": "latency_ms", "value": 42})
     row = list(db.rows())[0]
     print(row.result)</code></pre></div></div>
@@ -103,7 +102,7 @@ with PortableDatabase("metrics.db", view) as db:
 <h2 id="replay-anywhere">Your documents are the source of truth</h2>
 <p>Try the live stream, add a few measurements, then select <strong>Rebuild &amp; verify</strong>. A fresh in-memory database replays every retained document through the same module and compares its complete view states and results. Existing views keep their cursors.</p>
 <p>Exported JSON includes document identities, sources, positions, and payloads. Importing it again is an identical replay: each retained document counts once. Changing an existing identity or position fails the whole batch. Use those same records to rebuild the native database.</p>
-<div class="note"><p><strong>A portable computation preview.</strong> This browser database keeps documents and view history in memory. Export them to keep your work. The live stream is simulated locally; this page makes no requests containing your documents. Python provides the persistent Rust-backed engine.</p></div>
+<div class="note"><p><strong>A portable computation preview.</strong> This browser database keeps documents and view history in memory. Export them to keep your work. The live stream is simulated locally; this page makes no requests containing your documents. Python provides the persistent Rust document-log engine with a disposable view cache.</p></div>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#input-title">Bring your documents</a>
 <a href="#output-title">Watch your views update</a>

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="CouchDB-inspired live views with a Rust engine and portable AssemblyScript map/reduce in Python and browsers.">
+  <meta name="description" content="Immutable document logs and rebuildable live views, with a Rust engine and portable AssemblyScript map/reduce.">
   <meta name="color-scheme" content="light">
   <title>Get started · Foldlite DB</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -32,34 +32,33 @@
 <a href="playground.html">Browser playground</a>
 <a href="portable.html">Portable views</a>
 <a href="api.html">Python API</a>
-<a href="concepts.html">Replay and ordering</a>
-<a href="experiments.html">Native experiments</a></nav>
-    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Portable. Replayable.<br><span>Rust · Python · browser</span></div>
+<a href="concepts.html">Documents and caches</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
-    <main id="content" tabindex="-1"><p class="eyebrow">CouchDB-inspired views · Rust · Python · browser</p>
-<h1 class="hero">Write a view once.<br>Run it anywhere.</h1>
-<p class="lead">Map documents into live views with portable AssemblyScript and WebAssembly. Run the same compiled view in a native Rust database or entirely in a browser worker.</p>
+    <main id="content" tabindex="-1"><p class="eyebrow">Immutable documents · Rust · Python · browser</p>
+<h1 class="hero">Keep the documents.<br>Rebuild the view.</h1>
+<p class="lead">CouchDB-inspired map/reduce over an immutable document log. A Rust engine keeps the facts durable; every index and live view is a replaceable cache. Write the computation in AssemblyScript and run the same WebAssembly in Python or a browser worker.</p>
 <div class="hero-actions"><a class="button" href="playground.html">Try it in your browser <span aria-hidden="true">↗</span></a><a class="button secondary" href="portable.html#authoring">Build a portable view</a></div>
-<div class="flow" aria-label="Documents are mapped into groups and reduced into live views"><div><strong>01 &nbsp; Append</strong><small>Any finite JSON value</small></div><span aria-hidden="true">→</span><div><strong>02 &nbsp; Map</strong><small>Emit a key and contribution</small></div><span aria-hidden="true">→</span><div><strong>03 &nbsp; Reduce</strong><small>Read the current group state</small></div></div>
+<div class="flow" aria-label="Immutable documents become mapped groups and rebuildable views"><div><strong>01 &nbsp; Append</strong><small>Immutable JSON documents</small></div><span aria-hidden="true">→</span><div><strong>02 &nbsp; Map</strong><small>Emit a key and contribution</small></div><span aria-hidden="true">→</span><div><strong>03 &nbsp; Fold</strong><small>Derive a rebuildable live view</small></div></div>
 
-<div class="note preview"><p><strong>Unreleased development API.</strong> This portable API has not been released on PyPI. These instructions describe the local checkout; remote source and the hosted site can lag changes until publication. Use a checkout containing <code>native/</code> and <code>views/</code>, or a wheel built from that checkout.</p></div>
+<div class="note preview"><p><strong>Unreleased development API.</strong> This API has not been released on PyPI. These instructions describe the local checkout; remote source and the hosted site can lag changes until publication. Build this checkout or install a wheel built from it.</p></div>
 
 <h2 id="install">Install from your checkout</h2>
-<p>Build prerequisites are Python 3.11+, Rust/Cargo 1.90+, and a platform C compiler and linker. SQLite is bundled with the extension. Run from the repository root:</p>
+<p>Build prerequisites are Python 3.11+, Rust/Cargo 1.90+, and a platform C compiler and linker. Run from the repository root:</p>
 <pre><code>python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install .
 python examples/portable_metrics.py</code></pre>
-<p>On Windows, activate with <code>.venv\Scripts\activate</code> in an MSVC build environment. No Node compiler is needed for the bundled views. To build a local wheel, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>, then install the resulting <code>.whl</code> on a matching platform. Installing a built wheel needs neither Rust nor Node. PyPI release setup remains pending.</p>
+<p>On Windows, activate with <code>.venv\Scripts\activate</code> in an MSVC build environment. Node is needed only to author or rebuild views. To build a wheel, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>, then install the resulting <code>.whl</code> on a matching platform. Installing a built wheel needs neither Rust nor Node. PyPI release setup remains pending.</p>
 
 <h2 id="quickstart">A native metric in a few lines</h2>
-<p>The bundled <code>metrics</code> module maps each payload's string <code>metric</code> and numeric <code>value</code>, maintaining count, sum, minimum, maximum, and mean. Start with a fresh <code>metrics.db</code> file:</p>
-<pre data-run="python"><code>from foldlitedb import PortableDatabase, PortableView
+<p>The bundled <code>metrics</code> module maintains count, sum, minimum, maximum, and mean by metric. Start with a fresh <code>metrics.fold</code> log:</p>
+<pre data-run="python"><code>from foldlitedb import Database, View
 
-metrics = PortableView.bundled("metrics")
-with PortableDatabase("metrics.db", metrics) as db:
+metrics = View.bundled("metrics")
+with Database("metrics.fold", metrics) as db:
     documents = db.add_many([
         {"metric": "loss", "value": 4},
         {"metric": "loss", "value": 8},
@@ -67,47 +66,47 @@ with PortableDatabase("metrics.db", metrics) as db:
     assert list(db.rows())[0].result == {
         "count": 2, "sum": 12, "min": 4, "max": 8, "mean": 6,
     }</code></pre>
-<p>Rust executes both map and reduce through a bounded Wasm interpreter and commits the resulting view in SQLite. There are no Python callbacks on this path. <code>add_many</code> returns resolved documents, including generated IDs and source positions. Retain those records outside the derived database for replay.</p>
+<p>Rust runs both map and reduce in a bounded Wasm interpreter. An accepted batch is appended and synced to the document log. A derived checkpoint lives separately in <code>metrics.fold.cache</code>; one active database owns the log through <code>metrics.fold.lock</code>. <code>Database</code> and <code>View</code> are the primary names; <code>PortableDatabase</code> and <code>PortableView</code> are aliases.</p>
 
 <h2 id="append-or-name">Append freely. Name when useful.</h2>
-<p>Each unnamed <code>add(payload)</code> creates a new observation. Supply a source-scoped name when identical retries should count once. Documents are immutable; conflicting reuse raises <code>DocumentConflict</code>.</p>
-<pre data-run="python"><code>with PortableDatabase("metrics.db", metrics) as db:
+<p>Each unnamed <code>add(payload)</code> creates a new observation. Supply a source-scoped ID when identical retries should count once. Documents are immutable; conflicting reuse raises <code>DocumentConflict</code>.</p>
+<pre data-run="python"><code>with Database("metrics.fold", metrics) as db:
     saved = db.add({"metric": "loss", "value": 3}, id="measurement-3")
     assert db.add(saved.payload, id="measurement-3") == saved
     documents += (saved,)</code></pre>
-<p>External logs can supply <code>source</code> and monotonically increasing <code>position</code> instead. Resolved <code>Document</code> records replay through <code>ingest</code> without counting twice.</p>
+<p>External sources can supply their own IDs and monotonically increasing positions. To represent an update, append another observation and let an ordered view fold its meaning.</p>
 
 <h2 id="live-updates">Read once, follow changes</h2>
-<p><code>rows()</code> follows bounded snapshot pages. Use <code>query()</code> when you also need a cursor for subsequent changes:</p>
-<pre data-run="python"><code>with PortableDatabase("metrics.db", metrics) as db:
+<p><code>rows()</code> follows bounded snapshot pages. <code>query()</code> also returns a cursor for later changes:</p>
+<pre data-run="python"><code>with Database("metrics.fold", metrics) as db:
     snapshot = db.query()
-    fourth = db.add({"metric": "loss", "value": 1})
+    db.add({"metric": "loss", "value": 1})
     updates = db.changes(since=snapshot.cursor)
     assert updates.rows[0].result["mean"] == 4
-    retained = tuple(db.documents())
+    db.checkpoint()</code></pre>
+<p>Validation, mapping, and reduction finish before a batch is committed. A view error leaves the current batch uncommitted. Checkpoints are optional accelerators, written on request or clean close.</p>
 
-with PortableDatabase("rebuilt.db", metrics) as rebuilt:
-    rebuilt.ingest(retained)
-    assert list(rebuilt.rows())[0].result["mean"] == 4</code></pre>
-<p>Each batch commits documents, checkpoints, group states, and changes together. The native engine currently holds one exact module per database. A different module needs a fresh database and replay.</p>
+<h2 id="rebuild">A cache can always be reconstructed</h2>
+<p>Keep the document log and exact view module; the cache can be discarded. Reopening verifies the complete log, reuses a valid checkpoint, and executes Wasm only for its uncached suffix. Missing or incompatible checkpoints rebuild from the original batches. Opening with a different module rebuilds its derived view from the same documents.</p>
+<pre data-run="python"><code>with Database("metrics.fold", metrics) as db:
+    expected = [(r.key, r.state, r.result) for r in db.rows()]
+    db.rebuild()
+    assert [(r.key, r.state, r.result) for r in db.rows()] == expected</code></pre>
+<p>Rebuild starts a new cursor generation. Its cost is a linear log read plus map/reduce work for uncached batches; no unmeasured throughput is promised. Current indexes and view history grow in host memory. Back up the log: a disposable cache does not make the only source copy disposable.</p>
 
 <h2 id="browser">The same module, entirely in a browser</h2>
-<p>Open the <a href="playground.html">static playground</a>, import JSON or JSONL, and watch groups update locally. Its dedicated worker executes the same compiled module used by Python. Export documents and verify a replay before closing the page: browser storage is currently in memory.</p>
-<p>The <a href="portable.html#browser">browser integration example</a> includes the exact client import, resource-copy step, and a working static page. No application server is needed to process documents.</p>
-
-<h2 id="callbacks">Using Python callbacks instead</h2>
-<p>The existing <code>Database</code> API supports trusted Python maps, ordered folds, and multiple views in a separate SQLite schema. Install <code>python -m pip install '.[reducers]'</code> for its numeric Rust/Wasm reducers, or use dependency-free Python <code>OrderedFold</code>. Source installation still builds the native extension and requires Rust. Callback maps and folds run in Python; they do not become browser view modules.</p>
-<p>See the <a href="api.html#database">callback API and examples</a> for registration, named-view reads, automatic rebuilds, and compaction.</p>
+<p>Open the <a href="playground.html">static playground</a>, import JSON or JSONL, and watch groups update locally. A dedicated worker executes the same compiled module as Python; JavaScript owns browser grouping and in-memory storage. Export resolved documents before reloading or closing.</p>
+<p>The <a href="portable.html#browser">browser example</a> includes resource copying and a complete static page. Browser persistence, log/history compaction, and multiple native views per database remain future work.</p>
 
 <h2 id="where-next">Keep exploring</h2>
-<div class="cards"><a class="card" href="portable.html"><strong>Write a portable view <span aria-hidden="true">↗</span></strong><span>A complete AssemblyScript module, custom build, and browser integration.</span></a><a class="card" href="api.html#portable-database"><strong>The native Python API <span aria-hidden="true">↗</span></strong><span>Appends, replay, snapshots, changes, export, and lifecycle.</span></a><a class="card" href="concepts.html"><strong>Replay and ordering <span aria-hidden="true">↗</span></strong><span>Document identity, module versions, persistence, and numerical limits.</span></a><a class="card" href="experiments.html"><strong>Earlier native experiments <span aria-hidden="true">↗</span></strong><span>Historical numeric field-map measurements with their original scope.</span></a></div>
+<div class="cards"><a class="card" href="portable.html"><strong>Write a portable view <span aria-hidden="true">↗</span></strong><span>A complete AssemblyScript module, custom build, and browser integration.</span></a><a class="card" href="api.html#database"><strong>The native Python API <span aria-hidden="true">↗</span></strong><span>Appends, snapshots, changes, checkpoint, and rebuild.</span></a><a class="card" href="concepts.html"><strong>Documents and caches <span aria-hidden="true">↗</span></strong><span>Identity, deterministic folds, durability, and cache validation.</span></a></div>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#install">Install from your checkout</a>
 <a href="#quickstart">A native metric in a few lines</a>
 <a href="#append-or-name">Append freely. Name when useful.</a>
 <a href="#live-updates">Read once, follow changes</a>
+<a href="#rebuild">A cache can always be reconstructed</a>
 <a href="#browser">The same module, entirely in a browser</a>
-<a href="#callbacks">Using Python callbacks instead</a>
 <a href="#where-next">Keep exploring</a></aside>
   </div>
   <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="PortableDatabase and PortableView reference, plus the existing Python callback Database API.">
+  <meta name="description" content="The Rust-native Database and View API: immutable appends, snapshots, changes, checkpoint, and rebuild.">
   <meta name="color-scheme" content="light">
   <title>Python API · Foldlite DB</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -32,167 +32,112 @@
 <a href="playground.html">Browser playground</a>
 <a href="portable.html">Portable views</a>
 <a href="api.html" aria-current="page">Python API</a>
-<a href="concepts.html">Replay and ordering</a>
-<a href="experiments.html">Native experiments</a></nav>
-    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Portable. Replayable.<br><span>Rust · Python · browser</span></div>
+<a href="concepts.html">Documents and caches</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
     <main id="content" tabindex="-1"><p class="eyebrow">Reference · development API</p>
 <h1>The Python API</h1>
-<p class="lead"><code>PortableDatabase</code> runs a complete Wasm map/reduce view in Rust. The existing <a href="#database"><code>Database</code> API</a> runs Python callbacks. Both expose immutable documents, atomic batches, snapshots, and changes.</p>
+<p class="lead"><code>Database</code> is the Rust-native engine for immutable document logs and rebuildable Wasm views. <code>View</code> identifies the complete compiled computation. There is one storage and computation path.</p>
 
-<h2 id="portable-view">PortableView and packaged assets</h2>
-<pre class="signature"><code>PortableView(module, *, sha256=None)
-PortableView.bundled(name="metrics") → PortableView
+<h2 id="view">View and packaged assets</h2>
+<span id="portable-view"></span>
+<pre class="signature"><code>View(module, *, sha256=None)
+View.bundled(name="metrics") → View
 portable_assets() → importlib.resources Traversable</code></pre>
-<p>Import these names from <code>foldlitedb</code>. <code>module</code> accepts Wasm bytes or a filesystem path. <code>PortableView</code> stores immutable <code>module</code> bytes and their <code>sha256</code>; an optional digest must match exactly. Module size is 1 byte through 16 MiB. Exports, imports, ABI, and descriptor are validated when the native database opens.</p>
-<p><code>bundled</code> accepts <code>"metrics"</code> or <code>"catalogue"</code> and verifies the packaged manifest digest. Metrics returns <code>{count,sum,min,max,mean}</code>; catalogue returns <code>{count,items}</code> after its ordered item fold. The <a href="portable.html#bundled">portable guide</a> describes accepted payloads. <code>portable_assets()</code> exposes both modules and manifests plus the buildless browser hosts. Copy its files using their resource <code>read_bytes()</code> methods; resources need not be ordinary filesystem paths.</p>
+<p>Import these names from <code>foldlitedb</code>. <code>module</code> accepts Wasm bytes or a filesystem path. A <code>View</code> stores immutable <code>module</code> bytes and their <code>sha256</code>; an optional digest must match. Modules range from 1 byte through 16 MiB. The native database validates exports, imports, ABI, and descriptor when opening.</p>
+<p><code>bundled</code> accepts <code>"metrics"</code> or <code>"catalogue"</code> and verifies the manifest digest. Metrics returns <code>{count,sum,min,max,mean}</code>; catalogue returns <code>{count,items}</code>. See <a href="portable.html#bundled">accepted payloads</a>. <code>portable_assets()</code> exposes modules, manifests, and browser hosts; copy files with each resource's <code>read_bytes()</code> method.</p>
+<p><code>PortableView</code> is an exact alias of <code>View</code>. It does not select another engine.</p>
 
-<h2 id="portable-database">PortableDatabase</h2>
-<pre class="signature"><code>PortableDatabase(path, view=None)</code></pre>
-<p>A Rust/SQLite database executing one complete portable view. <code>view</code> accepts a <code>PortableView</code>, Wasm bytes, or a module path. Omit it to use the bundled metrics view. <code>path</code> accepts a filesystem path or <code>":memory:"</code>. Parent directories must already exist.</p>
-<p>Use a context manager or <code>close()</code>. Closing is idempotent; later operations raise <code>DatabaseError</code>. Reopening the same file and exact module reuses persisted state. Different module bytes fail: create a new file and replay retained documents to upgrade. Cursors bind to a database identity and exact module digest.</p>
-<pre data-run="python"><code>from foldlitedb import PortableDatabase, PortableView
+<h2 id="database">Database</h2>
+<span id="portable-database"></span>
+<pre class="signature"><code>Database(path, view=None)</code></pre>
+<p>A Rust-native database executing one complete Wasm view. <code>view</code> accepts a <code>View</code>, Wasm bytes, or a module path; omit it for bundled metrics. <code>path</code> accepts a filesystem path or <code>":memory:"</code>. Parent directories must already exist. A persistent path is an append-only document log, with <code>.cache</code> and <code>.lock</code> siblings. Exactly one active owner may open it.</p>
+<p>Use a context manager or <code>close()</code>. Clean close checkpoints persistent derived state and releases ownership. Closing is idempotent; later operations raise <code>DatabaseError</code>. <code>PortableDatabase</code> is an exact alias.</p>
+<p>Reopen validates the complete log and reuses a compatible cache, then replays any uncached suffix. A missing or invalid cache rebuilds. Different module bytes automatically rebuild the view from the same documents. Reconstruction creates a new cursor generation; a valid checkpoint preserves generation across reopen. Old external-database files are not this log format.</p>
+<pre data-run="python"><code>from foldlitedb import Database, View
 
-with PortableDatabase(":memory:", PortableView.bundled("metrics")) as portable:
-    original = portable.add({"metric": "loss", "value": 4}, id="a")
-    assert portable.add(original.payload, id="a") == original
-    snapshot = portable.query()
-    portable.add({"metric": "loss", "value": 8})
-    assert portable.changes(since=snapshot.cursor).rows[0].result["mean"] == 6
-    retained = tuple(portable.documents())
-    assert portable.stats()["documents"] == 2
+with Database(":memory:", View.bundled("metrics")) as db:
+    original = db.add({"metric": "loss", "value": 4}, id="a")
+    assert db.add(original.payload, id="a") == original
+    snapshot = db.query()
+    db.add({"metric": "loss", "value": 8})
+    assert db.changes(since=snapshot.cursor).rows[0].result["mean"] == 6
+    retained = tuple(db.documents())
+    assert db.stats()["documents"] == 2
 
-with PortableDatabase(":memory:") as replay:
+with Database(":memory:") as replay:
     assert replay.ingest(retained).inserted == 2
     assert replay.ingest(retained).replayed == 2</code></pre>
 
-<h3 id="portable-appends">Append and replay</h3>
+<h2 id="append">Append and replay</h2>
+<span id="portable-appends"></span>
 <pre class="signature"><code>db.add(payload, *, id=None, source="default", position=None) → Document
 db.add_many(payloads, *, source="default") → tuple[Document, ...]
 db.ingest(documents) → IngestResult
 db.ingest_many(documents, *, batch_size=100) → iterator[IngestResult]</code></pre>
-<p><code>add</code> appends one finite JSON payload and returns its resolved <code>Document(id, payload, position, source)</code>. Omitted IDs are generated; omitted positions start at zero and advance per source. An identical named add or replay at an existing source position reuses the original document. Conflicting reuse fails; previously unseen positions must advance that source's checkpoint. IDs and sources are nonempty strings of at most 4096 UTF-8 bytes. Positions range from zero through <code>2**53 - 1</code>.</p>
-<p><code>add_many</code> eagerly consumes one iterable of payloads and commits atomically, returning resolved records in input order. Each member is one JSON payload, including an entire array. Empty input returns <code>()</code>; retrying unnamed payloads appends new records. <code>ingest</code> instead requires <code>Document</code> instances with retained identities, positions, and payloads; its result contains <code>inserted</code>, <code>replayed</code>, and <code>sequence</code>. Identical replay skips map execution.</p>
-<p><code>ingest_many</code> is lazy. Iterating commits separate batches of 1–1024 documents, defaulting to 100. A later error preserves previously committed batches. All atomic ingestion calls are limited to 1024 documents and 4096 map emissions. The complete map request, including its envelope and all newly inserted payloads, must fit 256 KiB; per-group add requests, states, and results must also fit their Wasm buffers. Reduce batch size for larger payloads. Map, reducer, validation, and limit errors roll back the whole current batch.</p>
-<p>Portable JSON uses IEEE-754 double precision and at most 64 nesting levels. Python rejects integer inputs that cannot be represented exactly as a double. Encode identifiers requiring arbitrary integer precision as strings. Nonfinite numbers and invalid Unicode scalar values fail before execution.</p>
+<p><code>add</code> appends one finite JSON payload and returns its resolved <code>Document(id, payload, position, source)</code>. Omitted IDs are generated; omitted positions start at zero and advance per source. An identical named add or replay at an existing source position reuses the original document. Conflicting reuse fails; previously unseen positions must advance that source. IDs and sources are nonempty strings of at most 4096 UTF-8 bytes; positions range from zero through <code>2**53 - 1</code>.</p>
+<p><code>add_many</code> eagerly consumes one iterable of payloads and commits atomically. Its returned records preserve input order. Every member is one payload, including an entire array; empty input returns <code>()</code>. Retrying unnamed payloads appends new observations. Documents are immutable; append a new observation to express a change.</p>
+<p><code>ingest</code> takes explicit <code>Document</code> instances with retained identities, positions, and payloads. Its result contains <code>inserted</code>, <code>replayed</code>, and <code>sequence</code>. Identical replay performs no map work. <code>ingest_many</code> is lazy: each yielded result commits a separate batch of 1–1024 records, defaulting to 100. A later error preserves earlier committed batches.</p>
+<p>An atomic batch has at most 1024 documents and 4096 emissions. The complete map request, including its envelope and newly inserted payloads, must fit 256 KiB; per-group add requests, states, and results must fit their own buffers. The log frame limit is 8 MiB. Reduce batch size for larger payloads. Validation, map, reducer, and limit errors leave the current batch uncommitted; successful persistent batches are synced before acknowledgement.</p>
+<p>Finite JSON uses IEEE-754 doubles and at most 64 nesting levels. Python rejects integer inputs not exactly representable as doubles. Nonfinite values and invalid Unicode scalar strings fail. Use strings for arbitrary-precision identifiers.</p>
 
-<h3 id="portable-reads">Rows, snapshot pages, and changes</h3>
+<h2 id="reads">Rows, snapshots, and changes</h2>
+<span id="portable-reads"></span>
 <pre class="signature"><code>db.rows(*, key=&lt;omitted&gt;, limit=100) → iterator[Row]
 db.query(*, key=&lt;omitted&gt;, limit=100, cursor=None, after=None) → Snapshot
 db.changes(*, since, limit=100) → ChangePage</code></pre>
-<p>Portable reads omit a view name. <code>rows</code> lazily follows snapshot pages, pinning the committed prefix on first iteration. <code>limit</code> is a page size from 1 through 1024, not a total row limit. Omit <code>key</code> for every group or supply any JSON key, including null, for exact filtering. Rows follow canonical JSON lexical order consistent with the browser host. No transaction spans a yield to application code.</p>
-<p>A <code>Row</code> contains <code>key</code>, reducer <code>state</code>, finalized <code>result</code>, and committed <code>sequence</code>. A <code>Snapshot</code> contains <code>rows</code>, <code>cursor</code>, <code>after</code>, and <code>complete</code>. Continue with both returned <code>cursor</code> and <code>after</code>, keeping the same key filter. New documents do not change that snapshot.</p>
-<pre data-run="python"><code>with PortableDatabase(":memory:") as portable:
-    portable.add_many([
+<p><code>rows</code> lazily follows snapshot pages, pinning the committed prefix on first iteration. <code>limit</code> is a page size from 1 through 1024, not a total row limit. Omit <code>key</code> for every group or supply any JSON key, including null, for exact filtering. Rows follow canonical JSON lexical order consistent with the browser. No operation lock spans a yield into application code.</p>
+<p>A <code>Row</code> has <code>key</code>, reducer <code>state</code>, finalized <code>result</code>, and committed <code>sequence</code>. A <code>Snapshot</code> has <code>rows</code>, <code>cursor</code>, <code>after</code>, and <code>complete</code>. Continue with both returned cursor and after token, preserving the key filter. New ingestion does not change the pinned snapshot.</p>
+<pre data-run="python"><code>with Database(":memory:") as db:
+    db.add_many([
         {"metric": "a", "value": 2},
         {"metric": "b", "value": 8},
     ])
-    page = portable.query(limit=1)
+    page = db.query(limit=1)
     snapshot_cursor = page.cursor
     rows = list(page.rows)
     while not page.complete:
-        page = portable.query(limit=1, cursor=page.cursor, after=page.after)
+        page = db.query(limit=1, cursor=page.cursor, after=page.after)
         rows.extend(page.rows)
     assert [row.key for row in rows] == ["a", "b"]
 
-    portable.add({"metric": "a", "value": 4})
-    changes = portable.changes(since=snapshot_cursor, limit=1)
+    db.add({"metric": "a", "value": 4})
+    changes = db.changes(since=snapshot_cursor, limit=1)
     assert changes.rows[0].result["mean"] == 3
     while not changes.complete:
-        changes = portable.changes(since=changes.cursor, limit=1)</code></pre>
-<p><code>changes</code> reads committed group postimages after a snapshot or change cursor. Pass <code>since=0</code> to read retained history from the start. A page contains <code>rows</code>, a continuation <code>cursor</code>, and <code>complete</code>; continue with that cursor. Multiple updates to one key in a batch coalesce into one postimage. A page can split a batch's group updates. Zero-emission documents still advance progress. Cursors belong to their original database and cannot be transferred to a replayed database.</p>
+        changes = db.changes(since=changes.cursor, limit=1)</code></pre>
+<p><code>changes</code> returns committed group postimages after a snapshot or change cursor. <code>since=0</code> reads retained history from the start. A page has <code>rows</code>, continuation <code>cursor</code>, and <code>complete</code>; continue with that cursor. Repeated changes to a key in one batch coalesce. A page can split group updates from one batch. Zero-emission documents still advance progress.</p>
+<p>Cursors bind to the database generation and exact module. Checkpointed reopen can reuse them; rebuild, cache reconstruction, or module replacement expires them. A new database or browser worker cannot reuse another's cursor. There is no history compaction API.</p>
 
-<h3 id="portable-export">Export and inspect</h3>
-<pre class="signature"><code>db.documents(*, limit=100) → iterator[Document]
+<h2 id="maintenance">Checkpoint, rebuild, export, and inspect</h2>
+<span id="portable-export"></span>
+<pre class="signature"><code>db.checkpoint() → dict
+db.rebuild() → dict
+db.documents(*, limit=100) → iterator[Document]
 db.stats() → dict
 db.close()</code></pre>
-<p><code>documents</code> exports resolved source records in original ingestion order at a fixed snapshot, pinned on first iteration. Its page size is 1–1024. Retain these records outside the derived cache and feed them to <code>ingest</code> or <code>ingest_many</code> for replay.</p>
-<p><code>stats</code> returns <code>documents</code> (count), <code>sequence</code>, <code>cursor</code>, <code>module_sha256</code>, <code>descriptor</code>, and <code>checkpoints</code> (source-to-position mapping). Engine sequence includes document and group-state records, so it is not a document count. Snapshot and sequence values can differ when replay uses different batch boundaries.</p>
-<p>The native engine uses SQLite WAL with full synchronous commits and a five-second busy timeout. Separate connections coordinate writes through SQLite; calls on a native engine are serialized. Retained documents and view history grow on disk. This API currently exposes no compaction, callback registration, reset, or in-place module rebuild.</p>
+<p><code>checkpoint</code> atomically persists the current derived snapshot and returns stats plus <code>checkpointed: true</code>. Clean close also checkpoints. The cache is optional and is not rewritten after every append. Encoded snapshots are capped at 1 GiB. Checkpoint failures are reported, including during close; the synced source log remains intact and close releases ownership even on failure. <code>rebuild</code> replays original log batches through the current module, starts a new cursor generation, writes a checkpoint, and returns stats plus <code>rebuilt: true</code>. Documents remain unchanged.</p>
+<pre data-run="python"><code>with Database("maintenance.fold") as db:
+    db.add_many([{"metric": "loss", "value": 4}, {"metric": "loss", "value": 8}])
+    expected = [(row.key, row.state, row.result) for row in db.rows()]
+    assert db.checkpoint()["checkpointed"] is True
+    assert db.rebuild()["rebuilt"] is True
+    assert [(row.key, row.state, row.result) for row in db.rows()] == expected</code></pre>
+<p><code>documents</code> exports resolved records in original ingestion order at a snapshot pinned on first iteration. Page size is 1–1024. Back up these records or the log and retain exact view artifacts; the cache can be regenerated. Re-import through <code>ingest</code> or <code>ingest_many</code>.</p>
+<p><code>stats</code> includes <code>documents</code>, <code>groups</code>, <code>sequence</code>, <code>cursor</code>, <code>generation</code>, <code>module_sha256</code>, <code>descriptor</code>, and source <code>checkpoints</code>. <code>storage</code> is <code>"append-only-log"</code> or <code>"memory"</code>. The <code>cache</code> object reports <code>status</code>, <code>bytes</code>, and <code>log_offset</code>; <code>replay</code> reports processed <code>batches</code> and <code>documents</code>; <code>log</code> reports <code>bytes</code>, <code>batches</code>, and <code>recovered_tail_bytes</code>.</p>
+<p>Engine sequence counts inserted documents and changed group states, rather than documents alone. Cache status describes checkpoint handling; replay counts make uncached reconstruction visible. Reopening always verifies the complete log, even with a valid cache. Current retained documents, indexes, and view history grow in host memory; there is no compaction or bounded total-memory guarantee.</p>
 
-<h2 id="api-comparison">Choose a computation path</h2>
-<div class="table-wrap"><table><thead><tr><th>Capability</th><th>PortableDatabase</th><th>Database</th></tr></thead><tbody>
-<tr><td>Map input</td><td>JSON payload inside Wasm</td><td><code>Document</code> in a Python callback</td></tr>
-<tr><td>View setup</td><td>One module passed to the constructor</td><td>One or more <code>View</code> registrations</td></tr>
-<tr><td>Read methods</td><td><code>rows()</code>, <code>query()</code>, <code>changes(since=...)</code></td><td>Same methods with a view name</td></tr>
-<tr><td>Changed computation</td><td>New database plus replay</td><td>Changed declared definition rebuilds its view</td></tr>
-<tr><td>Browser execution</td><td>Same compiled map/reduce module</td><td>Bundled numeric reducers only; Python callbacks stay in Python</td></tr>
-<tr><td>Runtime dependency</td><td>Packaged native Rust extension</td><td>Python SQLite; Wasmtime extra for numeric reducers</td></tr>
-</tbody></table></div>
-<p>Use separate files: the two APIs have different schemas and cursor formats. Neither API selects the other backend implicitly. The remaining reference describes the callback API.</p>
-
-<h2 id="database">Database: Python callbacks</h2>
-<pre class="signature"><code>Database(path, *, generation="default", reset=False,
-         max_batch=1024, max_batch_bytes=8 * 1024 * 1024,
-         max_value_bytes=1024 * 1024, max_key_bytes=4096,
-         max_page_bytes=8 * 1024 * 1024,
-         max_emissions_per_document=1024, timeout=30)</code></pre>
-<p>A local SQLite view cache, safe to share between Python threads. Separate instances and processes serialize writes through SQLite. Use a context manager or call <code>close()</code>.</p>
-<p><code>generation</code> identifies the source collection. A conflicting generation requires an explicit <code>reset=True</code>, which discards derived storage and invalidates existing instances and cursors. Retain authoritative documents before resetting.</p>
-<div class="table-wrap"><table><thead><tr><th>Limit</th><th>Meaning</th></tr></thead><tbody><tr><td><code>max_batch</code></td><td>Maximum documents in one atomic ingestion call.</td></tr><tr><td><code>max_batch_bytes</code></td><td>Encoded payload, document-ID, and source bytes per batch; also bounds pending map values.</td></tr><tr><td><code>max_value_bytes</code></td><td>Encoded payload, contribution, reducer-state, and finalized-result size.</td></tr><tr><td><code>max_key_bytes</code></td><td>Encoded canonical JSON key size; cannot exceed 4096.</td></tr><tr><td><code>max_page_bytes</code></td><td>Total key, state, and result bytes in a returned page.</td></tr><tr><td><code>max_emissions_per_document</code></td><td>Bounds map output for each document.</td></tr><tr><td><code>timeout</code></td><td>SQLite lock wait in finite seconds, from 0 to 2147483.647.</td></tr></tbody></table></div>
-
-<h2 id="documents">Adding documents</h2>
-<section class="api-section"><h3 id="add"><code>add</code></h3><pre class="signature"><code>db.add(payload, *, id=None, source="default", position=None) → Document</code></pre><p>Append any finite JSON value. Omitted IDs are generated; omitted positions start at zero or follow the source checkpoint. The returned payload is a separate JSON value, isolated from caller and mapper mutations.</p><p>An identical named retry reuses its original position. A source and position can also identify an identical unnamed retry. Conflicting identity reuse raises <code>DocumentConflict</code>; a new document behind its source checkpoint raises <code>SourceOrderError</code>.</p></section>
-<section class="api-section"><h3 id="add-many"><code>add_many</code></h3><pre class="signature"><code>db.add_many(payloads, *, source="default") → tuple[Document, ...]</code></pre><p>Eagerly consume one bounded iterable of JSON payloads and append it atomically. Every member is one payload, so an array is kept whole. Results preserve input order and have generated IDs and consecutive source positions. Empty input returns <code>()</code>.</p><p>Input errors, map failures, limits, and position exhaustion roll back the entire batch. Retrying this unnamed call adds another batch. Replay retained documents with <code>ingest</code>.</p></section>
-<section class="api-section"><h3 id="explicit-documents">Explicit documents and batches</h3><pre class="signature"><code>Document(id, payload, position, source="default")
-db.ingest(documents) → IngestResult
-db.ingest_many(documents, *, batch_size=None) → iterator[IngestResult]</code></pre><p><code>ingest</code> atomically commits a bounded batch of explicit <code>Document</code> records. Identical replay performs no map work and must match the ID, position, and payload. Its result has <code>inserted</code>, <code>replayed</code>, and the committed ingestion <code>sequence</code>.</p><p><code>ingest_many</code> is lazy: iteration commits separate bounded batches. The default batch size is <code>max_batch</code>; a failure preserves previously committed batches.</p></section>
-
-<h2 id="views">Views and reducers</h2>
-<pre class="signature"><code>View(name, version, map, reducer, references={})
-db.register(view) → revision</code></pre>
-<p>A map receives a <code>Document</code> and yields zero or more <code>(key, contribution)</code> pairs. Keys and values may be structured finite JSON. Each key owns a reducer state. The view version identifies map behavior; <code>references</code> declares captured external-input versions.</p>
-<p>Register callbacks on every instance that reads their views. Registration reuses compatible persisted state or rebuilds a changed definition atomically. Query and change reads catch registered callbacks up after another connection ingests documents.</p>
-<h3 id="numeric-reducers">Numeric reducers</h3>
-<pre class="signature"><code>Mean(*, runtime=None, positioned=False)
-Sum(*, runtime=None, positioned=False)
-Count(*, runtime=None, positioned=False)
-Envelope(*, runtime=None, positioned=False)
-RustReducer(name, *, runtime=None, positioned=False)</code></pre>
-<p>Install the callback numeric runtime from your checkout with <code>python -m pip install '.[reducers]'</code>. The source build requires Rust; installing a matching wheel does not.</p>
-<p>The named constructors use the same descriptors and state formats as their explicit reducer IDs. They load the optional runtime when computation needs it. Ordinary maps emit finite numbers or null; null contributes nothing.</p>
-<div class="table-wrap"><table><thead><tr><th>Constructor</th><th>Reducer ID</th><th>Result</th></tr></thead><tbody><tr><td><code>Mean()</code></td><td><code>mean/v1</code></td><td><code>{"count": n, "value": mean}</code>; empty value is null.</td></tr><tr><td><code>Sum()</code></td><td><code>sum/v1</code></td><td>Count and sum; empty sum is zero.</td></tr><tr><td><code>Count()</code></td><td><code>count/v1</code></td><td>Count and count value; counts non-null numeric emissions.</td></tr><tr><td><code>Envelope()</code></td><td><code>envelope/v1</code></td><td>Count and first/min/max/last points, each with value and position.</td></tr></tbody></table></div>
-<p>Map a document to <code>1</code> to count it. Envelope order uses source positions plus deterministic identity/emission tie breaking. <code>positioned=True</code> accepts explicitly positioned portable contributions; it is intended for adapters that already own that position schema.</p>
-<h3 id="ordered-fold">OrderedFold</h3>
-<pre class="signature"><code>OrderedFold(initial, step, *, version, finalize=None)</code></pre>
-<p>A trusted Python fold for structured state. <code>step(state, contribution)</code> returns the next finite JSON state. Steps run in persisted ingestion order within a key. Ordered folds do not declare arbitrary partial-state merging.</p>
-<pre data-run="python"><code>from foldlitedb import Database, OrderedFold, View
-
-def statuses(document):
-    yield document.payload["record"], document.payload["status"]
-
-status = View("status", "1", statuses,
-              OrderedFold(None, lambda previous, value: value, version="1"))
-with Database(":memory:") as db:
-    db.register(status)
-    db.add_many([
-        {"record": "a", "status": "open"},
-        {"record": "a", "status": "closed"},
-    ])
-    assert list(db.rows("status"))[0].result == "closed"</code></pre>
-
-<h2 id="reads">Rows, snapshots, and changes</h2>
-<section class="api-section"><h3 id="rows"><code>rows</code></h3><pre class="signature"><code>db.rows(name, *, key=&lt;omitted&gt;, limit=100) → iterator[Row]</code></pre><p>Lazily iterate a stable snapshot in bounded pages. The first iteration selects its committed prefix. <code>limit</code> controls page size, from 1 to 4096; it does not cap total results. No transaction or lock spans a yield to application code.</p><p>Omit <code>key</code> for every group. Supplying any JSON key, including null, filters exactly. Keys follow canonical JSON lexical order. View rebuilds and compaction can expire a paused iterator.</p></section>
-<section class="api-section"><h3 id="query"><code>query</code></h3><pre class="signature"><code>db.query(name, *, key=&lt;omitted&gt;, limit=100, after=None, cursor=None) → Snapshot</code></pre><p>A snapshot contains <code>rows</code>, <code>cursor</code>, <code>after</code>, and <code>complete</code>. Continue pages with both the original cursor and the returned <code>after</code>. Each <code>Row</code> contains <code>key</code>, finalized <code>result</code>, reducer <code>state</code>, and ingestion <code>sequence</code>.</p></section>
-<section class="api-section"><h3 id="changes"><code>changes</code></h3><pre class="signature"><code>db.changes(name, *, since, limit=100) → ChangePage</code></pre><p>Read committed key postimages after a snapshot or change cursor. A change page has <code>rows</code>, a continuation <code>cursor</code>, and <code>complete</code>. Continue using that page's cursor.</p><p>Changes coalesce repeated updates to the same key within one transaction. A page can split a transaction; its cursor retains per-key progress. Empty maps still advance progress.</p></section>
-
-<h2 id="maintenance">Lookup and maintenance</h2>
-<dl><dt><code>get(identifier, *, source="default") → Document | None</code></dt><dd>Read a cached immutable document with a freshly decoded payload.</dd><dt><code>checkpoint(source="default") → int | None</code></dt><dd>Read the highest committed source position.</dd><dt><code>refresh(name)</code></dt><dd>Explicitly catch a registered view up to retained documents. Ordinary reads do this automatically.</dd><dt><code>compact(name, *, before)</code></dt><dd>Discard older change history while preserving the chosen snapshot boundary. The caller owns reader retention.</dd><dt><code>stats()</code></dt><dd>Return document, source, view, state, history counts and current ingestion sequence.</dd></dl>
-
-<h2 id="errors">Errors</h2>
-<p>For the portable API, validation and Wasm failures raise <code>DatabaseError</code>; conflicting replay, source ordering, and invalid cursors use <code>DocumentConflict</code>, <code>SourceOrderError</code>, and <code>CursorExpired</code> where identified. A missing native extension raises an actionable <code>RuntimeError</code>.</p>
-<p><code>DatabaseError</code> extends <code>ValueError</code>. Its specialized errors are <code>DocumentConflict</code>, <code>SourceOrderError</code>, <code>CursorExpired</code>, and <code>GenerationMismatch</code>. Failing callbacks propagate their exceptions and roll back their transaction. Missing numeric runtime support raises an actionable <code>RuntimeError</code>.</p>
+<h2 id="errors">Errors and recovery</h2>
+<p><code>DatabaseError</code> extends <code>ValueError</code>. Validation and Wasm failures raise it; conflicting replay, source ordering, and invalid cursors use <code>DocumentConflict</code>, <code>SourceOrderError</code>, and <code>CursorExpired</code> where identified. A missing compiled extension raises an actionable <code>RuntimeError</code>.</p>
+<p>Opening an already-owned log fails. Complete log corruption fails rather than skipping records; only an incomplete final frame is recoverable as an interrupted append. A cache failure can be repaired by reconstruction. If an I/O error makes an append's acknowledgement uncertain, close, reopen, and retry using explicit resolved identities. Keep backups of source data.</p>
 </main>
-    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#portable-view">PortableView and packaged assets</a>
-<a href="#portable-database">PortableDatabase</a>
-<a href="#api-comparison">Choose a computation path</a>
-<a href="#database">Database: Python callbacks</a>
-<a href="#documents">Adding documents</a>
-<a href="#views">Views and reducers</a>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#view">View and packaged assets</a>
+<a href="#database">Database</a>
+<a href="#append">Append and replay</a>
 <a href="#reads">Rows, snapshots, and changes</a>
-<a href="#maintenance">Lookup and maintenance</a>
-<a href="#errors">Errors</a></aside>
+<a href="#maintenance">Checkpoint, rebuild, export, and inspect</a>
+<a href="#errors">Errors and recovery</a></aside>
   </div>
   <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>
 </body>

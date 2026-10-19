@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Write a map and reducer in AssemblyScript, then run the same WebAssembly module through Python or in a browser.">
+  <meta name="description" content="Write a map and reducer in AssemblyScript, then run the same WebAssembly module in native Python or a browser.">
   <meta name="color-scheme" content="light">
   <title>Portable views · Foldlite DB</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -32,16 +32,15 @@
 <a href="playground.html">Browser playground</a>
 <a href="portable.html" aria-current="page">Portable views</a>
 <a href="api.html">Python API</a>
-<a href="concepts.html">Replay and ordering</a>
-<a href="experiments.html">Native experiments</a></nav>
-    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Embedded. Portable. Replayable.<br><span>Rust · Python · browser</span></div>
+<a href="concepts.html">Documents and caches</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
     <main id="content" tabindex="-1"><p class="eyebrow">CouchDB-inspired views, from Python to the browser</p>
 <h1>Write a view once.<br>Run it in either environment.</h1>
 <p class="lead">A portable view contains both its map and its reducer. AssemblyScript compiles them into one WebAssembly module, executed by the Rust engine or a browser worker.</p>
 <div class="hero-actions"><a class="button" href="playground.html">Try the browser playground</a><a class="button secondary" href="#authoring">Write a custom view</a></div>
-<div class="note preview"><p><strong>Development API.</strong> This portable API has not been released on PyPI. Build this checkout or install a wheel built from it. The native engine currently holds one view per database; the browser host keeps state in memory. The existing <a href="api.html#database">callback Database API</a> remains available separately.</p></div>
+<div class="note preview"><p><strong>Development API.</strong> This API has not been released on PyPI. Build this checkout or install a wheel built from it. Each native document log has one derived view; the browser host keeps its documents and view in memory.</p></div>
 
 <h2 id="python">A native database from Python</h2>
 <p>Build prerequisites are Python 3.11+, Rust/Cargo 1.90+, and a platform C compiler and linker. From the repository root:</p>
@@ -49,12 +48,12 @@
 <pre><code>python -m pip install .
 python examples/portable_metrics.py</code></pre>
 
-<p>SQLite and the precompiled modules are included. Node is needed only for authoring or rebuilding AssemblyScript. To produce a wheel locally, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>. Installing the resulting wheel on a matching platform needs no compiler. See <a href="index.html#install">environment setup</a> for virtual-environment and Windows notes. Start the following example with fresh database files:</p>
+<p>The Rust engine and precompiled view modules are included. Node is needed only for authoring or rebuilding AssemblyScript. To produce a wheel locally, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>. Installing the resulting wheel on a matching platform needs no compiler. See <a href="index.html#install">environment setup</a> for virtual-environment and Windows notes. Start the following example with fresh database files:</p>
 
-<pre data-run="python"><code>from foldlitedb import PortableDatabase, PortableView
+<pre data-run="python"><code>from foldlitedb import Database, View
 
-view = PortableView.bundled("metrics")
-with PortableDatabase("portable-metrics.db", view) as db:
+view = View.bundled("metrics")
+with Database("metrics.fold", view) as db:
     documents = db.add_many([
         {"metric": "loss", "value": 4},
         {"metric": "loss", "value": 8},
@@ -65,7 +64,7 @@ with PortableDatabase("portable-metrics.db", view) as db:
     assert db.changes(since=snapshot.cursor).rows[0].result["mean"] == 5
     retained = tuple(db.documents())</code></pre>
 
-<p>Rust owns document identity, SQLite transactions, checkpoints, group states, snapshots, and changes. Its bounded Wasm interpreter executes both mapping and reduction, with no Python callbacks or Python Wasmtime dependency. <code>rows()</code> follows paginated snapshots; explicit <code>query()</code> and <code>changes()</code> support resumable reads. The <a href="api.html#portable-database">Python reference</a> covers every portable method.</p>
+<p>Rust owns the append-only document log, immutable identity, derived checkpoints, group states, snapshots, and changes. Its bounded Wasm interpreter executes both mapping and reduction. The log is independent of the module; a checkpoint is a disposable cache. <code>rows()</code> follows paginated snapshots; explicit <code>query()</code> and <code>changes()</code> support resumable reads. The <a href="api.html#database">Python reference</a> covers every portable method.</p>
 
 <h2 id="bundled">Two bundled views</h2>
 <p><strong>Metrics</strong> accepts payloads with a string <code>metric</code> and finite numeric <code>value</code>. Valid documents emit one number under their metric key; malformed shapes, missing fields, nulls, and nonnumeric values emit nothing. States contain <code>{count,sum,min,max}</code>; finalized results add <code>mean</code>. Empty states use null minimum, maximum, and mean. This view supports merge. Invalid contributions, states, and numeric overflow fail.</p>
@@ -162,11 +161,11 @@ cd ..</code></pre>
 
 <pre><code>import json
 from pathlib import Path
-from foldlitedb import PortableDatabase, PortableView
+from foldlitedb import Database, View
 
 manifest = json.loads(Path("views/.build/metric-totals.json").read_text())
-custom = PortableView("views/.build/metric-totals.wasm", sha256=manifest["sha256"])
-with PortableDatabase(":memory:", custom) as db:
+custom = View("views/.build/metric-totals.wasm", sha256=manifest["sha256"])
+with Database(":memory:", custom) as db:
     db.add_many([{"metric": "loss", "value": 4}, {"metric": "loss", "value": 8}])
     assert list(db.rows())[0].result == 12</code></pre>
 
@@ -174,7 +173,7 @@ with PortableDatabase(":memory:", custom) as db:
 <p><code>add</code> must preserve contribution order and produce equivalent state when an input sequence is split into successive batches. Implement <code>merge</code> and set <code>mergeable=true</code> only when compatible independent states can be combined correctly. The example leaves merge disabled. Bump the view version for changed behavior and the state version for incompatible formats; rebuild the module and manifest together. A new compiler can also change the module digest.</p>
 
 <h2 id="browser">Use the module on a static website</h2>
-<p>The <a href="playground.html">playground</a> imports JSON arrays or JSONL, appends measurements, streams simulated updates, exports resolved records, and verifies replay. All document processing stays in its worker. The same module bytes power the Python example; JavaScript owns browser grouping and storage. The Rust SQLite engine itself is not part of the browser build.</p>
+<p>The <a href="playground.html">playground</a> imports JSON arrays or JSONL, appends measurements, streams simulated updates, exports resolved records, and verifies replay. All document processing stays in its worker. The same module bytes power the Python example; JavaScript owns browser grouping and storage. The Rust document-log engine is not part of the browser build.</p>
 <p>To create your own page, copy the installed package's browser files and bundled modules. Run this Python from the repository root:</p>
 
 <pre data-run="python"><code>from pathlib import Path
@@ -224,7 +223,7 @@ try {
   base: new URL('./portable/', import.meta.url),
 });</code></pre>
 
-<p>The browser verifies the manifest's SHA-256 and descriptor before execution. <code>db.info</code> contains initial stats; <code>await db.stats()</code> exposes the current module digest, descriptor, checkpoints, document count, cursor, and Wasm memory size. Compare <code>module_sha256</code> with Python's <code>PortableView.sha256</code> to confirm the exact artifact.</p>
+<p>The browser verifies the manifest's SHA-256 and descriptor before execution. <code>db.info</code> contains initial stats; <code>await db.stats()</code> exposes the current module digest, descriptor, checkpoints, document count, cursor, and Wasm memory size. Compare <code>module_sha256</code> with Python's <code>View.sha256</code> to confirm the exact artifact.</p>
 <p><code>query({limit,cursor,after,key})</code> returns snapshot pages; continue with both returned cursor and after. <code>rows({limit,key})</code> collects all pages into an array. <code>changes(cursor,{limit})</code> returns one change page; continue with its returned cursor until complete. <code>ingest(resolvedDocuments)</code> replays exported records with their retained identities and positions. <code>add(payload,{id,source,position})</code> accepts an optional explicit identity. <code>export()</code> returns all resolved records. <code>replay()</code> rebuilds with original committed batches and reports equivalence of keys, states, and results.</p>
 
 <h2 id="contract">The computation contract and limits</h2>
@@ -241,9 +240,16 @@ try {
 <p>Portable JSON numbers use IEEE-754 double precision, as in JavaScript. Python rejects integer inputs that cannot be represented exactly as doubles; use strings for exact large identifiers. Positions and cursor sequences are nonnegative JavaScript-safe integers. Floating-point sums preserve ordered inputs; arbitrary merge trees can change rounding. See <a href="concepts.html#numerical-contract">numerical reproducibility</a>.</p>
 
 <h2 id="replay">Retain documents; regenerate views</h2>
-<p>Keep resolved documents and the exact compiled module outside derived storage. Reopen native storage with identical module bytes to reuse checkpoints; to change the module, open a fresh database and replay in original ingestion order. A matching human version label does not override a changed digest.</p>
+<p>Keep the document log and exact compiled module. A persistent <code>metrics.fold</code> log has separate <code>metrics.fold.cache</code> and <code>metrics.fold.lock</code> siblings. One active owner holds the log. Accepted immutable batches are synced before acknowledgement; clean close or <code>checkpoint()</code> writes an atomic derived snapshot.</p>
+<p>Reopen verifies the complete log, reuses a matching cache prefix, and executes Wasm for only the uncached suffix. Missing, corrupt, or different-module caches rebuild from the original batches. To change computation, open the same log with the new module; documents remain unchanged. A human version label cannot override a changed digest. Keep the previous module if its previous result must remain reproducible.</p>
+<p><code>rebuild()</code> explicitly recomputes the current view, checkpoints it, and starts a new cursor generation. Reconstruction is a linear log read plus map/reduce work for uncached batches; current indexes and history grow in host memory. Cache acceleration avoids computation, rather than the full validation read, and has no unmeasured throughput guarantee.</p>
+<pre data-run="python"><code>with Database("metrics.fold", view) as live:
+    expected = [(row.key, row.state, row.result) for row in live.rows()]
+    live.rebuild()
+    assert [(row.key, row.state, row.result) for row in live.rows()] == expected</code></pre>
+<p>To copy resolved documents into a separate log, preserve their original order:</p>
 
-<pre data-run="python"><code>with PortableDatabase("portable-rebuilt.db", view) as rebuilt:
+<pre data-run="python"><code>with Database("copy.fold", view) as rebuilt:
     rebuilt.ingest(retained)
     assert list(rebuilt.rows())[0].result["mean"] == 5</code></pre>
 
@@ -251,17 +257,17 @@ try {
 
 <pre><code>import json
 from pathlib import Path
-from foldlitedb import Document, PortableDatabase, PortableView
+from foldlitedb import Document, Database, View
 
-view = PortableView.bundled("metrics")
+view = View.bundled("metrics")
 records = json.loads(Path("exported-documents.json").read_text(), parse_int=float)
 documents = [Document(r["id"], r["payload"], int(r["position"]), r["source"]) for r in records]
-with PortableDatabase("from-browser.db", view) as db:
+with Database("from-browser.fold", view) as db:
     for result in db.ingest_many(documents):
         print(result.inserted, result.replayed)</code></pre>
 
-<p>The final snippet expects an exported JSON array from the metrics view. Browser payload numbers use IEEE-754 doubles; <code>parse_int=float</code> preserves those semantics even when a large double is serialized without a decimal point. Safe source positions are converted back to Python integers when constructing documents. Preserve input order; preserve batch boundaries too if exact engine sequence values matter. Compare computation outputs rather than database-local cursors. A new database receives a new identity, so its cursors differ even when results match.</p>
-<p>Native storage persists across reopen; browser state is in memory and is discarded on reload or <code>close()</code>. Export before closing and ingest those records into a new worker to restore it. Persistent browser storage, portable history compaction, and multiple native views per database remain future extensions. The <a href="concepts.html">replay model</a> explains how this differs from callback view rebuilds.</p>
+<p>The final snippet expects an exported JSON array from the metrics view. Browser payload numbers use IEEE-754 doubles; <code>parse_int=float</code> preserves those semantics even when a large double is serialized without a decimal point. Safe source positions are converted back to Python integers when constructing documents. Preserve input order; preserve batch boundaries too if exact engine sequence values matter. Compare computation outputs rather than database-local cursors. A new database or rebuilt cache receives a new generation, so obtain new cursors even when results match. A valid checkpoint preserves cursors across an ordinary reopen.</p>
+<p>Native documents persist in the log; a cache can always be reconstructed. Back up the log or an authoritative external stream: deleting the only source copy loses data. Browser state is in memory and is discarded on reload or <code>close()</code>. Export before closing and ingest those records into a new worker to restore it. Persistent browser storage, log/history compaction, and multiple native views per database remain future extensions. See the <a href="concepts.html">document and cache model</a>.</p>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#python">A native database from Python</a>
 <a href="#bundled">Two bundled views</a>

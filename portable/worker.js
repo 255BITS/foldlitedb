@@ -15,7 +15,7 @@ function name(value, label) {
   if (typeof value !== 'string' || !value || utf8.encode(value).length > 4096) throw new ViewError(`${label} must contain 1–4096 UTF-8 bytes`);
   return value;
 }
-/* SQLite's binary UTF-8 order is Unicode scalar order, unlike JS's UTF-16 <. */
+/* Native UTF-8 key order follows Unicode scalars; JS's < uses UTF-16 units. */
 function keyCompare(a, b) {
   const left = Array.from(a, c => c.codePointAt(0)), right = Array.from(b, c => c.codePointAt(0));
   for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i];
