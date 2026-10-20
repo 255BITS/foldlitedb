@@ -1,0 +1,84 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    name: Check release version
+    if: github.repository == '255BITS/foldlitedb'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.package.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require a tag matching the Python and Rust versions
+        id: package
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import ast
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          version = project["version"]
+          expected = f"v{version}"
+          tag = os.environ["RELEASE_TAG"]
+          if project["name"] != "foldlitedb" or tag != expected:
+              raise SystemExit(f"Expected foldlitedb release {expected}, got {tag!r}")
+          for path in ("native/python/Cargo.toml", "native/engine/Cargo.toml"):
+              native = tomllib.loads(Path(path).read_text())["package"]["version"]
+              if native != version:
+                  raise SystemExit(f"{path} version {native!r} differs from {version!r}")
+          module = ast.parse(Path("src/foldlitedb/__init__.py").read_text())
+          versions = [ast.literal_eval(node.value) for node in module.body
+                      if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "__version__"
+                              for target in node.targets)]
+          if versions != [version]:
+              raise SystemExit(f"Python __version__ {versions!r} differs from {version!r}")
+          print(f"Validated {project['name']} {version}")
+          PY
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Test and build release
+    needs: validate-release
+    uses: ./.github/workflows/wheels.yml
+    with:
+      source_ref: ${{ needs.validate-release.outputs.source_sha }}
+
+  publish:
+    name: Publish tested distributions
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/foldlitedb/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Publish to PyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

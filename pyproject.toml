@@ -12,6 +12,11 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/255BITS/foldlitedb"
+Documentation = "https://255bits.github.io/foldlitedb/"
+Issues = "https://github.com/255BITS/foldlitedb/issues"
+
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
 browser = ["playwright>=1.58,<2"]

@@ -14,11 +14,20 @@ maps and reduces documents in Rust or entirely in a browser worker. Try the
 [browser playground](https://255bits.github.io/foldlitedb/playground.html) or read
 the [view authoring guide](docs/portable.html).
 
-## Install from this checkout
+## Install
 
-This development API has **not been released on PyPI**. Use this checkout or a
-wheel built from it. Remote source and the [hosted documentation](https://255bits.github.io/foldlitedb/)
-can lag local changes until publication.
+Use Python 3.11+ to install the 0.1.0 release:
+
+```sh
+python -m pip install foldlitedb==0.1.0
+```
+
+Native wheels are provided for Linux x86-64 and ARM64, macOS Intel and Apple
+Silicon, and Windows x86-64. Installing a matching wheel needs neither Rust nor
+Node. The [hosted documentation](https://255bits.github.io/foldlitedb/) describes
+the API and bundled portable views.
+
+### Build from this checkout
 
 Building from source requires Python 3.11+, Rust/Cargo 1.90+, and a platform C
 compiler and linker. From the repository root:
@@ -35,8 +44,9 @@ On Windows, activate with `.venv\Scripts\activate` and use an MSVC build
 environment. Node.js is unnecessary for installation and bundled views. To make
 a wheel, run `python -m pip wheel . --no-deps --wheel-dir dist`. Install that
 wheel on a matching platform with `python -m pip install /path/to/the-built.whl`;
-installing a built wheel needs neither Rust nor Node. PyPI release and Trusted
-Publisher setup remain pending.
+installing a built wheel needs neither Rust nor Node. See the
+[release guide](docs/releasing.html) for PyPI Trusted Publisher setup and the
+0.1.0 publication workflow.
 
 ## Append documents, read a live view
 
