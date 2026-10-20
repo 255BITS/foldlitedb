@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -14,12 +15,19 @@ def json_bytes(value):
         raise ValueError(f'Expected finite JSON: {exc}') from exc
 
 
-def load_json(raw):
-    def reject(value):
-        raise ValueError(f'Nonfinite JSON constant: {value}')
-    value = json.loads(raw, parse_constant=reject)
-    json_bytes(value)  # Overflowing exponents also fail.
+def _reject_json_constant(value):
+    raise ValueError(f'Nonfinite JSON constant: {value}')
+
+
+def _parse_finite_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f'Expected finite JSON: {text}')
     return value
+
+
+def load_json(raw):
+    return json.loads(raw, parse_constant=_reject_json_constant, parse_float=_parse_finite_float)
 
 
 def read_bounded_json(path, *, max_bytes=65536, open_file=None):
@@ -173,6 +181,8 @@ async def materialize_jsonl_view(
         if replay is not None:
             await asyncio.to_thread(read_page, replay, limit=1)
         target = cursor_position(target_cursor)
+        pending_emissions: dict[str, tuple[object, list[object]]] = {}
+        advanced = False
         while cursor_position(replay) < target:
             if time.monotonic() - started > timeout:
                 raise ValueError(
@@ -181,28 +191,59 @@ async def materialize_jsonl_view(
             documents, cursors, _ = await asyncio.to_thread(read_page, replay)
             if not documents:
                 raise ValueError("Historical projection watermark disappeared")
-            batch = []
+            page_advanced = False
             for document, end in zip(documents, cursors):
                 if cursor_position(end) > target:
                     break
                 position = document_position(document)
-                batch.append(
-                    Document(
-                        str(position),
-                        {"document": document, "cursor": end},
-                        position=position,
-                        source="projection",
-                    )
+                if checkpoint is not None and position <= checkpoint:
+                    from .types import SourceOrderError
+                    raise SourceOrderError("New source positions must advance the retained checkpoint")
+                doc = Document(
+                    str(position),
+                    {"document": document, "cursor": end},
+                    position=position,
+                    source="projection",
                 )
+                for ordinal, (key, val) in enumerate(bounded_map(doc)):
+                    if getattr(view.reducer, "positioned", True) is False and hasattr(view.reducer, "prepare"):
+                        val = view.reducer.prepare(val, doc, ordinal)
+                    canon_key = json.dumps(key, sort_keys=True)
+                    entry = pending_emissions.get(canon_key)
+                    if entry is None:
+                        vals = [val]
+                        pending_emissions[canon_key] = (key, vals)
+                    else:
+                        vals = entry[1]
+                        vals.append(val)
+                    if len(vals) >= 1024:
+                        await asyncio.to_thread(
+                            database._reduce_view_group,
+                            view.name,
+                            canon_key,
+                            key,
+                            vals,
+                            position,
+                            mark_dirty=False,
+                        )
+                        del pending_emissions[canon_key]
                 replay = end
                 checkpoint = position
-            if not batch:
+                page_advanced = True
+                advanced = True
+            if not page_advanced:
                 raise ValueError("Historical snapshot is not a complete document boundary")
-            for chunk in chunk_documents(batch, max_count=batch_size, max_bytes=max_batch_bytes):
-                await asyncio.to_thread(database.ingest, chunk)
-                await asyncio.sleep(0)
+            await asyncio.sleep(0)
         if (checkpoint or 0) != target_position:
             raise ValueError("Projection checkpoint differs from the requested snapshot")
+        if advanced:
+            await asyncio.to_thread(
+                database._commit_projection_suffix,
+                view.name,
+                pending_emissions,
+                checkpoint,
+                replay,
+            )
         snapshot = await asyncio.to_thread(database.query, view.name, limit=max_groups + 1)
         if not snapshot.complete or len(snapshot.rows) > max_groups:
             raise ValueError(f"View exceeds {max_groups} groups; narrow the view")

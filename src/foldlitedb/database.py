@@ -276,7 +276,7 @@ class Database:
 
         self._views: dict[str, View] = {}
         self._view_descriptors: dict[str, Any] = {}
-        self._view_states: dict[str, dict[str, tuple[Any, Any, int]]] = {}
+        self._view_states: dict[str, dict[str, tuple[Any, Any, Any, int]]] = {}
         self._view_dirty: dict[str, bool] = {}
 
         try:
@@ -401,22 +401,90 @@ class Database:
             for view_name, view in self._views.items():
                 emissions: dict[str, tuple[Any, list[Any]]] = {}
                 for doc in docs:
-                    for key, val in view.map(doc):
+                    for ordinal, (key, val) in enumerate(view.map(doc)):
+                        if getattr(view.reducer, "positioned", True) is False and hasattr(view.reducer, "prepare"):
+                            val = view.reducer.prepare(val, doc, ordinal)
                         canon_key = json.dumps(key, sort_keys=True)
                         if canon_key not in emissions:
                             emissions[canon_key] = (key, [])
                         emissions[canon_key][1].append(val)
                 if emissions:
-                    self._view_dirty[view_name] = True
                     for canon_key, (orig_key, vals) in emissions.items():
-                        if canon_key in self._view_states[view_name]:
-                            _, cur_state, _ = self._view_states[view_name][canon_key]
-                            new_state = view.reducer.add(cur_state, vals)
-                        else:
-                            new_state = view.reducer.add(view.reducer.identity(), vals)
-                        self._view_states[view_name][canon_key] = (orig_key, new_state, res.sequence)
+                        self._reduce_view_group(
+                            view_name, canon_key, orig_key, vals, res.sequence, mark_dirty=True
+                        )
 
         return res
+
+    def _reduce_view_group(
+        self,
+        view_name: str,
+        canon_key: str,
+        orig_key: Any,
+        vals: list[Any],
+        sequence: int,
+        *,
+        mark_dirty: bool = True,
+    ) -> None:
+        if not vals:
+            return
+        view = self._views[view_name]
+        state_map = self._view_states[view_name]
+        if canon_key in state_map:
+            _, cur_state, _, _ = state_map[canon_key]
+            new_state = view.reducer.add(cur_state, vals)
+        else:
+            new_state = view.reducer.add(view.reducer.identity(), vals)
+        state_map[canon_key] = (orig_key, new_state, _MISSING, sequence)
+        if mark_dirty:
+            self._view_dirty[view_name] = True
+
+    def _finalize_view_group(self, view_name: str, canon_key: str):
+        orig_key, state, fin, seq = self._view_states[view_name][canon_key]
+        if fin is _MISSING:
+            fin = self._views[view_name].reducer.finalize(state)
+            self._view_states[view_name][canon_key] = (orig_key, state, fin, seq)
+        return orig_key, state, fin, seq
+
+    def _commit_projection_suffix(
+        self,
+        view_name: str,
+        pending_emissions: dict[str, tuple[Any, list[Any]]],
+        checkpoint: int,
+        replay: Any,
+    ) -> None:
+        for canon_key, (orig_key, vals) in pending_emissions.items():
+            self._reduce_view_group(
+                view_name, canon_key, orig_key, vals, checkpoint, mark_dirty=False
+            )
+        records = [
+            {
+                "id": str(checkpoint),
+                "source": "projection",
+                "position": checkpoint,
+                "payload": {"cursor": replay},
+            }
+        ]
+        state_map = self._view_states.get(view_name, {})
+        if state_map:
+            groups = []
+            for canon_key in list(state_map.keys()):
+                k, s, fin, seq = self._finalize_view_group(view_name, canon_key)
+                groups.append({"key": k, "state": s, "result": fin, "sequence": seq})
+            records.append(
+                {
+                    "id": str(checkpoint),
+                    "source": f"_view:{view_name}",
+                    "position": checkpoint,
+                    "payload": {
+                        "descriptor": self._view_descriptors[view_name],
+                        "checkpoint": checkpoint,
+                        "groups": groups,
+                    },
+                }
+            )
+        self._ingest_records(records)
+        self._view_dirty[view_name] = False
 
     def ingest_many(self, documents: Iterable[Document], *, batch_size=100) -> Iterator[IngestResult]:
         """Replay a larger iterable as bounded, separately committed batches."""
@@ -464,8 +532,9 @@ class Database:
                     for item in last.payload.get("groups", []):
                         k = item["key"]
                         s = item["state"]
+                        fin = item["result"] if "result" in item else _MISSING
                         seq = item.get("sequence", watermark)
-                        self._view_states[view.name][json.dumps(k, sort_keys=True)] = (k, s, seq)
+                        self._view_states[view.name][json.dumps(k, sort_keys=True)] = (k, s, fin, seq)
                 else:
                     self._view_states[view.name].clear()
         return view.version
@@ -477,11 +546,10 @@ class Database:
 
     def query(self, name_or_key=_MISSING, *, key=_MISSING, limit=100, cursor=None, after=None) -> Snapshot:
         if isinstance(name_or_key, str) and name_or_key in self._views:
-            view = self._views[name_or_key]
             state_map = self._view_states.get(name_or_key, {})
             rows = []
-            for orig_key, state, seq in state_map.values():
-                fin = view.reducer.finalize(state)
+            for canon_key in list(state_map.keys()):
+                orig_key, state, fin, seq = self._finalize_view_group(name_or_key, canon_key)
                 rows.append(Row(orig_key, fin, state, seq))
             rows.sort(key=lambda r: json.dumps(r.key, sort_keys=True))
             complete = len(rows) <= limit
@@ -539,8 +607,8 @@ class Database:
                 continue
 
             groups = []
-            for k, s, seq in state_map.values():
-                fin = view.reducer.finalize(s)
+            for canon_key in list(state_map.keys()):
+                k, s, fin, seq = self._finalize_view_group(view_name, canon_key)
                 groups.append({"key": k, "state": s, "result": fin, "sequence": seq})
 
             stats = self.stats()

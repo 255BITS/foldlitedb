@@ -154,3 +154,64 @@ def test_rust_reducer_adapter_batching_and_byte_caps():
     oversized = [{"value": 1, "position": [1, "x" * 300_000]}]
     with pytest.raises(DatabaseError, match="exceeds the reducer request byte budget"):
         rust_reducer.add(identity, oversized)
+
+
+def test_materialize_view_batches_group_reductions_and_keeps_log_compact(tmp_path):
+    path = tmp_path / "compact.fold"
+    documents = [{"n": n, "key": "total", "value": n, "pad": "x" * 512} for n in range(1, 501)]
+    add_batches = []
+    finalize_calls = []
+
+    class TrackedFold(OrderedFold):
+        def add(self, state, values):
+            add_batches.append(len(values))
+            return super().add(state, values)
+
+        def finalize(self, state):
+            finalize_calls.append(state)
+            return super().finalize(state)
+
+    def read_page(cursor, limit=128):
+        rows = [row for row in documents if row["n"] > int(cursor or 0)][:limit]
+        return rows, [str(row["n"]) for row in rows], {}
+
+    def run_view():
+        view = View(
+            "totals",
+            version="1",
+            map=lambda doc: [(doc.payload["document"]["key"], doc.payload["document"]["value"])],
+            reducer=TrackedFold(0, lambda s, v: s + v, version="1"),
+        )
+        return asyncio.run(
+            materialize_jsonl_view(
+                path,
+                generation="one",
+                view=view,
+                read_page=read_page,
+                target_cursor=str(len(documents)),
+                target_position=len(documents),
+                document_position=lambda d: d["n"],
+                cursor_position=lambda c: int(c or 0),
+                max_groups=10,
+            )
+        )
+
+    first = run_view()
+    assert first[0].state == 500 * 501 // 2
+    assert add_batches == [500]
+    add_batches.clear()
+    finalize_calls.clear()
+
+    reopened = run_view()
+    assert reopened == first
+    assert add_batches == []
+    assert finalize_calls == []
+
+    documents.append({"n": 501, "key": "total", "value": 501, "pad": "x" * 512})
+    suffix = run_view()
+    assert suffix[0].state == 501 * 502 // 2
+    assert add_batches == [1]
+
+    with Database(path) as db:
+        assert db.stats()["documents"] <= 6
+    assert path.stat().st_size < 16384

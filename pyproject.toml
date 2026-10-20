@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "foldlitedb"
-version = "0.1.1"
+version = "0.1.2"
 description = "Immutable document logs and rebuildable views with Rust and portable WebAssembly."
 readme = "README.md"
 requires-python = ">=3.11"
