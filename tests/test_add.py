@@ -31,12 +31,15 @@ def test_named_replays_never_append_or_mutate_the_original_log(tmp_path):
     path = tmp_path / "documents.log"
     with Database(path) as database:
         first = database.add({"metric": "x", "value": 4}, id="measurement/α", position=10)
-        original = path.read_bytes()
+    # Windows enforces the native log lock against reads from other handles.
+    original = path.read_bytes()
+    with Database(path) as database:
         before = database.query()
         assert database.add(first.payload, id=first.id) == first
         assert database.add(first.payload, position=10) == first
-        assert path.read_bytes() == original
         assert database.query() == before
+    assert path.read_bytes() == original
+    with Database(path) as database:
         for kwargs, payload in [
             ({"id": first.id}, {"metric": "x", "value": 9}),
             ({"id": first.id, "position": 11}, first.payload),
@@ -44,8 +47,8 @@ def test_named_replays_never_append_or_mutate_the_original_log(tmp_path):
         ]:
             with pytest.raises(DocumentConflict):
                 database.add(payload, **kwargs)
-        assert path.read_bytes() == original
         assert database.stats()["documents"] == 1
+    assert path.read_bytes() == original
 
 
 def test_source_order_and_names_are_source_scoped():
@@ -102,11 +105,13 @@ def test_failed_fold_never_appends_a_partial_batch(tmp_path):
     path = tmp_path / "documents.log"
     with Database(path) as database:
         database.add({"metric": "x", "value": 2})
-        original = path.read_bytes()
+    original = path.read_bytes()
+    with Database(path) as database:
         before = database.query()
         with pytest.raises(DatabaseError):
             database.add_many([{"metric": "x", "value": 1e308}] * 2)
-        assert path.read_bytes() == original
         assert database.query() == before
+    assert path.read_bytes() == original
+    with Database(path) as database:
         assert database.add({"metric": "x", "value": 3}).position == 1
-        assert path.read_bytes().startswith(original)
+    assert path.read_bytes().startswith(original)

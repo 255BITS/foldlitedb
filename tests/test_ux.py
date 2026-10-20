@@ -23,12 +23,13 @@ def test_named_batches_resolve_positions_per_source_and_replay_after_progress(tm
         inserted = db.ingest(batch)
         assert (inserted.inserted, inserted.replayed) == (3, 1)
         db.ingest([Document("delivery-3", {"metric": "x", "value": 4}, source="a")])
+    # Raw log snapshots require releasing the native file lock on Windows.
+    log = path.read_bytes()
+    with Database(path) as db:
         before = db.stats()
-        log = path.read_bytes()
         replay = db.ingest(batch)
         assert (replay.inserted, replay.replayed) == (0, 4)
         assert db.stats() == before
-        assert path.read_bytes() == log
         retained = list(db.documents())
         assert [(doc.source, doc.position) for doc in retained] == [
             ("a", 0), ("b", 0), ("a", 1), ("a", 2),
@@ -36,6 +37,7 @@ def test_named_batches_resolve_positions_per_source_and_replay_after_progress(tm
         assert all(type(doc.position) is int for doc in retained)
         assert first.position is None  # Caller input remains an unresolved request.
         assert next(db.rows()).result["sum"] == 10
+    assert path.read_bytes() == log
     with Database(path) as db:
         assert list(db.documents()) == retained
         assert db.ingest(batch).replayed == 4
@@ -47,8 +49,9 @@ def test_named_batch_conflicts_are_atomic_and_explicit_positions_keep_semantics(
     path = tmp_path / "atomic.fold"
     with Database(path) as db:
         db.ingest([Document("old", 1, 10, "a")])
+    log = path.read_bytes()
+    with Database(path) as db:
         before = db.stats()
-        log = path.read_bytes()
         with pytest.raises(DocumentConflict):
             db.ingest([
                 Document("new", 2, source="a"),
@@ -56,7 +59,8 @@ def test_named_batch_conflicts_are_atomic_and_explicit_positions_keep_semantics(
                 Document("old", 999, source="a"),
             ])
         assert db.stats() == before
-        assert path.read_bytes() == log
+    assert path.read_bytes() == log
+    with Database(path) as db:
         assert db.ingest([Document("new", 2, source="a"), Document("new", 3, source="b")]).inserted == 2
         assert [(doc.source, doc.position) for doc in db.documents()] == [("a", 10), ("a", 11), ("b", 0)]
         assert db.ingest([Document("old", 1, 10, "a")]).replayed == 1
@@ -92,8 +96,9 @@ def test_preview_distinguishes_malformed_catalogue_events_without_storage_writes
     valid = {"category": "books", "id": "product-a", "title": "Original"}
     with Database(path, View.bundled("catalogue")) as db:
         db.checkpoint()
+    log, cache = path.read_bytes(), cache_path.read_bytes()
+    with Database(path, View.bundled("catalogue")) as db:
         before = db.stats()
-        log, cache = path.read_bytes(), cache_path.read_bytes()
         mtimes = path.stat().st_mtime_ns, cache_path.stat().st_mtime_ns
         expected = [{"key": "books", "value": {"id": "product-a", "title": "Original", "deleted": False}}]
         assert db.preview(valid) == expected
@@ -104,8 +109,10 @@ def test_preview_distinguishes_malformed_catalogue_events_without_storage_writes
         assert db.preview(valid) == expected
         assert db.stats() == before
         assert list(db.documents()) == []
-        assert path.read_bytes() == log and cache_path.read_bytes() == cache
+        assert cache_path.read_bytes() == cache
         assert (path.stat().st_mtime_ns, cache_path.stat().st_mtime_ns) == mtimes
+    assert path.read_bytes() == log
+    with Database(path, View.bundled("catalogue")) as db:
         assert db.add(valid, id="actual-delivery").position == 0
 
 

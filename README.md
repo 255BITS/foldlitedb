@@ -109,8 +109,9 @@ starts a new cursor generation. Neither operation changes the source documents.
 
 The document log is independent of the view module. Opening it with different
 module bytes rebuilds the cache in place; retain the exact module if you need to
-reproduce its previous results. Back up the log and view artifacts. The cache is
-replaceable; the only copy of a document log is not.
+reproduce its previous results. Close the database before backing up the log and
+view artifacts; Windows locks prevent other handles from reading an active log.
+The cache is replaceable; the only copy of a document log is not.
 
 Rebuild uses the original batch order. It scans the log linearly and runs each
 uncached batch through the same map/reduce path as live ingestion. A valid cache

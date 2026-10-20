@@ -40,23 +40,26 @@ def test_rebuild_preserves_original_documents_and_log_bytes(tmp_path):
         ])
         documents += (database.add({"metric": "x", "value": -0.1}, source="other"),)
         expected = content(database)
-        original = path.read_bytes()
+    # Read bytes only after releasing the database's Windows file lock.
+    original = path.read_bytes()
+    with Database(path) as database:
         cursor = database.query().cursor
         generation = database.stats()["generation"]
         checkpoint = database.checkpoint()
         assert checkpoint["checkpointed"] is True
         assert Path(str(path) + ".cache").is_file()
-        assert path.read_bytes() == original
+    assert path.read_bytes() == original
+    with Database(path) as database:
         rebuilt = database.rebuild()
         assert rebuilt["rebuilt"] is True
         assert rebuilt["generation"] != generation
-        assert path.read_bytes() == original
         assert list(database.documents()) == list(documents)
         assert content(database) == expected
         with pytest.raises(CursorExpired):
             database.changes(since=cursor)
+    assert path.read_bytes() == original
+    with Database(path) as database:
         assert database.ingest(documents).replayed == len(documents)
-        assert path.read_bytes() == original
     assert path.read_bytes() == original
 
 
@@ -79,13 +82,13 @@ def test_missing_or_corrupt_checkpoint_replays_without_mutating_the_log(tmp_path
         assert stats["replay"]["documents"] == 2
         assert list(rebuilt.documents()) == list(retained)
         assert content(rebuilt) == expected
-        assert path.read_bytes() == original
         with pytest.raises(CursorExpired):
             rebuilt.changes(since=cursor)
+    assert path.read_bytes() == original
     with Database(path) as reopened:
         assert reopened.stats()["cache"]["status"] == "loaded"
         assert reopened.stats()["replay"]["documents"] == 0
-        assert path.read_bytes() == original
+    assert path.read_bytes() == original
 
 
 def test_good_checkpoint_preserves_cursors_and_replays_only_durable_suffix(tmp_path):
