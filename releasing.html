@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Maintainer setup for PyPI Trusted Publishing, tested native distributions, and release verification.">
+  <meta name="color-scheme" content="light">
+  <title>Releases · Foldlite DB</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="Foldlite DB home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 5h22v7H12v6h12v7H5z" fill="currentColor"/><path d="m12 12 15-7v7z" fill="#81b697"/></svg>
+      <span>foldlite<span class="brand-db">db</span></span>
+    </a>
+    <span class="development-badge">Development preview</span>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  </header>
+  <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+    <form class="search" role="search" action="api.html">
+      <label for="doc-search">Search documentation</label>
+      <input id="doc-search" type="search" placeholder="Find an API or concept…" autocomplete="off" aria-controls="search-results">
+      <div id="search-results" class="search-results" aria-live="polite" hidden></div>
+    </form>
+    <p class="nav-label">Documentation</p>
+    <nav><a href="index.html">Get started</a>
+<a href="playground.html">Browser playground</a>
+<a href="portable.html">Portable views</a>
+<a href="api.html">Python API</a>
+<a href="concepts.html">Documents and caches</a>
+<a href="releasing.html" aria-current="page">Releases</a></nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
+  </aside>
+  <div class="page-layout">
+    <main id="content" tabindex="-1"><p class="eyebrow">Maintainers</p>
+<h1>CI and PyPI releases</h1>
+<p class="lead">Publish <code>foldlitedb</code> through a GitHub release using the same Trusted Publishing flow as ParticleGAN. GitHub builds and tests the native distributions before PyPI receives them.</p>
+
+<h2 id="publisher">Register the first publisher</h2>
+<p>Before the first upload, sign in to the existing PyPI account and add a pending publisher in <a href="https://pypi.org/manage/account/publishing/">PyPI publishing settings</a> with these exact values:</p>
+<table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>
+<tr><td>PyPI project name</td><td><code>foldlitedb</code></td></tr>
+<tr><td>GitHub owner</td><td><code>255BITS</code></td></tr>
+<tr><td>Repository</td><td><code>foldlitedb</code></td></tr>
+<tr><td>Workflow filename</td><td><code>release.yml</code></td></tr>
+<tr><td>Environment</td><td><code>pypi</code></td></tr>
+</tbody></table>
+<p>The repository's <code>pypi</code> environment permits tags matching <code>v*</code>. The publishing job alone receives <code>id-token: write</code>. No stored PyPI password or API token is needed. A pending publisher creates the project on its first successful upload; see the <a href="https://docs.pypi.org/trusted-publishers/adding-a-project/">PyPI instructions</a>.</p>
+
+<h2 id="checks">Release checks</h2>
+<p><code>release.yml</code> runs when a GitHub release is published. It requires the tag to equal <code>v</code> plus the version in <code>pyproject.toml</code>, and checks that the Python module and both Rust crates declare that same version. Every build checks out the resolved source commit.</p>
+<p>The reusable <code>wheels.yml</code> workflow runs the Rust tests, AssemblyScript checks, Python and browser tests, replay smoke, and documentation examples. It builds and tests CPython 3.11+ stable ABI wheels for Linux x86-64 and ARM64, macOS Intel and Apple Silicon, and Windows x86-64. It also rebuilds a wheel from the source archive and tests that installed package outside the checkout.</p>
+<p>After every check succeeds, Twine validates the metadata and README. The workflow saves the tested source archive and five wheels as <code>python-package-distributions</code>. The publishing job downloads those exact artifacts and uploads them without rebuilding. Manually running <code>wheels.yml</code> performs the checks and builds without publishing.</p>
+
+<h2 id="publish">Publish 0.1.0</h2>
+<p>Commit and push the complete release source, including the workflow files, native code, bundled Wasm assets, and version metadata. After the pending publisher is registered, create the GitHub release against that verified commit:</p>
+<pre><code>RELEASE_SHA=$(git rev-parse HEAD)
+gh release create v0.1.0 --repo 255BITS/foldlitedb \
+  --target "$RELEASE_SHA" --title "Foldlite DB 0.1.0" \
+  --notes-file /tmp/foldlitedb-0.1.0-release-notes.txt</code></pre>
+<p>Write the release notes file before running this command. A tag push or draft release does not trigger publication. Monitor <a href="https://github.com/255BITS/foldlitedb/actions/workflows/release.yml">the release workflow</a> and confirm every test, build, and publishing job passed. A skipped job does not establish a successful release.</p>
+
+<h2 id="verify">Verify the published package</h2>
+<p>Confirm version <code>0.1.0</code> and distribution hashes on <a href="https://pypi.org/project/foldlitedb/0.1.0/">PyPI</a>, then install in a fresh environment outside the checkout. Supported wheel platforms need Python 3.11+ and no Rust compiler. Building the source archive requires Rust/Cargo 1.90+ and a C compiler and linker.</p>
+<pre><code>python -m venv /tmp/foldlitedb-release-smoke
+/tmp/foldlitedb-release-smoke/bin/python -m pip install --only-binary=:all: foldlitedb==0.1.0
+cd /tmp
+/tmp/foldlitedb-release-smoke/bin/python -I -c 'from importlib.metadata import version; from foldlitedb import Database, View; assert version("foldlitedb") == "0.1.0"; db = Database(":memory:", View.bundled("metrics")); db.add_many([{"metric": "loss", "value": 4}, {"metric": "loss", "value": 8}]); assert next(db.rows()).result["mean"] == 6; db.rebuild(); assert next(db.rows()).result["sum"] == 12; db.close()'</code></pre>
+<p>On Windows, use the virtual environment's <code>Scripts\python.exe</code>. Retain the GitHub Actions run and artifact hashes as the release receipt.</p>
+</main>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#publisher">Register the first publisher</a>
+<a href="#checks">Release checks</a>
+<a href="#publish">Publish 0.1.0</a>
+<a href="#verify">Verify the published package</a></aside>
+  </div>
+  <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>
+</body>
+</html>

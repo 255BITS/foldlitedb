@@ -32,7 +32,8 @@
 <a href="playground.html">Browser playground</a>
 <a href="portable.html">Portable views</a>
 <a href="api.html">Python API</a>
-<a href="concepts.html">Documents and caches</a></nav>
+<a href="concepts.html">Documents and caches</a>
+<a href="releasing.html">Releases</a></nav>
     <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
@@ -42,16 +43,17 @@
 <div class="hero-actions"><a class="button" href="playground.html">Try it in your browser <span aria-hidden="true">↗</span></a><a class="button secondary" href="portable.html#authoring">Build a portable view</a></div>
 <div class="flow" aria-label="Immutable documents become mapped groups and rebuildable views"><div><strong>01 &nbsp; Append</strong><small>Immutable JSON documents</small></div><span aria-hidden="true">→</span><div><strong>02 &nbsp; Map</strong><small>Emit a key and contribution</small></div><span aria-hidden="true">→</span><div><strong>03 &nbsp; Fold</strong><small>Derive a rebuildable live view</small></div></div>
 
-<div class="note preview"><p><strong>Unreleased development API.</strong> This API has not been released on PyPI. These instructions describe the local checkout; remote source and the hosted site can lag changes until publication. Build this checkout or install a wheel built from it.</p></div>
+<div class="note preview"><p><strong>Foldlite DB 0.1.0.</strong> Python 3.11+ is required. Native wheels are provided for Linux x86-64 and ARM64, macOS Intel and Apple Silicon, and Windows x86-64.</p></div>
 
-<h2 id="install">Install from your checkout</h2>
-<p>Build prerequisites are Python 3.11+, Rust/Cargo 1.90+, and a platform C compiler and linker. Run from the repository root:</p>
+<h2 id="install">Install</h2>
+<pre><code>python -m pip install foldlitedb==0.1.0</code></pre>
+<p>Installing a matching native wheel needs neither Rust nor Node. To build from a checkout instead, install Rust/Cargo 1.90+ and a platform C compiler and linker, then run from the repository root:</p>
 <pre><code>python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install .
 python examples/portable_metrics.py</code></pre>
-<p>On Windows, activate with <code>.venv\Scripts\activate</code> in an MSVC build environment. Node is needed only to author or rebuild views. To build a wheel, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>, then install the resulting <code>.whl</code> on a matching platform. Installing a built wheel needs neither Rust nor Node. PyPI release setup remains pending.</p>
+<p>On Windows, activate with <code>.venv\Scripts\activate</code> in an MSVC build environment. Node is needed only to author or rebuild views. To build a wheel, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>, then install the resulting <code>.whl</code> on a matching platform. Installing a built wheel needs neither Rust nor Node. See the <a href="releasing.html">release guide</a> for PyPI Trusted Publisher setup and publication.</p>
 
 <h2 id="quickstart">A native metric in a few lines</h2>
 <p>The bundled <code>metrics</code> module maintains count, sum, minimum, maximum, and mean by metric. Start with a fresh <code>metrics.fold</code> log:</p>
@@ -103,7 +105,7 @@ with Database("metrics.fold", metrics) as db:
 <p>Run the <a href="examples/telemetry.py">telemetry collector</a> for 2,500 readings, safe source retries, and cache-loss recovery, or the <a href="examples/catalogue.py">catalogue example</a> for an ordered item lifecycle. Use <a href="api.html#preview"><code>preview(payload)</code></a> to inspect a view's map output when a document produces no rows.</p>
 <div class="cards"><a class="card" href="portable.html"><strong>Write a portable view <span aria-hidden="true">↗</span></strong><span>A complete AssemblyScript module, custom build, and browser integration.</span></a><a class="card" href="api.html#database"><strong>The native Python API <span aria-hidden="true">↗</span></strong><span>Appends, snapshots, changes, checkpoint, and rebuild.</span></a><a class="card" href="concepts.html"><strong>Documents and caches <span aria-hidden="true">↗</span></strong><span>Identity, deterministic folds, durability, and cache validation.</span></a></div>
 </main>
-    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#install">Install from your checkout</a>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#install">Install</a>
 <a href="#quickstart">A native metric in a few lines</a>
 <a href="#append-or-name">Append freely. Name when useful.</a>
 <a href="#live-updates">Read once, follow changes</a>
