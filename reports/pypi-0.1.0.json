@@ -1,0 +1,32 @@
+{
+  "project": "foldlitedb",
+  "version": "0.1.0",
+  "source_commit": "7f90b040c2b22bb91a174bdcbace8df8ee76a853",
+  "release": "https://github.com/255BITS/foldlitedb/releases/tag/v0.1.0",
+  "workflow": "https://github.com/255BITS/foldlitedb/actions/runs/39350079590",
+  "artifacts_sha256": {
+    "foldlitedb-0.1.0-cp311-abi3-macosx_10_12_x86_64.whl": "57e8f4626a2b14e078fb8d077141e2a04d6319e5512ce19264f1054ea5508e4c",
+    "foldlitedb-0.1.0-cp311-abi3-macosx_11_0_arm64.whl": "3404d144ae2391a759d9181d7a901ce5902bcce46b833d474e37f320666daa8f",
+    "foldlitedb-0.1.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl": "d1c93a16b72a152af5ddcd6c89b05125c96cac1a0100059b188d01b5f2cd8338",
+    "foldlitedb-0.1.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl": "11e3f11f32925bcb946a3c5001e80ef77b83d59473f1befa105ee93ba11f0770",
+    "foldlitedb-0.1.0-cp311-abi3-win_amd64.whl": "c099da797ba3b1f071de13f0476af2f542af46e4100698a094543d9bd32dd64f",
+    "foldlitedb-0.1.0.tar.gz": "2b09f542fa38c80160695aecae7b303ebef698d6cdb537e7e6bb9568f8787759"
+  },
+  "smoke_python": [
+    "3.11",
+    "3.14"
+  ],
+  "publisher": {
+    "github_repository": "255BITS/foldlitedb",
+    "workflow": "release.yml",
+    "environment": "pypi",
+    "authentication": "GitHub OIDC Trusted Publishing"
+  },
+  "validation": {
+    "release_workflow": "success",
+    "windows_python_tests_passed": 87,
+    "pypi_hashes_match_tested_artifacts": true,
+    "hash_source": "https://pypi.org/simple/foldlitedb/",
+    "smoke": "Isolated binary installs from the public PyPI index; bundled metrics append, checkpoint, reopen, cache removal, and rebuild."
+  }
+}
