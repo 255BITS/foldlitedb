@@ -11,15 +11,21 @@ from importlib.resources import files
 import json
 import os
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from .types import (
     ChangePage, CursorExpired, DatabaseError, Document, DocumentConflict,
-    IngestResult, Row, Snapshot, SourceOrderError, _json,
+    GenerationMismatch, IngestResult, Row, Snapshot, SourceOrderError, _json,
 )
 
 
 _MISSING = object()
+
+
+def _identity(value: str, label: str) -> str:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 4096:
+        raise DatabaseError(f"{label} must contain 1..4096 UTF-8 bytes")
+    return value
 
 
 def _encode(value):
@@ -60,27 +66,156 @@ def portable_assets():
     return files("foldlitedb").joinpath("portable_assets")
 
 
-@dataclass(frozen=True, init=False)
-class View:
-    """Immutable compiled map/reduce module, optionally checked against a digest.
+class RustReducer:
+    """Adapter for the bundled, bounded Rust/WASM numeric reducers.
 
-    Accept a filesystem path or bytes. Module exports and its descriptor are
-    validated by the Rust host when opening a database. Content hashing binds
-    each cache to the exact map, reducer, and state schema it was built with.
-    Document logs remain independent of the selected module.
+    Maps emit finite numbers or null. Source and document identity plus emission
+    order provide deterministic tie breaking for envelope positions.
     """
-    module: bytes = field(repr=False)
-    sha256: str
 
-    def __init__(self, module: bytes | str | os.PathLike, *, sha256: str | None = None):
-        binary = module if isinstance(module, bytes) else Path(module).read_bytes()
-        if not binary or len(binary) > 16 * 1024 * 1024:
-            raise DatabaseError("View module must contain 1..16777216 bytes")
-        digest = hashlib.sha256(binary).hexdigest()
-        if sha256 is not None and digest != sha256:
-            raise DatabaseError("View module digest mismatch")
-        object.__setattr__(self, "module", binary)
-        object.__setattr__(self, "sha256", digest)
+    def __init__(self, name: str, *, runtime=None, positioned: bool = False):
+        self.name = name
+        self._runtime = runtime
+        self.positioned = positioned
+
+    @property
+    def descriptor(self):
+        from .reducers import descriptor
+        return {"kind": "rust", "name": self.name, "positioned": self.positioned,
+                "module_sha256": descriptor()["sha256"]}
+
+    @property
+    def runtime(self):
+        if self._runtime is None:
+            from .reducers import Reducer
+            self._runtime = Reducer()
+        return self._runtime
+
+    def identity(self):
+        return self.runtime.identity(self.name)
+
+    def prepare(self, value, document: Document, ordinal: int):
+        if self.positioned:
+            return value
+        if value is not None and (type(value) not in (int, float)):
+            raise DatabaseError("Rust numeric reducers accept numbers or null")
+        tie = hashlib.sha256(_json([document.source, document.id, ordinal]).encode()).hexdigest()
+        return {"value": value, "position": [document.position, tie]}
+
+    def add(self, state, values):
+        from .reducers import MAX_BATCH_VALUES, MAX_REQUEST_BYTES
+        batch = []
+
+        def overhead(current):
+            return len(json.dumps({"op": "add", "state": current, "values": []},
+                                  allow_nan=False, separators=(",", ":"), ensure_ascii=True).encode())
+
+        used = overhead(state)
+        for value in values:
+            size = len(json.dumps(value, allow_nan=False, separators=(",", ":"), ensure_ascii=True).encode())
+            if batch and (len(batch) >= MAX_BATCH_VALUES or used + size + 1 > MAX_REQUEST_BYTES):
+                state = self.runtime.add(state, batch)
+                batch = []
+                used = overhead(state)
+            if used + size + bool(batch) > MAX_REQUEST_BYTES:
+                raise DatabaseError("One numeric contribution exceeds the reducer request byte budget")
+            used += size + bool(batch)
+            batch.append(value)
+        return self.runtime.add(state, batch) if batch else state
+
+    def merge(self, left, right):
+        return self.runtime.merge(left, right)
+
+    def finalize(self, state):
+        return self.runtime.finalize(state)
+
+
+class OrderedFold:
+    """A versioned Python fold in persisted ingestion order, without merge.
+
+    ``step(state, contribution)`` returns the next finite JSON state. Changing
+    code or captured reference inputs requires a new version or view references.
+    """
+
+    def __init__(self, initial: Any, step: Callable[[Any, Any], Any], *, version: str,
+                 finalize: Callable[[Any], Any] | None = None):
+        self._initial = _json(initial)
+        self.step = step
+        self.version = _identity(version, "fold version")
+        self._finalize = finalize
+
+    @property
+    def descriptor(self):
+        return {"kind": "ordered-fold", "version": self.version,
+                "initial": json.loads(self._initial), "order": "ingestion"}
+
+    def identity(self):
+        return json.loads(self._initial)
+
+    def add(self, state, values):
+        for value in values:
+            state = self.step(state, value)
+        return state
+
+    def finalize(self, state):
+        return self._finalize(state) if self._finalize else state
+
+
+class View:
+    """Immutable view definition, supporting compiled Wasm modules or callback specifications."""
+
+    def __init__(
+        self,
+        name_or_module: bytes | str | os.PathLike,
+        *,
+        version: str | None = None,
+        map: Callable[[Document], Iterable[tuple[Any, Any]]] | None = None,
+        reducer: Any = None,
+        references: Mapping[str, Any] | None = None,
+        sha256: str | None = None,
+    ):
+        if (
+            map is not None
+            or reducer is not None
+            or (version is not None and isinstance(name_or_module, str) and not os.path.exists(str(name_or_module)))
+        ):
+            self.name = _identity(str(name_or_module), "view name")
+            self.version = _identity(version or "1", "view version")
+            self.map = map
+            self.reducer = reducer
+            self.references = dict(references or {})
+            self.is_callback = True
+            self._bundled_module = None
+            self._module = None
+            self.sha256 = ""
+        else:
+            binary = name_or_module if isinstance(name_or_module, bytes) else Path(name_or_module).read_bytes()
+            if not binary or len(binary) > 16 * 1024 * 1024:
+                raise DatabaseError("View module must contain 1..16777216 bytes")
+            digest = hashlib.sha256(binary).hexdigest()
+            if sha256 is not None and digest != sha256:
+                raise DatabaseError("View module digest mismatch")
+            self._module = binary
+            self.sha256 = digest
+            self.is_callback = False
+            self.name = "default"
+            self.version = "1"
+            self.map = None
+            self.reducer = None
+            self.references = {}
+            self._bundled_module = None
+
+    @property
+    def module(self) -> bytes:
+        if self.is_callback:
+            if self._bundled_module is None:
+                self._bundled_module = View.bundled("metrics").module
+            return self._bundled_module
+        return self._module
+
+    @module.setter
+    def module(self, value: bytes):
+        self._module = value
 
     @classmethod
     def bundled(cls, name: str = "metrics") -> View:
@@ -114,9 +249,35 @@ class Database:
     Opening the log with a different view automatically rebuilds its cache.
     """
 
-    def __init__(self, path, view: View | bytes | str | os.PathLike | None = None):
-        self.view = View.bundled() if view is None else (
-            view if isinstance(view, View) else View(view))
+    def __init__(
+        self,
+        path,
+        view: View | bytes | str | os.PathLike | None = None,
+        *,
+        generation: str | None = None,
+        reset: bool = False,
+    ):
+        path_str = os.fspath(path)
+        if reset and path_str != ":memory:":
+            for ext in ("", ".cache", ".lock"):
+                p = Path(path_str + ext)
+                if p.is_file() or p.is_symlink():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+
+        if view is None:
+            self.view = View.bundled()
+        elif isinstance(view, View):
+            self.view = view
+        else:
+            self.view = View(view)
+
+        self._views: dict[str, View] = {}
+        self._view_descriptors: dict[str, Any] = {}
+        self._view_states: dict[str, dict[str, tuple[Any, Any, int]]] = {}
+
         try:
             from ._native import Engine
         except ImportError as error:
@@ -126,9 +287,22 @@ class Database:
                 "python -m pip install . (requires Rust when building from source)."
             ) from error
         try:
-            self._engine = Engine(os.fspath(path), self.view.module)
+            self._engine = Engine(path_str, self.view.module)
         except (ValueError, TypeError, OverflowError) as error:
             raise DatabaseError(str(error)) from error
+
+        if getattr(self.view, "is_callback", False):
+            self.register(self.view)
+
+        if generation is not None:
+            existing_gen = self.get("_generation", source="_meta")
+            if existing_gen is not None:
+                found = existing_gen.payload.get("generation") if isinstance(existing_gen.payload, dict) else None
+                if found != generation:
+                    self.close()
+                    raise GenerationMismatch(f"Database generation mismatch: expected {generation}, found {found}")
+            else:
+                self._ingest_records([{"id": "_generation", "source": "_meta", "position": 0, "payload": {"generation": generation}}])
 
     def __enter__(self):
         return self
@@ -142,8 +316,6 @@ class Database:
         Closing an already closed database is harmless. Checkpoint errors are
         reported, and the native handle is released even when writing fails.
         """
-        # Detach before releasing the GIL in native code. Concurrent close calls
-        # become harmless and new calls cannot acquire a closing handle.
         engine, self._engine = self._engine, None
         if engine is not None:
             self._execute_json(engine, '{"op":"close"}')
@@ -179,7 +351,6 @@ class Database:
                     "Batch exceeds max_batch (1024). Use smaller batches or iterate "
                     "db.ingest_many(..., batch_size=...) with a smaller batch_size."
                 )
-            # Snapshot yielded values before their producer resumes and mutates them.
             encoded.append(_encode(record))
         return self._call_json('{"op":"ingest","documents":[' + ",".join(encoded) + "]}")
 
@@ -205,8 +376,10 @@ class Database:
         identical named retry retains its original position. Explicit positions
         retain their source ordering and replay semantics.
         """
+        docs = list(documents)
+
         def records():
-            for document in documents:
+            for document in docs:
                 if not isinstance(document, Document):
                     raise DatabaseError("ingest expects Document instances")
                 record = {"id": document.id, "payload": document.payload,
@@ -214,23 +387,59 @@ class Database:
                 if document.position is not None:
                     record["position"] = document.position
                 yield record
+
         result = self._ingest_records(records())
-        return IngestResult(result["inserted"], result["replayed"], result["sequence"])
+        res = IngestResult(result["inserted"], result["replayed"], result["sequence"])
+
+        if self._views and docs:
+            for view_name, view in self._views.items():
+                emissions: dict[str, tuple[Any, list[Any]]] = {}
+                for doc in docs:
+                    for key, val in view.map(doc):
+                        canon_key = json.dumps(key, sort_keys=True)
+                        if canon_key not in emissions:
+                            emissions[canon_key] = (key, [])
+                        emissions[canon_key][1].append(val)
+                if emissions:
+                    for canon_key, (orig_key, vals) in emissions.items():
+                        if canon_key in self._view_states[view_name]:
+                            _, cur_state, _ = self._view_states[view_name][canon_key]
+                            new_state = view.reducer.add(cur_state, vals)
+                        else:
+                            new_state = view.reducer.add(view.reducer.identity(), vals)
+                        self._view_states[view_name][canon_key] = (orig_key, new_state, res.sequence)
+
+                    groups = []
+                    for k, s, seq in self._view_states[view_name].values():
+                        fin = view.reducer.finalize(s)
+                        groups.append({"key": k, "state": s, "result": fin, "sequence": seq})
+
+                    view_checkpoint = self.stats().get("checkpoints", {}).get("projection", res.sequence)
+                    last_watermark = self.stats().get("checkpoints", {}).get(f"_view:{view_name}")
+                    if last_watermark is None or view_checkpoint > last_watermark:
+                        state_payload = {
+                            "descriptor": self._view_descriptors[view_name],
+                            "checkpoint": view_checkpoint,
+                            "groups": groups,
+                        }
+                        state_doc = {
+                            "id": str(view_checkpoint),
+                            "source": f"_view:{view_name}",
+                            "position": view_checkpoint,
+                            "payload": state_payload,
+                        }
+                        self._ingest_records([state_doc])
+
+        return res
 
     def ingest_many(self, documents: Iterable[Document], *, batch_size=100) -> Iterator[IngestResult]:
-        """Replay a larger iterable as bounded, separately committed batches.
-
-        Batch size also needs to respect the 256 KiB Wasm map input limit. Use
-        batch_size=1 for large individual documents accepted by the view ABI.
-        """
+        """Replay a larger iterable as bounded, separately committed batches."""
         if type(batch_size) is not int or not 1 <= batch_size <= 1024:
             raise DatabaseError("batch_size must be between 1 and 1024")
         batch = []
         for document in documents:
             if not isinstance(document, Document):
                 raise DatabaseError("ingest expects Document instances")
-            # A producer may reuse a mutable payload while yielding frozen
-            # Document records. Capture each JSON value before resuming it.
             batch.append(Document(document.id, json.loads(_encode(document.payload)),
                                   document.position, document.source))
             if len(batch) == batch_size:
@@ -240,18 +449,62 @@ class Database:
             yield self.ingest(batch)
 
     def preview(self, payload: Any) -> list[dict[str, Any]]:
-        """Map one payload to ``{key, value}`` emissions without writing.
-
-        An empty list means the view emitted nothing. This checks mapping only:
-        it cannot validate reducers or guarantee that a larger batch fits the
-        Wasm request limit. No documents, IDs, positions, or cursors are changed.
-        """
+        """Map one payload to ``{key, value}`` emissions without writing."""
         return self._call({"op": "preview", "payload": payload})
 
-    def query(self, *, key=_MISSING, limit=100, cursor=None, after=None) -> Snapshot:
+    def register(self, view: View) -> str:
+        """Attach a callback view; restore or initialize view states."""
+        _identity(view.name, "view name")
+        _identity(view.version, "view version")
+        if not callable(view.map):
+            raise DatabaseError("View map must be callable")
+        descriptor = {
+            "version": view.version,
+            "references": dict(view.references),
+            "reducer": getattr(view.reducer, "descriptor", str(view.reducer)),
+        }
+        self._views[view.name] = view
+        self._view_descriptors[view.name] = descriptor
+        if view.name not in self._view_states:
+            self._view_states[view.name] = {}
+
+        watermark = self.stats().get("checkpoints", {}).get(f"_view:{view.name}")
+        if watermark is not None:
+            last = self.get(str(watermark), source=f"_view:{view.name}")
+            if last is not None and isinstance(last.payload, dict):
+                saved_desc = last.payload.get("descriptor")
+                if saved_desc == descriptor:
+                    for item in last.payload.get("groups", []):
+                        k = item["key"]
+                        s = item["state"]
+                        seq = item.get("sequence", watermark)
+                        self._view_states[view.name][json.dumps(k, sort_keys=True)] = (k, s, seq)
+                else:
+                    self._view_states[view.name].clear()
+        return view.version
+
+    def get(self, id: str, *, source: str = "default") -> Document | None:
+        """Fetch an immutable document by its id and source in O(1)."""
+        result = self._call({"op": "get", "id": str(id), "source": source})
+        return _document(result) if result else None
+
+    def query(self, name_or_key=_MISSING, *, key=_MISSING, limit=100, cursor=None, after=None) -> Snapshot:
+        if isinstance(name_or_key, str) and name_or_key in self._views:
+            view = self._views[name_or_key]
+            state_map = self._view_states.get(name_or_key, {})
+            rows = []
+            for orig_key, state, seq in state_map.values():
+                fin = view.reducer.finalize(state)
+                rows.append(Row(orig_key, fin, state, seq))
+            rows.sort(key=lambda r: json.dumps(r.key, sort_keys=True))
+            complete = len(rows) <= limit
+            limited_rows = tuple(rows[:limit])
+            return Snapshot(limited_rows, cursor="0", after=None, complete=complete)
+
         request = {"op": "query", "limit": limit}
-        if key is not _MISSING:
-            request["key"] = key
+        actual_key = key if key is not _MISSING else (name_or_key if name_or_key is not _MISSING else _MISSING)
+        if actual_key is not _MISSING:
+            request["key"] = actual_key
         if cursor is not None:
             request["cursor"] = cursor
         if after is not None:
@@ -287,19 +540,15 @@ class Database:
         """Return document, view, log, cache, and replay metadata."""
         return self._call({"op": "stats"})
 
-    def checkpoint(self):
+    def checkpoint(self, source: str | None = None):
         """Persist a disposable cache snapshot without modifying the log.
 
-        Returns native statistics with ``checkpointed=True``. New document
-        batches are durable before checkpointing; checkpoints speed reopening.
+        If source is specified, return the committed source watermark position in O(1).
         """
+        if source is not None:
+            return self.stats().get("checkpoints", {}).get(source)
         return self._call({"op": "checkpoint"})
 
     def rebuild(self):
-        """Replay every original document batch and replace the view cache.
-
-        The log and document identities remain unchanged. Existing cursors
-        expire because the rebuilt cache receives a new generation. Returns
-        native statistics with ``rebuilt=True``.
-        """
+        """Replay every original document batch and replace the view cache."""
         return self._call({"op": "rebuild"})

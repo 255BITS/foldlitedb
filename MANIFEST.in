@@ -5,6 +5,7 @@ recursive-include scripts *.py
 recursive-include tests *.py
 recursive-include examples *.py
 recursive-include docs *.html *.json *.css *.js *.svg
+recursive-include src/foldlitedb/reducers/assets *
 global-exclude __pycache__ *.py[cod]
 prune native/target
 prune views/node_modules

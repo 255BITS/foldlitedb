@@ -1,7 +1,9 @@
 //! An immutable native document log with disposable portable Wasm view caches.
 mod runtime;
 mod storage;
+pub mod reducer;
 
+pub use reducer::ReducerInstance;
 use runtime::Runtime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -275,6 +277,7 @@ impl Engine {
             "query" => self.query(&request),
             "changes" => self.changes(&request),
             "documents" => self.documents(&request),
+            "get" => self.get(&request),
             "stats" => self.stats(),
             "descriptor" => Ok(self.runtime.descriptor.clone()),
             "checkpoint" => {
@@ -531,6 +534,29 @@ impl Engine {
             )
         };
         Ok(json!({"documents":documents,"cursor":cursor,"after":after,"complete":complete}))
+    }
+
+    fn get(&self, request: &Value) -> Result<Value> {
+        let source = request
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("default");
+        let id_str = match request.get("id") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        };
+        if let Some(id) = id_str {
+            if let Some(&index) = self.state.identities.get(&(source.to_string(), id)) {
+                return Ok(document_value(&self.state.documents[index]));
+            }
+        }
+        if let Some(position) = request.get("position").and_then(Value::as_u64) {
+            if let Some(&index) = self.state.positions.get(&(source.to_string(), position)) {
+                return Ok(document_value(&self.state.documents[index]));
+            }
+        }
+        Ok(Value::Null)
     }
 
     fn stats(&self) -> Result<Value> {

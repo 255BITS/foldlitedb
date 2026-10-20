@@ -22,6 +22,10 @@ class CursorExpired(DatabaseError):
     """A cursor belongs to a different log, view, or rebuilt cache generation."""
 
 
+class GenerationMismatch(DatabaseError):
+    """An existing cache belongs to a different set of source documents."""
+
+
 def _json(value: Any) -> str:
     def check(item):
         if isinstance(item, dict):

@@ -1,0 +1,160 @@
+"""Dedicated installed-package browser gate; missing Chromium is a failure, not a skip."""
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import threading
+
+import pytest
+from playwright.sync_api import sync_playwright
+
+from foldlitedb.reducers import Reducer, append_frame, assets, bootstrap
+
+pytestmark = pytest.mark.browser
+
+
+@pytest.fixture(scope="module")
+def page(tmp_path_factory):
+    root = tmp_path_factory.mktemp("reducer-browser")
+    for resource in assets().iterdir():
+        if resource.is_file():
+            (root / resource.name).write_bytes(resource.read_bytes())
+    # A sibling base whose module was modified after its descriptor was written.
+    tampered = root / "tampered"
+    tampered.mkdir()
+    (tampered / "reducer.json").write_bytes((root / "reducer.json").read_bytes())
+    binary = bytearray((root / "reducer.wasm").read_bytes())
+    binary[-1] ^= 0x01
+    (tampered / "reducer.wasm").write_bytes(bytes(binary))
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1",0), partial(QuietHandler,directory=str(root)))
+    thread = threading.Thread(target=server.serve_forever,daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{server.server_port}/proof.html")
+            page.wait_for_function("typeof window.runProof === 'function'")
+            yield page
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_python_bootstrap_browser_worker_live_suffix(page):
+    reducer = Reducer()
+    values = [{"value":v,"position":[i,f"source-{i}"]} for i,v in enumerate([None,1,5,-4,12,3,12,0])]
+    cases = {}
+    for kind in ["mean/v1","envelope/v1","sum/v1","count/v1"]:
+        view = bootstrap(reducer,kind,"source/generation/map/view/reference/group")
+        view = append_frame(reducer,view,identity=view["identity"],start=0,end=5,values=values[:5])
+        frames = [{"identity":view["identity"],"start":5,"end":8,"values":values[5:]}]
+        # Duplicate replay after application must not double count.
+        frames.append(frames[0])
+        cases[kind] = {"bootstrap":view,"frames":frames,
+                       "expected":reducer.finalize(reducer.add(reducer.identity(kind),values))}
+    results = page.evaluate("payload => window.runProof(payload)", {"cases":cases})
+    for kind,result in results.items():
+        assert result["value"] == cases[kind]["expected"]
+        assert result["module_sha256"] == reducer.module_sha256
+        assert result["bootstrap"]["end"] == 8
+        assert result["memory_bytes"] <= 16*1024*1024
+
+
+def test_browser_worker_rejects_bad_data_and_recovers(page):
+    result = page.evaluate("""async () => {
+      const {ReducerWorker} = await import('./client.js');
+      const worker = new ReducerWorker();
+      const errors = [];
+      try {
+        const state = await worker.call({op:'request',request:{op:'identity',reducer:'mean/v1'}});
+        for (const value of [NaN,Infinity,undefined]) {
+          try { await worker.call({op:'request',request:{op:'add',state,values:[{value,position:[0,'x']}]}}); }
+          catch(error) { errors.push(error.message); }
+        }
+        try { await worker.call({op:'request',request:{op:'add',state,values:[{value:1,position:[9007199254740992,'x']}]}}); }
+        catch(error) { errors.push(error.message); }
+        const final = await worker.call({op:'request',request:{op:'finalize',state}});
+        return {errors,final};
+      } finally {worker.close();}
+    }""")
+    assert len(result["errors"]) == 4
+    assert result["final"] == {"count":0,"value":None}
+
+
+def test_browser_coverage_and_shared_module_mismatch(page):
+    reducer = Reducer()
+    view = bootstrap(reducer,"mean/v1","scope")
+    result = page.evaluate("""async view => {
+      const {ReducerWorker} = await import('./client.js');
+      const worker = new ReducerWorker(); const errors=[];
+      try {
+        for (const changed of [{...view,module_sha256:'wrong'},{...view,end:1,state:{...view.state,count:1,sum:2}}]) {
+          try { await worker.call({op:'continue',bootstrap:changed,frames:[{identity:'scope',start:2,end:3,values:[]}]}); }
+          catch(error) { errors.push(error.message); }
+        }
+        try { await worker.call({op:'merge',left:{...view,end:2},right:{...view,start:1,end:3}}); }
+        catch(error) { errors.push(error.message); }
+        return errors;
+      } finally {worker.close();}
+    }""",view)
+    assert len(result) == 3
+    assert "digest" in result[0]
+    assert "gap" in result[1]
+    assert "disjoint" in result[2]
+
+
+def test_worker_deadline_terminates_without_blocking_page(page):
+    result = page.evaluate("""async () => {
+      const {ReducerWorker} = await import('./client.js');
+      const url = URL.createObjectURL(new Blob(['while(true) {}'],{type:'text/javascript'}));
+      const worker = new ReducerWorker({timeoutMs:50,workerURL:url});
+      let ticks=0; const timer=setInterval(()=>ticks++,5);
+      try { await worker.call({op:'request'}); return {error:'unexpected success'}; }
+      catch(error) {return {error:error.message,ticks,closed:worker.closed};}
+      finally {clearInterval(timer);worker.close();URL.revokeObjectURL(url);}
+    }""")
+    assert "deadline" in result["error"]
+    assert result["closed"] is True and result["ticks"] > 0
+
+
+def test_portable_sha256_matches_known_vectors(page):
+    result = page.evaluate("""async () => {
+      const {sha256Hex} = await import('./host.js');
+      const encoder = new TextEncoder();
+      return {empty: sha256Hex(new Uint8Array(0)),
+              abc: sha256Hex(encoder.encode('abc')),
+              block: sha256Hex(encoder.encode('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')),
+              module: sha256Hex(await (await fetch('./reducer.wasm')).arrayBuffer())};
+    }""")
+    assert result["empty"] == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    assert result["abc"] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    assert result["block"] == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    assert result["module"] == Reducer().module_sha256
+
+
+def test_reducer_verifies_module_without_web_crypto(page):
+    """Plain HTTP off localhost is an insecure context: crypto.subtle is undefined."""
+    reducer = Reducer()
+    values = [{"value": 2, "position": [0, "a"]}, {"value": 4, "position": [1, "b"]}]
+    expected = reducer.finalize(reducer.add(reducer.identity("mean/v1"), values))
+    result = page.evaluate("""async values => {
+      Object.defineProperty(crypto, 'subtle', {value: undefined, configurable: true});
+      try {
+        const {Reducer} = await import('./host.js');
+        const loaded = await Reducer.load(new URL('./', location.href));
+        let rejected = 'accepted a modified module';
+        try { await Reducer.load(new URL('./tampered/', location.href)); }
+        catch (error) { rejected = error.message; }
+        return {available: crypto.subtle !== undefined, digest: loaded.spec.sha256, rejected,
+                value: loaded.finalize(loaded.add(loaded.identity('mean/v1'), values))};
+      } finally { delete crypto.subtle; }
+    }""", values)
+    assert result["available"] is False
+    assert result["digest"] == reducer.module_sha256
+    assert result["value"] == expected
+    assert "digest mismatch" in result["rejected"]
+    assert page.evaluate("typeof crypto.subtle?.digest") == "function"
