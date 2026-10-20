@@ -525,3 +525,28 @@ fn output_pointer_is_read_and_validated_after_execution() {
         );
     }
 }
+
+#[test]
+fn internal_sources_starting_with_underscore_are_stored_without_wasm_mapping() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("internal.db");
+    let mut engine = Engine::open(path.to_str().unwrap(), METRICS).unwrap();
+    let big_string = "x".repeat(300_000);
+    let response = execute(
+        &mut engine,
+        json!({"op":"ingest","documents":[
+            {"id":"ckpt-1","source":"_view:metrics","position":0,"payload":{"data":big_string}}
+        ]}),
+    );
+    assert_eq!(response["inserted"], 1);
+    let stats = execute(&mut engine, json!({"op":"stats"}));
+    assert_eq!(stats["checkpoints"]["_view:metrics"], 0);
+    let query = execute(&mut engine, json!({"op":"query"}));
+    assert_eq!(query["rows"].as_array().unwrap().len(), 0);
+    drop(engine);
+    let mut reopened = Engine::open(path.to_str().unwrap(), METRICS).unwrap();
+    let reopened_stats = execute(&mut reopened, json!({"op":"stats"}));
+    assert_eq!(reopened_stats["checkpoints"]["_view:metrics"], 0);
+    assert_eq!(reopened_stats["cache"]["status"], "loaded");
+}
+

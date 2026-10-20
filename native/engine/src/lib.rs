@@ -690,12 +690,13 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<St
         staged.resolved.push(document_value(&document));
         staged.documents.push(document);
     }
-    if !staged.documents.is_empty() {
-        let payloads: Vec<_> = staged
-            .documents
-            .iter()
-            .map(|doc| doc.record.payload.clone())
-            .collect();
+    let payloads: Vec<_> = staged
+        .documents
+        .iter()
+        .filter(|doc| !doc.record.source.starts_with('_'))
+        .map(|doc| doc.record.payload.clone())
+        .collect();
+    if !payloads.is_empty() {
         let mapped = map_documents(runtime, payloads)?;
         let mut grouped: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for emissions in mapped {

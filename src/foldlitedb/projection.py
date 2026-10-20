@@ -72,6 +72,22 @@ def append_jsonl_frame(handle, row, *, max_frame_bytes=65536):
     handle.flush()
 
 
+def chunk_documents(documents, *, max_count=64, max_bytes=65536):
+    """Partition documents into chunks bounded by document count and serialized bytes."""
+    chunk = []
+    chunk_bytes = 0
+    for doc in documents:
+        doc_bytes = len(json_bytes(doc.payload))
+        if chunk and (len(chunk) >= max_count or chunk_bytes + doc_bytes > max_bytes):
+            yield chunk
+            chunk = []
+            chunk_bytes = 0
+        chunk.append(doc)
+        chunk_bytes += doc_bytes
+    if chunk:
+        yield chunk
+
+
 async def materialize_jsonl_view(
     path,
     *,
@@ -84,6 +100,8 @@ async def materialize_jsonl_view(
     cursor_position,
     max_groups=2048,
     timeout=180,
+    batch_size=64,
+    max_batch_bytes=65536,
 ):
     """Resume a durable view from its committed projection document and cursor.
 
@@ -104,6 +122,10 @@ async def materialize_jsonl_view(
 
     if type(max_groups) is not int or not 1 <= max_groups <= 4095:
         raise ValueError("max_groups must be an integer in 1..4095")
+    if type(batch_size) is not int or not 1 <= batch_size <= 1024:
+        raise ValueError("batch_size must be an integer in 1..1024")
+    if type(max_batch_bytes) is not int or not 1024 <= max_batch_bytes <= 262144:
+        raise ValueError("max_batch_bytes must be an integer in 1024..262144")
     started = time.monotonic()
     known = set()
 
@@ -176,8 +198,9 @@ async def materialize_jsonl_view(
                 checkpoint = position
             if not batch:
                 raise ValueError("Historical snapshot is not a complete document boundary")
-            await asyncio.to_thread(database.ingest, batch)
-            await asyncio.sleep(0)
+            for chunk in chunk_documents(batch, max_count=batch_size, max_bytes=max_batch_bytes):
+                await asyncio.to_thread(database.ingest, chunk)
+                await asyncio.sleep(0)
         if (checkpoint or 0) != target_position:
             raise ValueError("Projection checkpoint differs from the requested snapshot")
         snapshot = await asyncio.to_thread(database.query, view.name, limit=max_groups + 1)

@@ -277,6 +277,7 @@ class Database:
         self._views: dict[str, View] = {}
         self._view_descriptors: dict[str, Any] = {}
         self._view_states: dict[str, dict[str, tuple[Any, Any, int]]] = {}
+        self._view_dirty: dict[str, bool] = {}
 
         try:
             from ._native import Engine
@@ -316,6 +317,11 @@ class Database:
         Closing an already closed database is harmless. Checkpoint errors are
         reported, and the native handle is released even when writing fails.
         """
+        if self._engine is not None:
+            try:
+                self._flush_view_checkpoints()
+            except Exception:
+                pass
         engine, self._engine = self._engine, None
         if engine is not None:
             self._execute_json(engine, '{"op":"close"}')
@@ -401,6 +407,7 @@ class Database:
                             emissions[canon_key] = (key, [])
                         emissions[canon_key][1].append(val)
                 if emissions:
+                    self._view_dirty[view_name] = True
                     for canon_key, (orig_key, vals) in emissions.items():
                         if canon_key in self._view_states[view_name]:
                             _, cur_state, _ = self._view_states[view_name][canon_key]
@@ -408,27 +415,6 @@ class Database:
                         else:
                             new_state = view.reducer.add(view.reducer.identity(), vals)
                         self._view_states[view_name][canon_key] = (orig_key, new_state, res.sequence)
-
-                    groups = []
-                    for k, s, seq in self._view_states[view_name].values():
-                        fin = view.reducer.finalize(s)
-                        groups.append({"key": k, "state": s, "result": fin, "sequence": seq})
-
-                    view_checkpoint = self.stats().get("checkpoints", {}).get("projection", res.sequence)
-                    last_watermark = self.stats().get("checkpoints", {}).get(f"_view:{view_name}")
-                    if last_watermark is None or view_checkpoint > last_watermark:
-                        state_payload = {
-                            "descriptor": self._view_descriptors[view_name],
-                            "checkpoint": view_checkpoint,
-                            "groups": groups,
-                        }
-                        state_doc = {
-                            "id": str(view_checkpoint),
-                            "source": f"_view:{view_name}",
-                            "position": view_checkpoint,
-                            "payload": state_payload,
-                        }
-                        self._ingest_records([state_doc])
 
         return res
 
@@ -467,6 +453,7 @@ class Database:
         self._view_descriptors[view.name] = descriptor
         if view.name not in self._view_states:
             self._view_states[view.name] = {}
+        self._view_dirty[view.name] = False
 
         watermark = self.stats().get("checkpoints", {}).get(f"_view:{view.name}")
         if watermark is not None:
@@ -540,6 +527,43 @@ class Database:
         """Return document, view, log, cache, and replay metadata."""
         return self._call({"op": "stats"})
 
+    def _flush_view_checkpoints(self):
+        """Persist dirty callback view checkpoints to the durable log."""
+        if not self._views or self._engine is None:
+            return
+        for view_name, view in self._views.items():
+            if not self._view_dirty.get(view_name, False):
+                continue
+            state_map = self._view_states.get(view_name, {})
+            if not state_map:
+                continue
+
+            groups = []
+            for k, s, seq in state_map.values():
+                fin = view.reducer.finalize(s)
+                groups.append({"key": k, "state": s, "result": fin, "sequence": seq})
+
+            stats = self.stats()
+            view_checkpoint = stats.get("checkpoints", {}).get("projection")
+            if view_checkpoint is None:
+                view_checkpoint = stats.get("sequence", 0)
+
+            last_watermark = stats.get("checkpoints", {}).get(f"_view:{view_name}")
+            if last_watermark is None or view_checkpoint > last_watermark:
+                state_payload = {
+                    "descriptor": self._view_descriptors[view_name],
+                    "checkpoint": view_checkpoint,
+                    "groups": groups,
+                }
+                state_doc = {
+                    "id": str(view_checkpoint),
+                    "source": f"_view:{view_name}",
+                    "position": view_checkpoint,
+                    "payload": state_payload,
+                }
+                self._ingest_records([state_doc])
+                self._view_dirty[view_name] = False
+
     def checkpoint(self, source: str | None = None):
         """Persist a disposable cache snapshot without modifying the log.
 
@@ -547,6 +571,7 @@ class Database:
         """
         if source is not None:
             return self.stats().get("checkpoints", {}).get(source)
+        self._flush_view_checkpoints()
         return self._call({"op": "checkpoint"})
 
     def rebuild(self):
