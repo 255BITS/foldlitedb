@@ -1,0 +1,21 @@
+[package]
+name = "foldlitedb-portable-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Rust-native durable documents with portable WebAssembly map/reduce views"
+license = "MIT"
+repository = "https://github.com/255BITS/foldlitedb"
+publish = false
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
+sha2 = "=0.10.9"
+uuid = { version = "=1.18.1", features = ["v4"] }
+wasmi = { version = "=0.46.0", default-features = false, features = ["std"] }
+ryu-js = "=1.0.2"
+
+[dev-dependencies]
+tempfile = "=3.23.0"
+wat = "=1.240.0"

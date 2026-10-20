@@ -1,0 +1,92 @@
+{
+  "schema": "foldlitedb-native-cache-verification/v1",
+  "date": "2026-10-19",
+  "architecture": {
+    "documents": "immutable checksummed append-only native batch log",
+    "cache": "disposable checkpoint bound to module digest, log identity and verified prefix",
+    "acknowledgment": "log sync_all before publication and success",
+    "ownership": "one active native owner; serialized calls support threads",
+    "recovery": "verified original transaction batches; incomplete tail recovery; complete corruption fails closed"
+  },
+  "removed": [
+    "SQLite and rusqlite",
+    "Python callback database and numeric reducer package",
+    "experimental native engines and comparisons",
+    "obsolete reducer and benchmark reports/pages"
+  ],
+  "checks": {
+    "installed_wheel_python_tests": 70,
+    "installed_wheel_browser_tests": 7,
+    "rust_tests": 26,
+    "assemblyscript_sdk_tests": 11,
+    "documentation_python_examples": 13,
+    "documentation_pages": 5,
+    "documentation_relative_links": 100,
+    "source_distribution_rebuild": true,
+    "rebuilt_wheel_examples": [
+      "portable_metrics.py",
+      "catalogue.py"
+    ],
+    "custom_assemblyscript_authoring": [
+      "compiler command",
+      "manifest generation",
+      "native execution",
+      "bundled/custom browser execution and replay"
+    ],
+    "format_and_diff_check": true,
+    "native_dependency_notices": true,
+    "sdist_and_wheel_legacy_asset_exclusion": true,
+    "editable_development_install_restored": true
+  },
+  "distribution": {
+    "foldlitedb-0.1.0-cp311-abi3-manylinux_2_34_x86_64.whl": {
+      "bytes": 1331491,
+      "sha256": "91756ce431508aa2dc6ea0b20a33ce55d4153736f93ce8b6a51b0f39c1f67454"
+    },
+    "foldlitedb-0.1.0.tar.gz": {
+      "bytes": 233761,
+      "sha256": "95be9ffd95e48328ca55bcd23297a9317dde432ac6f5ba00b5bc41531dba59c2"
+    }
+  },
+  "benchmark_report": "native-cache-2026-10-19.json",
+  "benchmark_seconds": {
+    "durable_ingest": 2.4986957110231742,
+    "checkpoint": 0.013279271021019667,
+    "cached_reopen": 0.028331665002042428,
+    "uncached_suffix_reopen": 0.036904543987475336,
+    "missing_cache_rebuild": 2.184346660011215,
+    "explicit_rebuild": 2.014013428008184
+  },
+  "documentation": {
+    "url": "https://255bits.github.io/foldlitedb/",
+    "commit": "e672c91588ff82d3079bf83bea4d367e9a3a4873",
+    "status": "built",
+    "public_homepage_verified": true,
+    "experiments_page_removed": true,
+    "public_browser_verified": [
+      "native log homepage",
+      "checkpoint/rebuild API",
+      "search",
+      "browser worker playground",
+      "mobile layout",
+      "removed experiment page returns 404"
+    ]
+  },
+  "limits": [
+    "Every reopen verifies the full log; cache skips historical Wasm work.",
+    "Retained documents, indexes and history grow in host memory.",
+    "Checkpoint snapshots are capped at 1 GiB; one active owner per log.",
+    "Legacy callback APIs and SQLite file formats are removed; logs use the new native format.",
+    "Browser persistence remains in memory.",
+    "Only Linux x86_64 wheels were built locally; other release targets are configured in CI.",
+    "PyPI publication remains pending."
+  ],
+  "source_sha256": {
+    "native/engine/src/lib.rs": "5cdebb3e8f9370db00f6cb202134067bb8b8a90363bb2b72b5e303ae4109474c",
+    "native/engine/src/storage.rs": "d7baae3d5f296625c124c7485d8b464f291223fd5cea18ea947d35d4e2200246",
+    "native/engine/src/runtime.rs": "3012bb91fc24749dc02f85286accc17d4eefb0903bb8afd45b198a01e9731f9a",
+    "native/Cargo.lock": "bca3b88a023e198d9c1316b42cf1ff5016db5dafe48e984b4106fab4d9040270",
+    "src/foldlitedb/database.py": "d8c15b832af5623bd7c1f0b37f508d14d1e149def8dca0dbf45873c909431e3b",
+    "scripts/benchmark_database.py": "24e5337b827a263e62d4d0bff932fa6d43b826f5d4ca3c959e8a6ff420d97019"
+  }
+}

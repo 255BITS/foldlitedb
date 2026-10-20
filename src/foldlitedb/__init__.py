@@ -1,26 +1,25 @@
-"""Foldlite DB: embedded realtime views over immutable documents."""
+"""Foldlite DB: immutable document logs and rebuildable native Wasm views."""
 
-from .database import (
+from .types import (
     ChangePage,
     CursorExpired,
-    Database,
     DatabaseError,
     Document,
     DocumentConflict,
-    GenerationMismatch,
     IngestResult,
-    OrderedFold,
     Row,
-    RustReducer,
     Snapshot,
     SourceOrderError,
-    View,
 )
+from .database import Database, View, portable_assets
+
+PortableDatabase = Database
+PortableView = View
 
 __version__ = "0.1.0"
 
 __all__ = [
     "ChangePage", "CursorExpired", "Database", "DatabaseError", "Document",
-    "DocumentConflict", "GenerationMismatch", "IngestResult", "OrderedFold",
-    "Row", "RustReducer", "Snapshot", "SourceOrderError", "View",
+    "DocumentConflict", "IngestResult", "PortableDatabase", "PortableView", "Row",
+    "Snapshot", "SourceOrderError", "View", "portable_assets",
 ]

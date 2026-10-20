@@ -1,67 +1,75 @@
-"""Run with ``python examples/catalogue.py`` after installing Foldlite DB.
-
-Immutable observations produce changing catalogue lifecycle state. The retained
-documents and declared taxonomy are enough to recreate the disposable database.
-No numerical reducer dependency is needed for this example.
-"""
-from __future__ import annotations
-
+"""A retry-safe offline catalogue built from immutable lifecycle observations."""
 import json
 from pathlib import Path
 import tempfile
 
-from foldlitedb import Database, Document, OrderedFold, View
+from foldlitedb import Database, Document, View
 
 
-TAXONOMY = {"bug": "issue", "feature": "request"}
-DOCUMENTS = [
-    Document("open-a", {"record": "a", "type": "bug", "status": "open"}, 0),
-    Document("open-b", {"record": "b", "type": "feature", "status": "open"}, 1),
-    Document("close-a", {"record": "a", "type": "bug", "status": "closed"}, 2),
-    Document("reopen-a", {"record": "a", "type": "bug", "status": "open"}, 3),
-]
+def category_items(database, category):
+    return next((row.result["items"] for row in database.rows(key=category)), {})
 
 
-def catalogue(document):
-    value = document.payload
-    yield value["record"], {"category": TAXONOMY[value["type"]], "status": value["status"]}
-
-
-def view():
-    return View("catalogue", "1", catalogue,
-                OrderedFold(None, lambda previous, current: current, version="latest-1"),
-                references={"taxonomy": "catalogue-taxonomy-1"})
-
-
-def snapshot_rows(database):
-    snapshot = database.query("catalogue", limit=2)
-    rows = list(snapshot.rows)
-    while not snapshot.complete:
-        snapshot = database.query("catalogue", cursor=snapshot.cursor, after=snapshot.after, limit=2)
-        rows.extend(snapshot.rows)
-    return {row.key: row.result for row in rows}
+def current_catalogue(database):
+    return {row.key: row.result["items"] for row in database.rows() if row.result["count"]}
 
 
 def main():
     with tempfile.TemporaryDirectory(prefix="foldlite-catalogue-") as directory:
-        path = Path(directory) / "catalogue.db"
-        with Database(path, generation="catalogue-input-1") as database:
-            database.register(view())
-            database.ingest(DOCUMENTS[:2])
-            snapshot = database.query("catalogue")
-            database.ingest(DOCUMENTS[2:])
-            updates = database.changes("catalogue", since=snapshot.cursor)
-            assert [(row.key, row.result["status"]) for row in updates.rows] == [("a", "open")]
-            live = snapshot_rows(database)
+        path = Path(directory) / "catalogue.log"
+        view = View.bundled("catalogue")
+        with Database(path, view) as database:
+            # Preview runs the map without storing a fact. An adapter that leaves
+            # the supplier's `name` field unmapped would emit no catalogue item.
+            incoming = {"category": "gear", "id": "mug", "name": "Trail Mug"}
+            assert database.preview(incoming) == []
+            product = {"category": incoming["category"], "id": incoming["id"],
+                       "title": incoming["name"]}
+            assert database.preview(product)[0]["key"] == "gear"
 
-        # A separate cache stands in for deleting and recreating the database.
-        # Batching historical input follows the same path as live ingestion.
-        with Database(Path(directory) / "regenerated.db", generation="catalogue-input-1") as database:
-            for batch in database.ingest_many(DOCUMENTS, batch_size=2):
-                assert batch.inserted == 2
-            database.register(view())
-            assert snapshot_rows(database) == live
-        print(json.dumps(live, sort_keys=True, indent=2))
+            # The outer ID names a delivery; payload.id names the product.
+            # Positions are allocated automatically within this atomic batch.
+            created = [
+                Document("delivery-1", {"category": "books", "id": "a", "title": "First edition"}, source="shop"),
+                Document("delivery-2", {"category": "books", "id": "b", "title": "Another book"}, source="shop"),
+                Document("delivery-3", product, source="shop"),
+            ]
+            assert database.ingest(created).inserted == 3
+            snapshot = database.query()
+            updated = [
+                Document("delivery-4", {"category": "books", "id": "a", "title": "Revised edition"}, source="shop"),
+                Document("delivery-5", {"category": "books", "id": "b", "deleted": True}, source="shop"),
+                Document("delivery-6", {"category": "gear", "id": "mug", "deleted": True}, source="shop"),
+            ]
+            assert database.ingest(updated).inserted == 3
+            assert database.changes(since=snapshot.cursor).rows[0].result == {
+                "count": 1, "items": {"a": "Revised edition"},
+            }
+            # A delayed retry keeps its old position and cannot undo revision.
+            assert database.ingest(created).replayed == 3
+            assert category_items(database, "books") == {"a": "Revised edition"}
+
+            # Last-item withdrawal leaves a zero-count category row; an absent
+            # category has no row. Both expose an empty product collection.
+            assert database.query(key="gear").rows[0].result == {"count": 0, "items": {}}
+            assert database.query(key="missing").rows == ()
+            assert category_items(database, "gear") == category_items(database, "missing") == {}
+            assert current_catalogue(database) == {"books": {"a": "Revised edition"}}
+            assert len(list(database.documents())) == 6
+
+            expected = [(row.key, row.result) for row in database.rows()]
+            original_log = path.read_bytes()
+            database.rebuild()
+            assert [(row.key, row.result) for row in database.rows()] == expected
+            assert path.read_bytes() == original_log
+
+        # Delete only the disposable checkpoint; the immutable log is retained.
+        Path(str(path) + ".cache").unlink()
+        with Database(path, view) as rebuilt:
+            assert rebuilt.stats()["replay"]["documents"] == 6
+            assert [(row.key, row.result) for row in rebuilt.rows()] == expected
+            assert path.read_bytes() == original_log
+        print(json.dumps(expected, sort_keys=True, indent=2))
 
 
 if __name__ == "__main__":

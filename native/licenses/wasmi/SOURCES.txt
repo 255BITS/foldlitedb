@@ -1,0 +1,4 @@
+Wasmi 0.46.0 published crates omit the workspace license files.
+Retrieved from the exact upstream commit recorded in .cargo_vcs_info.json:
+https://raw.githubusercontent.com/wasmi-labs/wasmi/50ac76771d631f642e8c4c61bf44c99546024461/LICENSE-MIT
+https://raw.githubusercontent.com/wasmi-labs/wasmi/50ac76771d631f642e8c4c61bf44c99546024461/LICENSE-APACHE

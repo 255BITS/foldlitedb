@@ -1,0 +1,201 @@
+{
+  "study": "Three independent agent application trials followed by a targeted implementation iteration",
+  "method": "Agents had distinct application goals, read public docs and APIs, executed real applications, kept chronological notes and were forbidden to read each other's findings before the baseline completed. All three finished without implementation-source fallback. These are simulated developer observations, not human usability evidence.",
+  "baseline_reports": {
+    "telemetry": {
+      "path": "telemetry.json",
+      "sha256": "37f0c5ec2c82bf92a44071a6277c8498ba3443137f77fba79982c97eb0864c1e"
+    },
+    "catalogue": {
+      "path": "catalogue.json",
+      "sha256": "7d34a85b4c5b14c1bf5d86e503f6dcd1ccc546703544f12238229ad36ac3c1ab"
+    },
+    "browser": {
+      "path": "browser.json",
+      "sha256": "594c1daf1f4ae07e80abd7436ba79a732e4c8262a99e33f729391cf7583544a1"
+    }
+  },
+  "observed_outcomes": {
+    "telemetry": {
+      "historical_documents": 2500,
+      "live_documents": 13,
+      "assertions": 30,
+      "library_failures": 0
+    },
+    "catalogue": {
+      "retained_lifecycle_events": 9,
+      "workflow": "create, revise, withdraw, retry, query, reopen, rebuild and cache loss",
+      "library_failures": 0,
+      "diagnostic_probe": "Malformed name-vs-title fact is retained successfully with zero emissions, as designed."
+    },
+    "browser": {
+      "browser_checks": 14,
+      "native_parity_checks": 7,
+      "expenses": 7,
+      "categories": 4,
+      "library_runtime_blockers": 0,
+      "harness_assumptions_corrected": [
+        "replay.equivalent, not guessed replay.matches",
+        "sequence is local progress; compare immutable identity fields and key/state/result across restores"
+      ]
+    }
+  },
+  "intuitive": [
+    "Bundled views make first use possible without authoring a module.",
+    "Source-scoped identity and immutable lifecycle events support retries without undoing later observations.",
+    "Checkpoints and deleting derived caches preserve retained documents and results.",
+    "Custom compiled Wasm loads in a plain static browser app and agrees with native Python."
+  ],
+  "iteration_decisions": [
+    {
+      "evidence": [
+        "catalogue finding2",
+        "telemetry explicit-batch-record-discovery"
+      ],
+      "change": "Allow Document positions to be omitted for atomic named ingestion; retain explicit upstream offsets when supplied. Add constructor and bulk examples beside the API.",
+      "reason": "Reuse existing record and ingestion APIs rather than adding parallel ID arrays or changing atomic add_many semantics."
+    },
+    {
+      "evidence": [
+        "catalogue finding1"
+      ],
+      "change": "Add nonmutating preview(payload) to Python/native and browser hosts, with shared map validation per host.",
+      "reason": "Show actual mapped emissions before storing a fact; zero emissions remain a legitimate filter result, and preview does not promise reducer success."
+    },
+    {
+      "evidence": [
+        "browser B3"
+      ],
+      "change": "One custom view build command with pinned compiler settings, validated compiled descriptor, digest manifest and isolated output.",
+      "reason": "Remove repeated manual compiler flags and manifest scaffolding while preserving deterministic bundled artifacts."
+    },
+    {
+      "evidence": [
+        "browser B2"
+      ],
+      "change": "Stable exported browser error classes and codes transported across the worker boundary.",
+      "reason": "Apps can handle conflicts and expired cursors without parsing text."
+    },
+    {
+      "evidence": [
+        "telemetry consumer-recovery-example",
+        "catalogue expired-cursor observation"
+      ],
+      "change": "Actionable cursor errors and a runnable persistent consumer that replaces state from a complete new snapshot on expiration."
+    },
+    {
+      "evidence": [
+        "browser B1",
+        "browser B4",
+        "catalogue findings3-4",
+        "telemetry cache-status-after-reconstruction"
+      ],
+      "change": "Document browser return shapes, local sequence semantics, event vs product identity, absent vs empty categories and cache status meaning."
+    }
+  ],
+  "preserved_contracts": [
+    "Immutable accepted documents and append-only log format.",
+    "Atomic add_many/ingest boundaries and explicit lazy separately committed ingest_many batches.",
+    "Intentional zero-emission map filtering.",
+    "Cursor generation invalidation after reconstruction.",
+    "Ordinary checkpointed reopen avoids historical Wasm computation."
+  ],
+  "iteration_status": "complete",
+  "after_reports": {
+    "telemetry": {
+      "path": "telemetry-after.json",
+      "sha256": "a3bcbdf8605957cfedf687c686d9f8974ada2515f632ed62fb9a522e22053b96"
+    },
+    "catalogue": {
+      "path": "catalogue-after.json",
+      "sha256": "7309b11fcd32f1b134a268c9a187e97c74b2d7efd452edc0c0833d43fc581a92"
+    },
+    "browser": {
+      "path": "browser-after.json",
+      "sha256": "de4188f8b49db698f70d8c31c30b0db701653b2033b8abcd2f669564bfc60bfc"
+    }
+  },
+  "verified_improvements": {
+    "catalogue": {
+      "retained_facts": 9,
+      "baseline_committed_batches": 9,
+      "revised_committed_batches": 2,
+      "same_catalogue_and_retained_identity_fields": true,
+      "preview_filters_bad_supplier_adapter_without_retaining_it": true
+    },
+    "browser": {
+      "baseline_and_after_module_sha256": "c930f8c37a49fa8d29cf2b4cf5ac52455bf61186c3b23aaf4219bd3df63a491f",
+      "custom_build_commands": 1,
+      "separate_manifest_program_needed": false,
+      "typed_conflict_code": "DocumentConflict",
+      "preview_native_browser_parity": true
+    },
+    "telemetry": {
+      "original_application_assertions": 30,
+      "original_application_source_unchanged": true,
+      "all_2513_readings_and_summaries_preserved": true,
+      "published_consumer_example": "examples/telemetry.py"
+    }
+  },
+  "validation": {
+    "python_tests": 87,
+    "rust_tests": 34,
+    "browser_tests": 10,
+    "sdk_and_build_tool_tests": 13,
+    "total_automated_tests": 144,
+    "executed_documentation_python_examples": 17,
+    "documentation_pages": 5,
+    "checked_relative_links": 114,
+    "installed_wheel_tests": {
+      "python": 87,
+      "browser": 10
+    },
+    "source_distribution_rebuilt": true,
+    "rebuilt_wheel_catalogue_and_telemetry_examples": true,
+    "new_custom_build_from_extracted_source": true,
+    "unchanged_bundled_modules_and_notices": true,
+    "format_diff_and_notices_checks": true,
+    "native_immutable_rebuild_benchmark_smoke": true,
+    "original_observation_reports_unchanged": true
+  },
+  "distribution": {
+    "foldlitedb-0.1.0-cp311-abi3-manylinux_2_34_x86_64.whl": {
+      "bytes": 1337767,
+      "sha256": "67e911d89ce5c67fb0e06dd6688459c7f4d1ff3c3b74d43a44824272336c3537"
+    },
+    "foldlitedb-0.1.0.tar.gz": {
+      "bytes": 251351,
+      "sha256": "1f153d3ca459dcf470fc6d6097c83c2a3ce2ae7664a244ec07f27556d39256d7"
+    }
+  },
+  "compatibility_review": [
+    "Map validation is shared by preview and ingest without changing existing raw reducer inputs; a signed-zero custom reducer regression protects that boundary.",
+    "Browser worker error codes are additive; legacy clients retain the original error text field.",
+    "Dotted source filenames produce artifacts the browser loader can load.",
+    "Zero-emission filtering, source immutability, atomic batches and cache/cursor semantics remain unchanged."
+  ],
+  "documentation": {
+    "url": "https://255bits.github.io/foldlitedb/",
+    "commit": "9a0b22f16fa849f29614b2c63a45acb20ea87fdb",
+    "pages_build_status": "built",
+    "live_browser_verification": "passed: preview, typed conflicts, replay shape, consumer download, API guide and mobile layout"
+  },
+  "final_source_sha256": {
+    "src/foldlitedb/database.py": "86fd8541d65ceef27d1ec78d1e68ae8d755ce428308f500b10a910f6733cd9bb",
+    "src/foldlitedb/types.py": "aa444b70d9814a7485c846e29e2d168969753358dba7c33571287f7ce2f9e6d3",
+    "src/foldlitedb/portable_assets/errors.js": "46736d5e7ad8c26d66fb7e1b2f01d7e76f850c0f9d096c5377988c7c872b58c7",
+    "src/foldlitedb/portable_assets/client.js": "48f89ecafe45e8c56713bf42daaa3e505f2a13cb566554f8bb0cf5db9762c4b4",
+    "src/foldlitedb/portable_assets/worker.js": "9c325f613348efc3e6c36cbacce4b078b784f568119e7060309b30f0d691e12d",
+    "src/foldlitedb/portable_assets/host.js": "b00f9340c47a938ed23d5816707956c1c7a1b71aa1eec827f87d008342ee64b7",
+    "native/engine/src/lib.rs": "664aac2a7644870e707254051727cb4ce51b7dd7072c1b6e9733cdb849ed9af2",
+    "native/engine/src/runtime.rs": "fbf0d7e1e1cda019686d835cd61872949ae14a0a4d256527052bf6cf32a5b79b",
+    "views/scripts/build-view.mjs": "7602e445808aafc58165f8987d84abb9af1b7dc22e8d14ff954bd0cf6913f62c",
+    "views/scripts/view-build.mjs": "84c156c10b0029ff20a61f37e9616a7ba5e0f893ba24f51006a8ec866e22a96d",
+    "views/scripts/inspect-view.mjs": "85a025c4b7559b050fe143dce9ad829c9990b9a69966bad75dd3c609a930780a",
+    "README.md": "58cc5dcc27ad743f0b3f6dc72040bca1fa5be0049d3e53955b71b326c3d5c153",
+    "docs/api.html": "5248ef5361cb9bcd15b3aa53801c75a4fe2bfb002eb89834899d451badee0923",
+    "docs/portable.html": "8a3a674db01c648c2b8f621a7d4b4621dd9fdd51e88526e31c5d5cc40fb35d18",
+    "examples/catalogue.py": "7c54747e5e47cc7a4a2f506988d6433dd7f8f3ec1ad45cec02c5d97983d94d78",
+    "examples/telemetry.py": "531523b6ed2e59b6decc4b05ec7b135038fb2df03447ae3cb2b5ed11e6c97902"
+  }
+}

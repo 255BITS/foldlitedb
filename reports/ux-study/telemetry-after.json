@@ -1,0 +1,260 @@
+{
+  "study": "telemetry UX follow-up after requested API and documentation iteration",
+  "created_at": "2026-10-19T23:52:49.864867+00:00",
+  "status": "passed",
+  "baseline_preserved": {
+    "report": "reports/ux-study/telemetry.json",
+    "report_sha256_before_and_after": "37f0c5ec2c82bf92a44071a6277c8498ba3443137f77fba79982c97eb0864c1e",
+    "application": ".build/ux-study/telemetry/collector.py",
+    "application_sha256_before_and_after": "2ff1d890e9e407147fa233d75edc7c784bb964de21b161602cf43938f01f52f9",
+    "unchanged": true,
+    "note": "The original observations and original runnable application were preserved byte for byte; follow-up findings are recorded only here."
+  },
+  "ownership_and_scope": {
+    "role": "Implement the requested documentation iteration after completing the independent observation.",
+    "edited": [
+      "README.md",
+      "docs/index.html",
+      "docs/api.html",
+      "docs/concepts.html"
+    ],
+    "created": [
+      "examples/telemetry.py",
+      "reports/ux-study/telemetry-after.json"
+    ],
+    "not_owned_or_edited": [
+      "native runtime",
+      "Python runtime",
+      "tests",
+      "docs/portable.html",
+      "examples/catalogue.py"
+    ],
+    "runtime_dependency": "Root notified this agent that the editable extension was rebuilt with preview, named automatic positions, and actionable native recovery hints before final execution.",
+    "no_commit_or_publication": true
+  },
+  "changes": [
+    {
+      "path": "docs/api.html#document",
+      "change": "Dedicated Document constructor/field reference explains stable source IDs, explicit upstream offsets, optional automatic positions, nonmutation of input objects, integer resolved outputs, and immutable replay conflicts."
+    },
+    {
+      "path": "docs/api.html#bulk-import",
+      "change": "Executable 2500-record source import example preserves existing upstream positions, fully consumes ingest_many, and retries an older 100-record batch. Separate executable example shows stable IDs without upstream offsets and automatic positions that remain unchanged on retry."
+    },
+    {
+      "path": "README.md and docs/api.html#append",
+      "change": "Prominent guidance says ingest_many is lazy and must be iterated; each yielded batch commits separately and earlier batches survive a later failure."
+    },
+    {
+      "path": "docs/api.html#preview",
+      "change": "Executable preview example distinguishes intentional zero-emission filtering from document rejection. Explains no mutation, no reducer execution, and no guarantee that a later full batch fits."
+    },
+    {
+      "path": "docs/api.html#change-consumer",
+      "change": "Runnable persistent consumer drains all stable query pages and all change pages. CursorExpired replaces the entire local state from a new snapshot, rather than replaying additive totals onto the previous state."
+    },
+    {
+      "path": "docs/api.html#maintenance and docs/concepts.html#regeneration",
+      "change": "Documented all externally visible cache statuses and the healthy missing-cache/replay combination. Explained cache bytes as disk metadata, the usable in-memory view, reused/checkpointed log offset, and status changes on checkpoint."
+    },
+    {
+      "path": "README.md and docs/index.html",
+      "change": "Linked the telemetry and catalogue onboarding examples and optional preview debugging without expanding the quickstart into a full consumer tutorial."
+    },
+    {
+      "path": "examples/telemetry.py",
+      "change": "Compact standalone example uses a persistent temporary log, imports 2500 readings, compares five summary fields against a Python oracle, deduplicates an old source batch, consumes paged live changes, persists a consumer checkpoint, reopens, deletes the cache, replaces expired consumer state, and verifies every document and unchanged log SHA-256.",
+      "lines": 119
+    }
+  ],
+  "chronology": [
+    {
+      "step": 1,
+      "action": "Read the owned README/API/index/concepts material and existing portable_metrics example; recorded baseline report and original application SHA-256 values before making changes."
+    },
+    {
+      "step": 2,
+      "action": "Read cache status assignments in native/engine/src/lib.rs and storage.rs, and the docs checker execution model, solely to document actual status values and runnable namespace behavior. This source reading occurred after the independent baseline study was finished."
+    },
+    {
+      "step": 3,
+      "action": "Created compact telemetry example and edited only the assigned docs files."
+    },
+    {
+      "step": 4,
+      "commands": [
+        "python scripts/build_docs.py --output .build/ux-study/telemetry/docs-after",
+        "python scripts/check_docs.py --site .build/ux-study/telemetry/docs-after"
+      ],
+      "exit_code": 0,
+      "stdout": "Built 5 documentation pages. Checked 5 pages, 110 local links, 0 executed Python examples."
+    },
+    {
+      "step": 5,
+      "command": "python examples/telemetry.py",
+      "exit_code": 0,
+      "outcome": "Initial compact example succeeded with 2513 readings using the existing API path."
+    },
+    {
+      "step": 6,
+      "action": "Received root notification that the new editable native extension was built; proceeded with final executable API documentation and compatibility checks."
+    },
+    {
+      "step": 7,
+      "commands": [
+        "python scripts/build_docs.py --output .build/ux-study/telemetry/docs-after",
+        "python scripts/check_docs.py --site .build/ux-study/telemetry/docs-after --execute"
+      ],
+      "exit_code": 0,
+      "stdout": "Built 5 documentation pages in /nvme/dev/255bits/foldlitedb/.build/ux-study/telemetry/docs-after\nChecked 5 pages, 110 local links, 17 executed Python examples\n"
+    },
+    {
+      "step": 8,
+      "command": "python examples/telemetry.py > .build/ux-study/telemetry/example-after.json",
+      "exit_code": 0,
+      "outcome": "Compact example succeeded with 2513 readings; every summary equals the original baseline and original application rerun."
+    },
+    {
+      "step": 9,
+      "command": "python .build/ux-study/telemetry/collector.py > .build/ux-study/telemetry/original-after.stdout.json",
+      "exit_code": 0,
+      "outcome": "Original study application ran unchanged and passed all 30 assertions with the rebuilt engine."
+    },
+    {
+      "step": 10,
+      "action": "Loaded output JSON, compared all five metric summaries before/after, inspected the actual CursorExpired message, and asserted that the baseline report and original application hashes remained unchanged.",
+      "exit_code": 0
+    }
+  ],
+  "baseline_friction_recheck": [
+    {
+      "baseline_id": "consumer-recovery-example",
+      "status": "addressed",
+      "evidence": "docs/api.html#change-consumer now has complete stable pagination and replacement recovery; examples/telemetry.py asserts a different state object after cache reconstruction. The unchanged study app passed its existing recovery assertion.",
+      "observed_exception": {
+        "type": "CursorExpired",
+        "exact_message": "Cursor belongs to a different database, view module, or cache generation. Obtain a fresh snapshot with db.query() and replace the previous results before resuming changes."
+      }
+    },
+    {
+      "baseline_id": "explicit-batch-record-discovery",
+      "status": "addressed",
+      "evidence": "The Python API now has a Document reference and two bulk-construction examples beside ingest_many. The named automatic-position snippet ran successfully and exported integer positions [0, 1, 2]. No browser guide is required to find the Python-only import recipe."
+    },
+    {
+      "baseline_id": "cache-status-after-reconstruction",
+      "status": "addressed through explanation; schema retained",
+      "evidence": {
+        "actual_cache_stats_after_successful_reconstruction": {
+          "bytes": 0,
+          "log_offset": 0,
+          "status": "missing"
+        },
+        "actual_replay": {
+          "batches": 29,
+          "documents": 2513
+        }
+      },
+      "assessment": "The existing status remains meaningful when interpreted as startup/checkpoint handling. The docs explicitly show missing+replay as a healthy reconstructed view and distinguish disk byte metadata from memory."
+    }
+  ],
+  "verification": {
+    "documentation": {
+      "pages": 5,
+      "local_links": 110,
+      "executed_python_examples": 17,
+      "result": "passed",
+      "browser_check": "not run by this agent; root owns broader browser validation"
+    },
+    "new_compact_example": {
+      "result": "passed",
+      "readings": 2513,
+      "summaries": {
+        "cpu.percent": {
+          "count": 503,
+          "max": 80,
+          "mean": 49.314115308151095,
+          "min": 20,
+          "sum": 24805
+        },
+        "memory.mib": {
+          "count": 503,
+          "max": 2040,
+          "mean": 1523.48310139165,
+          "min": 1024,
+          "sum": 766312
+        },
+        "request.latency_ms": {
+          "count": 503,
+          "max": 24.75,
+          "mean": 14.54920477137177,
+          "min": 5,
+          "sum": 7318.25
+        },
+        "temperature.c": {
+          "count": 502,
+          "max": 30.25,
+          "mean": 24.10109561752988,
+          "min": 18,
+          "sum": 12098.75
+        },
+        "voltage.v": {
+          "count": 502,
+          "max": 3.875,
+          "mean": 3.4360059760956174,
+          "min": 3,
+          "sum": 1724.875
+        }
+      },
+      "output": ".build/ux-study/telemetry/example-after.json"
+    },
+    "original_application_rerun": {
+      "result": "passed",
+      "assertions_passed": 30,
+      "historical_readings": 2500,
+      "live_readings": 13,
+      "run_path": "/nvme/dev/255bits/foldlitedb/.build/ux-study/telemetry/runs/run-jvr2_92p",
+      "output": ".build/ux-study/telemetry/original-after.stdout.json",
+      "assertions": [
+        "fixture has 2500 historical readings",
+        "fixture has 13 live readings",
+        "history imported in 25 bounded batches",
+        "all 2500 historical readings inserted",
+        "historical summaries match Python oracle",
+        "historical retry replays 100 and inserts zero",
+        "retry leaves document count and sequence unchanged",
+        "retry leaves summaries unchanged",
+        "paginated snapshot covers all five metrics",
+        "live consumer matches oracle through source position 2503",
+        "live consumer matches oracle through source position 2507",
+        "live consumer matches oracle through source position 2511",
+        "clean close writes derived cache",
+        "cached reopen retains summaries",
+        "cached reopen preserves generation",
+        "cached reopen requires no document replay",
+        "saved cursor resumes after cached reopen without duplicate changes",
+        "consumer receives live reading after reopen",
+        "all retained records preserve source order and identities",
+        "all 2513 readings counted exactly once",
+        "cache deletion leaves log bytes unchanged",
+        "cache reconstruction retains summaries",
+        "cache reconstruction retains every resolved document",
+        "cache reconstruction retains source checkpoint",
+        "cache reconstruction replays all 2513 readings",
+        "cache reconstruction creates a fresh generation",
+        "consumer resnapshot after cache loss restores correct summaries",
+        "new cursor has no duplicate live changes",
+        "reconstruction leaves immutable log bytes unchanged",
+        "final clean close leaves immutable log bytes unchanged"
+      ]
+    },
+    "all_metric_summaries_identical_before_after": true,
+    "new_unexpected_failures": [],
+    "blockers": []
+  },
+  "limits": [
+    "No new performance claim is made.",
+    "Automatic positions and preview were verified through executed public documentation snippets; the original study app deliberately retains its original explicit-position API usage.",
+    "Expected CursorExpired after reconstruction remains part of the contract; the iteration improves onboarding and recovery guidance rather than preserving an invalid cursor."
+  ]
+}

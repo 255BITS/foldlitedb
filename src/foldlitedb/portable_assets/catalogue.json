@@ -1,0 +1,12 @@
+{
+  "abi": 1,
+  "module": "catalogue.wasm",
+  "sha256": "776d7261fcd9af1aec41981fe2dd32c8ae87937609af399ce7bc628f03bcfff6",
+  "descriptor": {
+    "abi": 1,
+    "name": "catalogue",
+    "version": "1",
+    "state_version": "1",
+    "mergeable": false
+  }
+}

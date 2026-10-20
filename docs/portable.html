@@ -1,0 +1,225 @@
+<p class="eyebrow">CouchDB-inspired views, from Python to the browser</p>
+<h1>Write a view once.<br>Run it in either environment.</h1>
+<p class="lead">A portable view contains both its map and its reducer. AssemblyScript compiles them into one WebAssembly module, executed by the Rust engine or a browser worker.</p>
+<div class="hero-actions"><a class="button" href="playground.html">Try the browser playground</a><a class="button secondary" href="#authoring">Write a custom view</a></div>
+<div class="note preview"><p><strong>Development API.</strong> This API has not been released on PyPI. Build this checkout or install a wheel built from it. Each native document log has one derived view; the browser host keeps its documents and view in memory.</p></div>
+
+<h2 id="python">A native database from Python</h2>
+<p>Build prerequisites are Python 3.11+, Rust/Cargo 1.90+, and a platform C compiler and linker. From the repository root:</p>
+
+<pre><code>python -m pip install .
+python examples/portable_metrics.py</code></pre>
+
+<p>The Rust engine and precompiled view modules are included. Node is needed only for authoring or rebuilding AssemblyScript. To produce a wheel locally, run <code>python -m pip wheel . --no-deps --wheel-dir dist</code>. Installing the resulting wheel on a matching platform needs no compiler. See <a href="index.html#install">environment setup</a> for virtual-environment and Windows notes. Start the following example with fresh database files:</p>
+
+<pre data-run="python"><code>from foldlitedb import Database, View
+
+view = View.bundled("metrics")
+with Database("metrics.fold", view) as db:
+    documents = db.add_many([
+        {"metric": "loss", "value": 4},
+        {"metric": "loss", "value": 8},
+    ])
+    assert list(db.rows())[0].result["mean"] == 6
+    snapshot = db.query()
+    db.add({"metric": "loss", "value": 3})
+    assert db.changes(since=snapshot.cursor).rows[0].result["mean"] == 5
+    retained = tuple(db.documents())</code></pre>
+
+<p>Rust owns the append-only document log, immutable identity, derived checkpoints, group states, snapshots, and changes. Its bounded Wasm interpreter executes both mapping and reduction. The log is independent of the module; a checkpoint is a disposable cache. <code>rows()</code> follows paginated snapshots; explicit <code>query()</code> and <code>changes()</code> support resumable reads. The <a href="api.html#database">Python reference</a> covers every portable method.</p>
+
+<h2 id="bundled">Two bundled views</h2>
+<p><strong>Metrics</strong> accepts payloads with a string <code>metric</code> and finite numeric <code>value</code>. Valid documents emit one number under their metric key; malformed shapes, missing fields, nulls, and nonnumeric values emit nothing. States contain <code>{count,sum,min,max}</code>; finalized results add <code>mean</code>. Empty states use null minimum, maximum, and mean. This view supports merge. Invalid contributions, states, and numeric overflow fail.</p>
+<p><strong>Catalogue</strong> accepts <code>{category:string,id:string,title:string,deleted?:boolean}</code>. Each category folds item IDs to their latest titles. An event with <code>{category,id,deleted:true}</code> removes that item. Finalization returns <code>{count,items:{id:title}}</code>. Event order matters, so this view does not support merge. Malformed documents emit nothing; item IDs are limited to 65,535 UTF-16 code units.</p>
+
+<h2 id="authoring">Author a complete view</h2>
+<p>Use Node.js 20+ and install the pinned SDK dependencies from the repository root:</p>
+
+<pre><code>npm ci --prefix views</code></pre>
+
+<p>For a custom module, save this complete source as <code>views/assembly/examples/metric-totals.ts</code>. It groups numeric values by metric and returns a running total. The SDK handles UTF-8 buffers, finite JSON, allocation, dispatch, and error envelopes.</p>
+
+<pre><code>import { JSON, View, Emission, object, numeric, number, dispatch } from "../sdk";
+export { abi_version, input_ptr, input_capacity, output_ptr } from "../sdk";
+
+class MetricTotals extends View {
+  constructor() { super("metric-totals", false, "1", "1"); }
+
+  map(document: JSON.Value): Emission[] {
+    const doc = object(document);
+    if (doc == null) return [];
+    const metric = doc.get("metric");
+    const value = doc.get("value");
+    if (metric == null || metric.type != JSON.Types.String || !numeric(value)) {
+      return [];
+    }
+    return [new Emission(metric, value!)];
+  }
+
+  identity(): JSON.Value { return JSON.Value.from&lt;f64&gt;(0); }
+
+  add(state: JSON.Value, values: JSON.Arr): JSON.Value {
+    if (!numeric(state)) return this.fail("Invalid total state");
+    let total = number(state);
+    for (let i = 0; i &lt; values.length; i++) {
+      const value = values.at(i);
+      if (!numeric(value)) return this.fail("Expected a numeric contribution");
+      total += number(value);
+    }
+    if (!isFinite(total)) return this.fail("Total overflowed");
+    return JSON.Value.from(total);
+  }
+
+  finalize(state: JSON.Value): JSON.Value {
+    if (!numeric(state)) return this.fail("Invalid total state");
+    return state;
+  }
+}
+
+const view = new MetricTotals();
+export function execute(length: i32): i32 { return dispatch(view, length); }</code></pre>
+
+<p>From the repository root, compile the source and generate its digest manifest with one command:</p>
+
+<pre><code>npm run build:view --prefix views -- assembly/examples/metric-totals.ts --out-dir .build</code></pre>
+
+<p>Both path arguments are relative to <code>views/</code>, regardless of the caller's working directory; absolute paths also work. The output directory is created if needed. The source filename determines the outputs: <code>views/.build/metric-totals.wasm</code> and <code>views/.build/metric-totals.json</code>. Use letters, digits, underscores, dots, or hyphens in the source filename. The manifest records the compiled descriptor and SHA-256; its descriptor name may differ from the filename. Browser <code>connect({name})</code> uses the artifact filename stem.</p>
+<p>The command applies the same pinned compiler settings as the bundled build and ignores ambient <code>JSON_*</code> settings. It validates the ABI and descriptor before replacing successful outputs; compilation or validation errors leave existing artifacts intact. Choose a separate output directory such as <code>.build</code>; SDK, dependency, script, and bundled asset directories are protected. The ordinary <code>npm run build --prefix views</code> still builds only the two bundled examples.</p>
+
+<p>From the repository root, load the same bytes from Python:</p>
+
+<pre><code>import json
+from pathlib import Path
+from foldlitedb import Database, View
+
+manifest = json.loads(Path("views/.build/metric-totals.json").read_text())
+custom = View("views/.build/metric-totals.wasm", sha256=manifest["sha256"])
+with Database(":memory:", custom) as db:
+    db.add_many([{"metric": "loss", "value": 4}, {"metric": "loss", "value": 8}])
+    assert list(db.rows())[0].result == 12</code></pre>
+
+<p>The map receives payloads only, not host IDs or positions. Include domain metadata inside the payload if your computation needs it. Keys, states, and contributions can be structured JSON. State is passed explicitly to every update; requests must not depend on mutable module globals, clocks, randomness, or undeclared external data. Hosts instantiate the module afresh for operations.</p>
+<p><code>add</code> must preserve contribution order and produce equivalent state when an input sequence is split into successive batches. Implement <code>merge</code> and set <code>mergeable=true</code> only when compatible independent states can be combined correctly. The example leaves merge disabled. Bump the view version for changed behavior and the state version for incompatible formats; rebuild the module and manifest together. A new compiler can also change the module digest.</p>
+
+<h2 id="browser">Use the module on a static website</h2>
+<p>The <a href="playground.html">playground</a> imports JSON arrays or JSONL, appends measurements, streams simulated updates, exports resolved records, and verifies replay. All document processing stays in its worker. The same module bytes power the Python example; JavaScript owns browser grouping and storage. The Rust document-log engine is not part of the browser build.</p>
+<p>To create your own page, copy the installed package's browser files and bundled modules. Run this Python from the repository root:</p>
+
+<pre data-run="python"><code>from pathlib import Path
+from foldlitedb import portable_assets
+
+target = Path("browser-demo/portable")
+target.mkdir(parents=True, exist_ok=True)
+for resource in portable_assets().iterdir():
+    if resource.is_file():
+        (target / resource.name).write_bytes(resource.read_bytes())</code></pre>
+
+<p>Save this as <code>browser-demo/index.html</code>. Browser methods are asynchronous; <code>addMany</code> returns a batch-result object, while Python's <code>add_many</code> returns a tuple of documents.</p>
+
+<pre><code>&lt;!doctype html&gt;
+&lt;meta charset="utf-8"&gt;
+&lt;title&gt;Foldlite DB in the browser&lt;/title&gt;
+&lt;pre id="output"&gt;Loading…&lt;/pre&gt;
+&lt;script type="module"&gt;
+import { BrowserDatabase } from './portable/client.js';
+
+const db = await BrowserDatabase.connect({name: 'metrics'});
+try {
+  await db.addMany([
+    {metric: 'loss', value: 4},
+    {metric: 'loss', value: 8},
+  ]);
+  const snapshot = await db.query();
+  await db.add({metric: 'loss', value: 3});
+  const updates = await db.changes(snapshot.cursor);
+  const retained = await db.export(); // Save these records outside the worker.
+  const replay = await db.replay();
+  document.querySelector('#output').textContent = JSON.stringify({
+    rows: await db.rows(), updates, documents: retained.length, replay,
+  }, null, 2);
+} finally {
+  db.close();
+}
+&lt;/script&gt;</code></pre>
+
+<pre><code>python -m http.server 8000 --directory browser-demo</code></pre>
+
+<p>Open <code>http://localhost:8000</code>; opening the file directly is insufficient for module workers and fetch. Production deployments can serve these files over HTTPS. Copy the entire resource directory, including <code>client.js</code>, <code>worker.js</code>, <code>host.js</code>, and <code>errors.js</code>, so their module imports resolve.</p>
+<p>For the custom totals view, copy <code>views/.build/metric-totals.wasm</code> and <code>metric-totals.json</code> into <code>browser-demo/portable/</code>, then change the connection to:</p>
+
+<pre><code>const db = await BrowserDatabase.connect({
+  name: 'metric-totals',
+  base: new URL('./portable/', import.meta.url),
+});</code></pre>
+
+<p>The browser verifies the manifest's SHA-256 and descriptor before execution. <code>db.info</code> contains initial stats. Compare <code>(await db.stats()).module_sha256</code> with Python's <code>View.sha256</code> to confirm the exact artifact.</p>
+<p>Every method below returns a Promise. A resolved document is <code>{id,payload,position,source,sequence}</code>; a batch result is <code>{documents,inserted,replayed,sequence,cursor}</code>. <code>inserted</code> and <code>replayed</code> are counts, and <code>documents</code> contains the resolved input records in order.</p>
+
+<pre class="signature"><code>db.add(payload, {id?, source?, position?} = {}) → resolved document
+db.addMany(payloads, {source?} = {}) → batch result
+db.ingest(records) → batch result
+db.preview(payload) → [{key,value}, ...]
+db.export() → resolved document[]
+db.stats() → {documents,sequence,cursor,module_sha256,descriptor,
+                checkpoints,storage:"memory",memory_bytes}
+db.replay() → {equivalent,documents,groups,module_sha256}</code></pre>
+
+<p><code>add</code> accepts an optional identity; unnamed appends create new observations. <code>addMany</code> commits one bounded batch. <code>ingest</code> retains supplied IDs, sources, and positions; identical re-imports count as replays. Exported <code>sequence</code> fields describe progress in the current worker and are regenerated on import. Preserve <code>id</code>, <code>payload</code>, <code>position</code>, and <code>source</code>; compare keys, states, and results across databases rather than sequence fields or cursors.</p>
+<p><code>preview</code> maps one payload without appending documents, advancing progress, or running the reducer. Use it to diagnose an empty view: <code>await db.preview({metric:'loss',value:4})</code> returns <code>[{key:'loss',value:4}]</code>, while an incompatible payload may return <code>[]</code>. Python exposes the same diagnostic as <code>db.preview(payload)</code>. A successful preview checks mapping only; an actual append can still fail reduction or host limits.</p>
+<p><code>query({limit,cursor,after,key})</code> returns <code>{rows,cursor,after,complete}</code>; continue with both returned cursor and after. Each row contains <code>{key,state,result,sequence}</code>. <code>rows({limit,key})</code> collects all snapshot pages into an array. <code>changes(cursor,{limit})</code> returns <code>{rows,cursor,complete}</code>; continue with its returned cursor until complete. <code>replay()</code> uses the original committed batches to compare keys, states, and results, reporting the boolean <code>equivalent</code> without changing current cursors.</p>
+<p>Browser failures reject with <code>DatabaseError</code> or its subclasses <code>DocumentConflict</code>, <code>SourceOrderError</code>, and <code>CursorExpired</code>, exported from <code>client.js</code>. Each has a stable <code>code</code> and <code>name</code> matching its class name, plus a descriptive <code>message</code>. Use a class or code instead of parsing message text:</p>
+
+<pre><code>import { DocumentConflict } from './portable/client.js';
+
+try {
+  await db.add({metric: 'loss', value: 4}, {id: 'observation-1'});
+} catch (error) {
+  if (error instanceof DocumentConflict) {
+    console.error(error.code, error.message);
+  } else {
+    throw error;
+  }
+}</code></pre>
+
+<h2 id="contract">The computation contract and limits</h2>
+<div class="table-wrap"><table><thead><tr><th>Operation</th><th>Input</th><th>Output</th></tr></thead><tbody>
+<tr><td><code>descriptor</code></td><td>Module request</td><td>Name, view version, state version, ABI, merge capability</td></tr>
+<tr><td><code>map</code></td><td>A batch of document payloads</td><td>An emission array per document, including zero emissions</td></tr>
+<tr><td><code>identity</code></td><td>Empty request</td><td>Initial JSON state for a group</td></tr>
+<tr><td><code>add</code></td><td>State and ordered contributions</td><td>Updated JSON state</td></tr>
+<tr><td><code>finalize</code></td><td>State</td><td>Public JSON result</td></tr>
+<tr><td><code>merge</code></td><td>Two compatible states</td><td>Combined state, when supported</td></tr>
+</tbody></table></div>
+<p>The v1 ABI uses UTF-8 JSON with a 256 KiB request limit and a separate 256 KiB response limit, both including envelopes. Modules have no host imports and at most 16 MiB of linear memory. The native host imposes a fuel budget. The browser client runs a dedicated worker with a 15-second default deadline, configurable through <code>timeoutMs</code> from 1 through 60,000 milliseconds. Expiry terminates the worker and loses its in-memory state.</p>
+<p>Both hosts limit an ingestion batch to 1024 documents and 4096 emissions, and snapshot pages to 1024 entries. Encoded map and per-group add requests can reach the ABI byte limit earlier. The browser additionally caps retained documents at 20,000 and 16 MiB of encoded records, distinct groups at 4096, and history at 100,000 entries and 32 MiB of encoded rows. Its public request envelope is capped at 4 MiB. These are component limits, not a bound on the whole browser process. A failing batch does not commit a prefix.</p>
+<p>Portable JSON numbers use IEEE-754 double precision, as in JavaScript. Python rejects integer inputs that cannot be represented exactly as doubles; use strings for exact large identifiers. Positions and cursor sequences are nonnegative JavaScript-safe integers. Floating-point sums preserve ordered inputs; arbitrary merge trees can change rounding. See <a href="concepts.html#numerical-contract">numerical reproducibility</a>.</p>
+
+<h2 id="replay">Retain documents; regenerate views</h2>
+<p>Keep the document log and exact compiled module. A persistent <code>metrics.fold</code> log has separate <code>metrics.fold.cache</code> and <code>metrics.fold.lock</code> siblings. One active owner holds the log. Accepted immutable batches are synced before acknowledgement; clean close or <code>checkpoint()</code> writes an atomic derived snapshot.</p>
+<p>Reopen verifies the complete log, reuses a matching cache prefix, and executes Wasm for only the uncached suffix. Missing, corrupt, or different-module caches rebuild from the original batches. To change computation, open the same log with the new module; documents remain unchanged. A human version label cannot override a changed digest. Keep the previous module if its previous result must remain reproducible.</p>
+<p><code>rebuild()</code> explicitly recomputes the current view, checkpoints it, and starts a new cursor generation. Reconstruction is a linear log read plus map/reduce work for uncached batches; current indexes and history grow in host memory. Cache acceleration avoids computation, rather than the full validation read, and has no unmeasured throughput guarantee.</p>
+<pre data-run="python"><code>with Database("metrics.fold", view) as live:
+    expected = [(row.key, row.state, row.result) for row in live.rows()]
+    live.rebuild()
+    assert [(row.key, row.state, row.result) for row in live.rows()] == expected</code></pre>
+<p>To copy resolved documents into a separate log, preserve their original order:</p>
+
+<pre data-run="python"><code>with Database("copy.fold", view) as rebuilt:
+    rebuilt.ingest(retained)
+    assert list(rebuilt.rows())[0].result["mean"] == 5</code></pre>
+
+<p>For larger streams, iterate <code>db.ingest_many(records, batch_size=100)</code>; each yielded result commits one bounded batch. <code>db.documents(limit=100)</code> exports resolved records at a pinned snapshot. Browser exports include an additional engine sequence field; Python accepts them after constructing <code>Document</code> objects:</p>
+
+<pre><code>import json
+from pathlib import Path
+from foldlitedb import Document, Database, View
+
+view = View.bundled("metrics")
+records = json.loads(Path("exported-documents.json").read_text(), parse_int=float)
+documents = [Document(r["id"], r["payload"], int(r["position"]), r["source"]) for r in records]
+with Database("from-browser.fold", view) as db:
+    for result in db.ingest_many(documents):
+        print(result.inserted, result.replayed)</code></pre>
+
+<p>The final snippet expects an exported JSON array from the metrics view. Browser payload numbers use IEEE-754 doubles; <code>parse_int=float</code> preserves those semantics even when a large double is serialized without a decimal point. Safe source positions are converted back to Python integers when constructing documents. Preserve input order; preserve batch boundaries too if exact engine sequence values matter. Compare computation outputs rather than database-local cursors. A new database or rebuilt cache receives a new generation, so obtain new cursors even when results match. A valid checkpoint preserves cursors across an ordinary reopen.</p>
+<p>Native documents persist in the log; a cache can always be reconstructed. Back up the log or an authoritative external stream: deleting the only source copy loses data. Browser state is in memory and is discarded on reload or <code>close()</code>. Export before closing and ingest those records into a new worker to restore it. Persistent browser storage, log/history compaction, and multiple native views per database remain future extensions. See the <a href="concepts.html">document and cache model</a>.</p>

@@ -1,0 +1,217 @@
+{
+  "study": "catalogue-after",
+  "status": "complete",
+  "recorded_at": "2026-10-19T23:55:28.287711+00:00",
+  "baseline_preserved": {
+    "report": "reports/ux-study/catalogue.json",
+    "sha256": "7d34a85b4c5b14c1bf5d86e503f6dcd1ccc546703544f12238229ad36ac3c1ab",
+    "mtime_ns": 1792453625000553498,
+    "original_application_and_result_untouched": true,
+    "original_app_copy_is_byte_identical": true,
+    "note": "Follow-up runs use after/original and after/named directories; the baseline report and its existing artifacts were not rewritten."
+  },
+  "changes": [
+    {
+      "change": "Document.position is optional, default None",
+      "files": [
+        "src/foldlitedb/types.py",
+        "src/foldlitedb/database.py"
+      ],
+      "effect": "ingest omits the position field when unresolved, allowing automatic per-source positions inside one atomic named batch. Identical old named retries resolve to their original positions. Exported/returned Documents still carry integer positions. ingest_many continues snapshotting mutable payloads before producers resume."
+    },
+    {
+      "change": "Database.preview(payload) returns a list of {key,value} emissions",
+      "files": [
+        "src/foldlitedb/database.py",
+        "native/engine/src/lib.rs"
+      ],
+      "effect": "Runs only the one-document map contract. No append, identity allocation, reducer calls, cache writes, or sequence changes. Stage and preview share map response shape, cardinality, contribution limit, and JSON validation. Empty emissions expose ignored payloads before import."
+    },
+    {
+      "change": "Cursor and batch recovery wording",
+      "files": [
+        "native/engine/src/lib.rs",
+        "native/engine/src/runtime.rs",
+        "src/foldlitedb/database.py"
+      ],
+      "effect": "Native cursor-validation errors preserve original messages and append fresh-snapshot recovery. Native/Python count bounds and ABI request-size failures suggest smaller batches or ingest_many with a smaller batch_size."
+    },
+    {
+      "change": "Catalogue example covers the actual offline application flow",
+      "files": [
+        "examples/catalogue.py"
+      ],
+      "effect": "Demonstrates separate delivery/product IDs, named atomic batches with omitted positions, old creation retries after revisions, preview of supplier name/title mismatch, and empty versus absent categories."
+    }
+  ],
+  "compatibility_review": {
+    "issue_caught": "The initial shared helper canonicalized emitted values; this could change custom reducer inputs such as -0.0 into 0 and make reconstruction differ from an existing cache.",
+    "resolution": "Removed emission encode/parse roundtrips. Shared helper validates and projects raw cloned key/value fields, preserving old reducer input semantics. Only preview applies existing large-number JSON wire normalization to its response; emitted signed zero survives.",
+    "regression": "native/engine/tests/ux.rs includes a custom Wasm reducer that traps unless the map-emitted -0.0 reaches its input with a minus sign.",
+    "log_and_cache_format_changes": false
+  },
+  "findings_followup": [
+    {
+      "baseline_rank": 1,
+      "status": "improved with an explicit diagnostic",
+      "evidence": "Named variant previews all nine valid events with one emission each and a name-only supplier payload with zero emissions. State remains unchanged.",
+      "remaining_limit": "Callers must opt into preview or application schema validation; normal ingestion still accepts zero-emission facts by design. Preview cannot validate reducer success or prove a complete batch fits."
+    },
+    {
+      "baseline_rank": 2,
+      "status": "resolved for named imports",
+      "evidence": "The named variant imports the same nine events in two atomic batches without supplying positions. Retrying the five-event creation batch inserts nothing, and all exported positions match the per-source sequence 0..8."
+    },
+    {
+      "baseline_rank": 3,
+      "status": "example improved",
+      "evidence": "examples/catalogue.py uses outer delivery-N IDs alongside payload product a/b/mug IDs and retries the original creation batch after a revision."
+    },
+    {
+      "baseline_rank": 4,
+      "status": "example improved",
+      "evidence": "examples/catalogue.py asserts a zero-count gear row after last-item withdrawal, no missing-category row, and a current-catalogue filter for zero-count groups."
+    }
+  ],
+  "validation": {
+    "rust": {
+      "command": "cargo test --locked --manifest-path native/Cargo.toml -p foldlitedb-portable-engine",
+      "exit_code": 0,
+      "passed": 34,
+      "suites": {
+        "native_storage": 11,
+        "portable": 15,
+        "ux": 8
+      },
+      "run_after_signed_zero_correction": true
+    },
+    "python_before_final_refresh": {
+      "command": "python -m pytest tests/test_ux.py tests/test_add.py tests/test_convenience_api.py tests/test_portable.py tests/test_native_cache.py -q",
+      "exit_code": 0,
+      "passed": 53
+    },
+    "example_before_final_refresh": {
+      "command": "python examples/catalogue.py",
+      "exit_code": 0
+    },
+    "diff_check": {
+      "command": "git diff --check -- src/foldlitedb/types.py src/foldlitedb/database.py native/engine/src/lib.rs native/engine/src/runtime.rs examples/catalogue.py",
+      "exit_code": 0
+    },
+    "python_coverage": [
+      "Named multi-source atomic batches",
+      "Old named retries after source progress",
+      "Resolved exported positions",
+      "Atomic conflicts and no reserved offsets",
+      "Unchanged explicit position semantics",
+      "ingest_many mutable generator snapshots with omitted positions",
+      "Valid and zero-emission previews",
+      "No successful preview state/log/cache changes including file modification times",
+      "Deterministic IEEE mapping, signed zero input, precise/subnormal/large doubles",
+      "Invalid JSON input",
+      "Preview cannot guarantee reducer or whole-batch success",
+      "ABI and max-batch recovery",
+      "Expired cursor recovery",
+      "Closed preview error"
+    ],
+    "rust_coverage": [
+      "Named auto positions per source and same-batch replay",
+      "Atomic conflict leaves state/log unchanged",
+      "Catalogue map preview with no state/log/cache change",
+      "Map-only custom guest proves no reducers run during preview",
+      "Malformed map result and failed-map error parity with ingest",
+      "Failed map leaves log/cache/state unchanged",
+      "Preserve guest-emitted signed zero into a custom reducer",
+      "IEEE numeric mapping and deterministic results",
+      "Batch/cursor recovery and closed preview"
+    ],
+    "python_final": {
+      "command": "python -m pytest tests/test_ux.py tests/test_add.py tests/test_convenience_api.py tests/test_portable.py tests/test_native_cache.py -q",
+      "exit_code": 0,
+      "passed": 53,
+      "run_after_signed_zero_correction_and_extension_refresh": true
+    },
+    "example_final": {
+      "command": "python examples/catalogue.py",
+      "exit_code": 0,
+      "run_after_extension_refresh": true
+    },
+    "applications_final": [
+      {
+        "command": "python .build/ux-study/catalogue/after/original/app.py",
+        "exit_code": 0,
+        "all_assertions_passed": true,
+        "run_after_extension_refresh": true,
+        "run_dir": "/nvme/dev/255bits/foldlitedb/.build/ux-study/catalogue/after/original/run-qv2yc14i"
+      },
+      {
+        "command": "python .build/ux-study/catalogue/after/named/app.py",
+        "exit_code": 0,
+        "all_assertions_passed": true,
+        "run_after_extension_refresh": true,
+        "run_dir": "/nvme/dev/255bits/foldlitedb/.build/ux-study/catalogue/after/named/run-n47d92fp"
+      }
+    ]
+  },
+  "comparison": {
+    "baseline": {
+      "documents": 9,
+      "batches": 9,
+      "sequence": 18
+    },
+    "original_after": {
+      "documents": 9,
+      "batches": 9,
+      "sequence": 18,
+      "all_assertions_passed": true
+    },
+    "named_after": {
+      "documents": 9,
+      "batches": 2,
+      "sequence": 15,
+      "all_assertions_passed": true
+    },
+    "current_catalogue_identical": true,
+    "current_catalogue": {
+      "books": {
+        "atlas": "Pocket Field Guide, second edition"
+      },
+      "gear": {
+        "mug": "Enamel Trail Mug",
+        "tote": "Canvas Tote"
+      }
+    },
+    "sequence_note": "Sequence 18 versus 15 is expected: each changed group receives one history record per batch. Grouping lifecycle observations coalesces per-category updates in the named variant. Domain outputs and retained facts match; cursors/sequences are database-local.",
+    "performance_claims": "No throughput measurement or speed claim; batch counts are directly observed.",
+    "retained_facts_identical": true,
+    "baseline_report_sha256_and_mtime_unchanged": true,
+    "cursor_recovery_message_verified": true
+  },
+  "artifacts": {
+    "original_after_application": ".build/ux-study/catalogue/after/original/app.py",
+    "original_after_result": ".build/ux-study/catalogue/after/original/result.json",
+    "named_application": ".build/ux-study/catalogue/after/named/app.py",
+    "named_result": ".build/ux-study/catalogue/after/named/result.json",
+    "python_tests": "tests/test_ux.py",
+    "native_tests": "native/engine/tests/ux.rs",
+    "example": "examples/catalogue.py"
+  },
+  "scope_integrity": {
+    "baseline_report_modified": false,
+    "other_study_reports_read": false,
+    "docs_modified_by_this_agent": false,
+    "existing_tests_modified": false,
+    "commits": false,
+    "extension_build_performed_by": "root agent"
+  },
+  "completed_at": "2026-10-19T23:55:56.497807+00:00",
+  "outcome": {
+    "required_work_complete": true,
+    "all_checks_passed": true,
+    "unexpected_application_failures": [],
+    "same_nine_facts_and_three_current_products": true,
+    "named_atomic_batches": 2,
+    "original_atomic_batches": 9,
+    "summary": "The original application remains compatible. Named atomic imports remove the manual-position requirement; preview exposes malformed supplier shapes before writing. Rebuild and duplicate semantics remain correct, and custom reducer contribution inputs retain their previous semantics."
+  }
+}

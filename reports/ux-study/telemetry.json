@@ -1,0 +1,432 @@
+{
+  "study": "independent application developer experience",
+  "application": "Python telemetry collector and dashboard consumer",
+  "date": "2026-10-19",
+  "workspace": "/nvme/dev/255bits/foldlitedb",
+  "status": "success",
+  "independence": {
+    "read_other_study_reports": false,
+    "contacted_other_study_agents": false,
+    "spawned_agents": false,
+    "library_source_inspected": false,
+    "production_docs_tests_modified": false,
+    "external_installs_or_publication": false,
+    "scope": "Only own .build/ux-study/telemetry/ artifacts and reports/ux-study/telemetry.json were written."
+  },
+  "application_design": {
+    "scenario": "A gateway has a retained historical source export, resends an old batch after progress has advanced, then provides live readings to a dashboard that saves a change cursor.",
+    "view": "View.bundled(\"metrics\")",
+    "metrics": [
+      "cpu.percent",
+      "memory.mib",
+      "request.latency_ms",
+      "temperature.c",
+      "voltage.v"
+    ],
+    "fixture_schema": {
+      "id": "gateway-07:<source position>",
+      "source": "telemetry/gateway-07",
+      "position": "zero-based increasing integer",
+      "payload": {
+        "metric": "metric name including unit",
+        "value": "finite integer or binary-exact fraction",
+        "measured_at": "ISO 8601 UTC timestamp",
+        "device": "gateway-07"
+      }
+    },
+    "fixture_sizes": {
+      "historical": 2500,
+      "live": 13
+    },
+    "rationale": [
+      "The bundled view exactly matches the requested summary, so no Wasm authoring is needed.",
+      "Explicit Document identities and positions keep a retained source batch safe to retry.",
+      "The documented lazy ingest_many is fully iterated in bounded 100-record batches.",
+      "A dashboard bootstraps with query pages and replaces whole per-metric results with changes postimages.",
+      "All source documents are valid metric readings; malformed-payload filtering was not exercised.",
+      "An independent Python aggregation checks every count/sum/min/max/mean. Values use exact binary fractions to keep fixture arithmetic unambiguous."
+    ],
+    "live_consumption": "Application-driven polling with changes(since=cursor, limit=2), drained until complete; this is a local single-owner collector, not a concurrent-process service."
+  },
+  "run_instructions": [
+    "python .build/ux-study/telemetry/make_fixtures.py",
+    "python .build/ux-study/telemetry/collector.py"
+  ],
+  "artifacts": {
+    "application": ".build/ux-study/telemetry/collector.py",
+    "fixture_generator": ".build/ux-study/telemetry/make_fixtures.py",
+    "historical_fixture": ".build/ux-study/telemetry/historical.jsonl",
+    "live_fixture": ".build/ux-study/telemetry/live.jsonl",
+    "latest_result": ".build/ux-study/telemetry/latest-result.json",
+    "successful_run": ".build/ux-study/telemetry/runs/run-jc_r3mfr",
+    "successful_events": ".build/ux-study/telemetry/runs/run-jc_r3mfr/events.jsonl",
+    "failed_own_code_run": ".build/ux-study/telemetry/runs/run-dgsw8ui6/result.json"
+  },
+  "chronology": [
+    {
+      "step": 1,
+      "intent": "Find the entry documentation and applicable workspace instructions.",
+      "commands": [
+        "pwd && rg --files -g AGENTS.md -g 'README*' -g 'pyproject.toml' -g 'docs/**' | head -80",
+        "for file in /AGENTS.md /nvme/AGENTS.md /nvme/dev/AGENTS.md /nvme/dev/255bits/AGENTS.md /nvme/dev/255bits/foldlitedb/AGENTS.md; do if [ -f \"$file\" ]; then echo \"$file\"; cat \"$file\"; fi; done"
+      ],
+      "outcome": "README.md and docs/api.html, concepts.html, portable.html found; no applicable AGENTS.md was present at these ancestor paths.",
+      "exit_code": 0
+    },
+    {
+      "step": 2,
+      "intent": "Choose an application approach from the README rather than source.",
+      "commands": [
+        "cat README.md",
+        "rg -n 'Python|python|batch|stream|watch|subscribe|cache|rebuild|retry|idempot|import|summary|aggregate|SELECT|close' docs/api.html docs/concepts.html docs/layout.html docs/index.html"
+      ],
+      "discovered": [
+        "View.bundled(\"metrics\") already computes the desired per-metric statistics.",
+        "add_many is bounded to 1024 records, while ingest_many handles larger archives.",
+        "Unnamed appends are separate observations; explicit source-scoped identities are needed for retry safety.",
+        "The .fold log is retained, the .cache sibling can be deleted, and ordinary close writes a checkpoint."
+      ],
+      "exit_code": 0
+    },
+    {
+      "step": 3,
+      "intent": "Read public contracts for explicit records, source order, changes, and cache loss.",
+      "commands": [
+        "cat docs/api.html",
+        "cat docs/concepts.html",
+        "cat examples/portable_metrics.py && cat pyproject.toml && python -c 'import sys, foldlitedb; print(sys.executable); print(foldlitedb.__file__)'"
+      ],
+      "outcome": "The installed editable package imports via /usr/bin/python. API/concepts document lazy ingest_many, complete change-page loops, and cursor expiration on reconstruction.",
+      "documentation_gap_noted_before_source_search": "The Python API lists ingest(Document instances) and mentions Document(id, payload, position, source), but has no dedicated Document reference or retry-safe batch construction example.",
+      "exit_code": 0
+    },
+    {
+      "step": 4,
+      "intent": "Find a documented construction example and confirm bundled-view accepted payloads.",
+      "command": "rg -n -A 32 -B 4 'id=\"bundled\"|metrics|unknown|ignore|invalid|finite' docs/portable.html | head -150",
+      "outcome": "docs/portable.html:32 documents metrics input shapes. Its browser export/import example at lines 220–228 imports Document and constructs explicit identities and source positions. No source inspection was necessary.",
+      "exit_code": 0
+    },
+    {
+      "step": 5,
+      "intent": "Run a tiny retry-safe import using the documented constructor before writing the collector.",
+      "command": "python - <<'PY'\nfrom foldlitedb import Database, Document, View\nrecord = Document('gateway-07:0', {'metric': 'temperature.c', 'value': 21.5}, 0, 'gateway-07')\nwith Database(':memory:', View.bundled('metrics')) as db:\n    first = db.ingest([record])\n    retry = db.ingest([record])\n    print('record:', record)\n    print('first:', first)\n    print('retry:', retry)\n    print('summary:', [(row.key, row.result) for row in db.rows()])\n    assert first.inserted == 1\n    assert retry.replayed == 1\nPY",
+      "stdout": "record: Document(id='gateway-07:0', payload={'metric': 'temperature.c', 'value': 21.5}, position=0, source='gateway-07')\nfirst: IngestResult(inserted=1, replayed=0, sequence=2)\nretry: IngestResult(inserted=0, replayed=1, sequence=2)\nsummary: [('temperature.c', {'count': 1, 'max': 21.5, 'mean': 21.5, 'min': 21.5, 'sum': 21.5})]\n",
+      "exit_code": 0
+    },
+    {
+      "step": 6,
+      "intent": "Implement deterministic fixtures and a collector with a paginated dashboard consumer.",
+      "action": "Created make_fixtures.py and collector.py using apply_patch under .build/ux-study/telemetry/.",
+      "attempted_snippets": [
+        "records = [Document(**json.loads(line)) for line in stream if line.strip()]",
+        "for result in db.ingest_many(iter(history), batch_size=100): imports.append(asdict(result))",
+        "retry = db.ingest(history[1200:1300])",
+        "page = db.changes(since=self.cursor, limit=2)",
+        "except CursorExpired: consumer.snapshot(reconstructed)"
+      ],
+      "outcome": "Application keeps its own summaries/checkpoint and uses a separate Python oracle for every summary field."
+    },
+    {
+      "step": 7,
+      "intent": "Generate fixtures and execute the full application.",
+      "command": "python .build/ux-study/telemetry/make_fixtures.py && python .build/ux-study/telemetry/collector.py",
+      "stdout": "historical.jsonl: 2500 readings\nlive.jsonl: 13 readings\n",
+      "exit_code": 1,
+      "failure_owner": "application code written during this exercise; no FoldliteDB operation had run yet",
+      "exception": "TypeError",
+      "exact_message": "run.<locals>.event() got multiple values for argument 'name'",
+      "traceback": "Traceback (most recent call last):\n  File \"/nvme/dev/255bits/foldlitedb/.build/ux-study/telemetry/collector.py\", line 118, in run\n    verify(\"fixture has 2500 historical readings\", len(history) == 2500)\n    ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/nvme/dev/255bits/foldlitedb/.build/ux-study/telemetry/collector.py\", line 112, in verify\n    event(\"assertion\", name=name, passed=True)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: run.<locals>.event() got multiple values for argument 'name'\n",
+      "evidence_file": ".build/ux-study/telemetry/runs/run-dgsw8ui6/result.json"
+    },
+    {
+      "step": 8,
+      "intent": "Correct my application logging helper.",
+      "before": "def event(name: str, **details): ...; event(\"assertion\", name=name, passed=True)",
+      "after": "def event(event_name: str, **details): ...; event(\"assertion\", name=name, passed=True)",
+      "action": "Renamed the helper positional parameter to event_name; also removed an unused saved_cursor local. No library change or workaround."
+    },
+    {
+      "step": 9,
+      "intent": "Reexecute the complete telemetry workflow.",
+      "command": "python .build/ux-study/telemetry/collector.py",
+      "exit_code": 0,
+      "outcome": "All 30 assertions passed; 2513 unique readings, five metric summaries, and retry/reopen/cache-loss recovery behaved as documented.",
+      "application_expected_exception": {
+        "type": "CursorExpired",
+        "exact_message": "Cursor belongs to a different database, view module, or cache generation",
+        "recovery": "Discard the old consumer cursor and replace its materialized state from a fresh paginated query; then continue with the new cursor."
+      },
+      "evidence_file": ".build/ux-study/telemetry/runs/run-jc_r3mfr/result.json"
+    },
+    {
+      "step": 10,
+      "intent": "Extract exact observed messages and page boundaries for the independent report.",
+      "command_summary": "Read only telemetry/runs/*/result.json, telemetry/latest-result.json and the successful telemetry events.jsonl with Python json.loads; print statuses and selected events.",
+      "outcome": "Retained the own-code failure separately from the expected CursorExpired event. Verified 3 snapshot pages and 2 pages per four-key live batch.",
+      "exit_code": 0
+    }
+  ],
+  "discovery_cost": {
+    "entry": "README.md",
+    "additional_public_material": [
+      "docs/api.html",
+      "docs/concepts.html",
+      "examples/portable_metrics.py",
+      "docs/portable.html#bundled",
+      "docs/portable.html#replay"
+    ],
+    "searches": [
+      "README/docs paths and relevant API terms using rg",
+      "Document construction example within the portable guide"
+    ],
+    "source_searches": [],
+    "blocked": false,
+    "assessment": "The main path was documented sufficiently to finish without reading implementation code. Retry-safe batch record construction required following the API reference into the portable guide."
+  },
+  "intuitive_findings": [
+    {
+      "finding": "A bundled metrics view removes setup and view-authoring work for this application.",
+      "evidence": "View.bundled(\"metrics\") opened without Node, custom Wasm, configuration, or a server; all five summary fields matched the oracle."
+    },
+    {
+      "finding": "Explicit replay semantics behaved exactly like an application source checkpoint should.",
+      "evidence": {
+        "inserted": 0,
+        "replayed": 100,
+        "sequence": 2625
+      },
+      "context": "Retried positions 1200–1299 after the committed checkpoint reached 2499; no new document or sequence change occurred."
+    },
+    {
+      "finding": "Bounded archive import and page iteration are explicit and worked on the first library attempt.",
+      "evidence": {
+        "historical_batches": 25,
+        "historical_documents": 2500,
+        "snapshot_pages": 3,
+        "live_pages_per_four_reading_batch": 2
+      }
+    },
+    {
+      "finding": "Clean close and reopen made the consumer cursor durable without an explicit application checkpoint() call.",
+      "evidence": {
+        "cached_reopen_status": "loaded",
+        "replay_documents": 0,
+        "empty_poll_after_reopen": true
+      }
+    },
+    {
+      "finding": "The cache was truly disposable for retained data and numerical results.",
+      "evidence": "Deleting telemetry.fold.cache replayed 29 original batches/2513 documents; every resolved Document and summary matched, and the immutable log SHA-256 stayed unchanged."
+    }
+  ],
+  "confusing_findings_ranked": [
+    {
+      "rank": 1,
+      "id": "consumer-recovery-example",
+      "severity": "low",
+      "category": "documented operational behavior with a missing end-to-end example",
+      "finding": "Deleting a derived cache preserves answers but invalidates an external consumer cursor. The docs state this clearly, but the application must supply the recovery pattern.",
+      "evidence": {
+        "command": "consumer.poll(reconstructed)",
+        "exception": "CursorExpired",
+        "exact_message": "Cursor belongs to a different database, view module, or cache generation",
+        "event_file": ".build/ux-study/telemetry/runs/run-jc_r3mfr/events.jsonl"
+      },
+      "expected_behavior": "The documented generation reset is reasonable; a developer following the changes example would benefit from seeing the required resnapshot branch when persistence is involved.",
+      "actual_behavior": "Normal cached reopen accepted the saved cursor; cache reconstruction raised CursorExpired as documented.",
+      "recovery_or_workaround": "Catch CursorExpired, replace the entire consumer summary from a fresh paginated snapshot, save its cursor, then resume polling. This succeeded.",
+      "suggested_small_fix": "Add a short persistent changes-consumer example that catches CursorExpired and obtains a fresh snapshot. Add “obtain a new snapshot” to the exception text.",
+      "contract_violation": false
+    },
+    {
+      "rank": 2,
+      "id": "explicit-batch-record-discovery",
+      "severity": "low",
+      "category": "public API discoverability",
+      "finding": "The obvious batch append add_many accepts payloads only. Retry-safe source batch import uses Document plus ingest/ingest_many, and the worked constructor example is in the portable browser replay section.",
+      "evidence": {
+        "public_signatures": [
+          "db.add_many(payloads, *, source=\"default\")",
+          "db.ingest(documents)",
+          "db.ingest_many(documents, *, batch_size=100)"
+        ],
+        "where_found": [
+          "docs/api.html:35-44",
+          "docs/portable.html:220-228"
+        ],
+        "successful_snippet": "for result in db.ingest_many((Document(**r) for r in source_records), batch_size=100): ..."
+      },
+      "expected_behavior": "A Python-only user should be able to copy one retry-safe source-batch import example from the Python API or README.",
+      "actual_behavior": "The API names and prose provided enough clues; I followed the link to the portable guide and found the concrete Document construction example there. No source inspection or failed library call was needed.",
+      "recovery_or_workaround": "Construct Document records with retained id, payload, position and source, then iterate ingest_many.",
+      "suggested_small_fix": "Put a short Document constructor reference and a JSONL/source-batch replay example beside ingest_many in docs/api.html.",
+      "contract_violation": false
+    },
+    {
+      "rank": 3,
+      "id": "cache-status-after-reconstruction",
+      "severity": "low",
+      "category": "inspection terminology",
+      "finding": "After successful cache-loss reconstruction, stats.cache.status remained \"missing\" with bytes 0 and log_offset 0 while the view was fully usable.",
+      "evidence": {
+        "cache": {
+          "bytes": 0,
+          "log_offset": 0,
+          "status": "missing"
+        },
+        "replay": {
+          "batches": 29,
+          "documents": 2513
+        },
+        "documents": 2513
+      },
+      "expected_behavior": "An operator may read cache.status as current engine health and wonder whether recovery finished.",
+      "actual_behavior": "The docs explain that cache status describes checkpoint handling, and clean close later writes a cache. Replay stats disambiguate the successful reconstruction.",
+      "recovery_or_workaround": "Read replay.documents and validate rows; allow clean close to checkpoint.",
+      "suggested_small_fix": "Document the status values and give an example of the healthy combination status=\"missing\" with replay.documents>0, or call this field startup_status in a future API revision.",
+      "contract_violation": false
+    }
+  ],
+  "failures_and_recovery": {
+    "unexpected_library_failures": [],
+    "own_application_failures": [
+      {
+        "exception": "TypeError",
+        "exact_message": "run.<locals>.event() got multiple values for argument 'name'",
+        "stage": "first fixture-size assertion logging, before opening Database",
+        "fix": "Rename event(name, **details) positional argument to event_name because the log payload also uses name.",
+        "artifact": ".build/ux-study/telemetry/runs/run-dgsw8ui6/result.json"
+      }
+    ],
+    "expected_library_exceptions": [
+      {
+        "exception": "CursorExpired",
+        "exact_message": "Cursor belongs to a different database, view module, or cache generation",
+        "trigger": "Use a checkpointed cursor after deliberate cache deletion/reconstruction.",
+        "recovery": "Fresh snapshot followed by polling with its new cursor."
+      }
+    ],
+    "source_based_workarounds": [],
+    "blockers": []
+  },
+  "end_result": {
+    "status": "passed",
+    "run_path": "/nvme/dev/255bits/foldlitedb/.build/ux-study/telemetry/runs/run-jc_r3mfr",
+    "historical_readings": 2500,
+    "live_readings": 13,
+    "assertions_passed": 30,
+    "assertions": [
+      "fixture has 2500 historical readings",
+      "fixture has 13 live readings",
+      "history imported in 25 bounded batches",
+      "all 2500 historical readings inserted",
+      "historical summaries match Python oracle",
+      "historical retry replays 100 and inserts zero",
+      "retry leaves document count and sequence unchanged",
+      "retry leaves summaries unchanged",
+      "paginated snapshot covers all five metrics",
+      "live consumer matches oracle through source position 2503",
+      "live consumer matches oracle through source position 2507",
+      "live consumer matches oracle through source position 2511",
+      "clean close writes derived cache",
+      "cached reopen retains summaries",
+      "cached reopen preserves generation",
+      "cached reopen requires no document replay",
+      "saved cursor resumes after cached reopen without duplicate changes",
+      "consumer receives live reading after reopen",
+      "all retained records preserve source order and identities",
+      "all 2513 readings counted exactly once",
+      "cache deletion leaves log bytes unchanged",
+      "cache reconstruction retains summaries",
+      "cache reconstruction retains every resolved document",
+      "cache reconstruction retains source checkpoint",
+      "cache reconstruction replays all 2513 readings",
+      "cache reconstruction creates a fresh generation",
+      "consumer resnapshot after cache loss restores correct summaries",
+      "new cursor has no duplicate live changes",
+      "reconstruction leaves immutable log bytes unchanged",
+      "final clean close leaves immutable log bytes unchanged"
+    ],
+    "summaries": {
+      "cpu.percent": {
+        "count": 503,
+        "max": 80,
+        "mean": 49.314115308151095,
+        "min": 20,
+        "sum": 24805
+      },
+      "memory.mib": {
+        "count": 503,
+        "max": 2040,
+        "mean": 1523.48310139165,
+        "min": 1024,
+        "sum": 766312
+      },
+      "request.latency_ms": {
+        "count": 503,
+        "max": 24.75,
+        "mean": 14.54920477137177,
+        "min": 5,
+        "sum": 7318.25
+      },
+      "temperature.c": {
+        "count": 502,
+        "max": 30.25,
+        "mean": 24.10109561752988,
+        "min": 18,
+        "sum": 12098.75
+      },
+      "voltage.v": {
+        "count": 502,
+        "max": 3.875,
+        "mean": 3.4360059760956174,
+        "min": 3,
+        "sum": 1724.875
+      }
+    },
+    "log_sha256": "c4153849821953b7d582af7aa9d4f6654855bbea7bfec3cb3102b929d096f777",
+    "module_sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0",
+    "reconstruction_stats": {
+      "cache": {
+        "bytes": 0,
+        "log_offset": 0,
+        "status": "missing"
+      },
+      "checkpoints": {
+        "telemetry/gateway-07": 2512
+      },
+      "cursor": "efe97d01-a59b-4ae4-860f-7cac7b9abe3a:6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0:2651",
+      "descriptor": {
+        "abi": 1,
+        "mergeable": true,
+        "name": "metrics",
+        "state_version": "1",
+        "version": "1"
+      },
+      "documents": 2513,
+      "generation": "efe97d01-a59b-4ae4-860f-7cac7b9abe3a",
+      "groups": 5,
+      "log": {
+        "batches": 29,
+        "bytes": 466543,
+        "recovered_tail_bytes": 0
+      },
+      "module_sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0",
+      "replay": {
+        "batches": 29,
+        "documents": 2513
+      },
+      "replay_batches": 29,
+      "replay_documents": 2513,
+      "sequence": 2651,
+      "storage": "append-only-log"
+    }
+  },
+  "limits_of_observation": [
+    "Only the native Python bundled metrics path was exercised.",
+    "There was no concurrent writer or external process, abrupt process crash, log corruption, numeric overflow, or malformed-reading case.",
+    "The approximately one-second successful command is only a local fixture observation, not a benchmark.",
+    "The retry reused exact retained Document content; conflicting ID/payload reuse was outside this application goal."
+  ]
+}

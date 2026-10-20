@@ -1,0 +1,161 @@
+{
+  "schema": "foldlitedb-native-cache-benchmark/v1",
+  "runtime": {
+    "python": "3.14.8",
+    "platform": "Linux-7.2.10-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "storage_path": "/nvme/dev/255bits/foldlitedb/.build/benchmarks/foldlitedb-benchmark-d1pj8dqq",
+    "mount": {
+      "filesystems": [
+        {
+          "target": "/nvme",
+          "source": "/dev/mapper/nvme4tb",
+          "fstype": "ext4",
+          "options": "rw,noatime,seclabel"
+        }
+      ]
+    }
+  },
+  "settings": {
+    "documents": 10000,
+    "keys": 16,
+    "batch_size": 100,
+    "uncached_suffix_documents": 20
+  },
+  "view_sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0",
+  "source_sha256": {
+    "native/engine/src/lib.rs": "5cdebb3e8f9370db00f6cb202134067bb8b8a90363bb2b72b5e303ae4109474c",
+    "native/engine/src/storage.rs": "d7baae3d5f296625c124c7485d8b464f291223fd5cea18ea947d35d4e2200246",
+    "native/engine/src/runtime.rs": "3012bb91fc24749dc02f85286accc17d4eefb0903bb8afd45b198a01e9731f9a",
+    "native/Cargo.lock": "bca3b88a023e198d9c1316b42cf1ff5016db5dafe48e984b4106fab4d9040270",
+    "src/foldlitedb/database.py": "d8c15b832af5623bd7c1f0b37f508d14d1e149def8dca0dbf45873c909431e3b",
+    "scripts/benchmark_database.py": "24e5337b827a263e62d4d0bff932fa6d43b826f5d4ca3c959e8a6ff420d97019"
+  },
+  "method": "Single run with filesystem cache retained. Warm open verifies all log bytes but executes only uncached Wasm batches. Timings include Python/native transport. No timing threshold or cross-engine claim.",
+  "results": {
+    "seconds": {
+      "durable_ingest": 2.4986957110231742,
+      "checkpoint": 0.013279271021019667,
+      "cached_reopen": 0.028331665002042428,
+      "uncached_suffix_reopen": 0.036904543987475336,
+      "missing_cache_rebuild": 2.184346660011215,
+      "explicit_rebuild": 2.014013428008184
+    },
+    "documents_per_second": {
+      "durable_ingest": 4002.0879516798655,
+      "missing_cache_rebuild": 4587.18397745006
+    },
+    "cached_reopen_stats": {
+      "cache": {
+        "bytes": 1297501,
+        "log_offset": 887186,
+        "status": "loaded"
+      },
+      "checkpoints": {
+        "benchmark": 9999
+      },
+      "cursor": "8d90e325-d057-4ce8-b95c-76428c1a5993:6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0:11600",
+      "descriptor": {
+        "abi": 1,
+        "mergeable": true,
+        "name": "metrics",
+        "state_version": "1",
+        "version": "1"
+      },
+      "documents": 10000,
+      "generation": "8d90e325-d057-4ce8-b95c-76428c1a5993",
+      "groups": 16,
+      "log": {
+        "batches": 100,
+        "bytes": 887186,
+        "recovered_tail_bytes": 0
+      },
+      "module_sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0",
+      "replay": {
+        "batches": 0,
+        "documents": 0
+      },
+      "replay_batches": 0,
+      "replay_documents": 0,
+      "sequence": 11600,
+      "storage": "append-only-log"
+    },
+    "suffix_reopen_stats": {
+      "cache": {
+        "bytes": 1297501,
+        "log_offset": 887186,
+        "status": "loaded"
+      },
+      "checkpoints": {
+        "benchmark": 10019
+      },
+      "cursor": "8d90e325-d057-4ce8-b95c-76428c1a5993:6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0:11636",
+      "descriptor": {
+        "abi": 1,
+        "mergeable": true,
+        "name": "metrics",
+        "state_version": "1",
+        "version": "1"
+      },
+      "documents": 10020,
+      "generation": "8d90e325-d057-4ce8-b95c-76428c1a5993",
+      "groups": 16,
+      "log": {
+        "batches": 101,
+        "bytes": 889029,
+        "recovered_tail_bytes": 0
+      },
+      "module_sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0",
+      "replay": {
+        "batches": 1,
+        "documents": 20
+      },
+      "replay_batches": 1,
+      "replay_documents": 20,
+      "sequence": 11636,
+      "storage": "append-only-log"
+    },
+    "missing_cache_stats": {
+      "cache": {
+        "bytes": 0,
+        "log_offset": 0,
+        "status": "missing"
+      },
+      "checkpoints": {
+        "benchmark": 10019
+      },
+      "cursor": "0cb7cafe-1116-4c1c-bf6e-5135431b133b:6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0:11636",
+      "descriptor": {
+        "abi": 1,
+        "mergeable": true,
+        "name": "metrics",
+        "state_version": "1",
+        "version": "1"
+      },
+      "documents": 10020,
+      "generation": "0cb7cafe-1116-4c1c-bf6e-5135431b133b",
+      "groups": 16,
+      "log": {
+        "batches": 101,
+        "bytes": 889029,
+        "recovered_tail_bytes": 0
+      },
+      "module_sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0",
+      "replay": {
+        "batches": 101,
+        "documents": 10020
+      },
+      "replay_batches": 101,
+      "replay_documents": 10020,
+      "sequence": 11636,
+      "storage": "append-only-log"
+    },
+    "verified_rows": 16,
+    "immutable_log_sha256": "b8fb990948c27a7f2aa726a0ca558723faad15da1862e0a126b56e8e763445ef",
+    "storage_bytes": {
+      "metrics.fold.lock": 0,
+      "metrics.fold": 889029,
+      "metrics.fold.cache": 1302255
+    }
+  }
+}

@@ -1,6 +1,9 @@
 name: Foldlite DB
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,48 +13,55 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11", "3.12", "3.13", "3.14"]
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-latest","macos-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+        python: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["3.11","3.12","3.13","3.14","3.x"]' || '["3.x"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+          check-latest: true
+      - uses: dtolnay/rust-toolchain@1.90.0
       - run: python -m pip install build
       - run: python -m build
       - name: Install built wheel
-        run: python -c "import pathlib,subprocess,sys; wheel=next(pathlib.Path('dist').glob('*.whl')); subprocess.check_call([sys.executable,'-m','pip','install',str(wheel)+'[reducers,test]'])"
+        run: python -c "import pathlib,subprocess,sys; wheel=next(pathlib.Path('dist').glob('*.whl')); subprocess.check_call([sys.executable,'-m','pip','install',str(wheel)+'[test]'])"
       - name: Verify installed package
         working-directory: ${{ runner.temp }}
         run: python -I -m pytest "${{ github.workspace }}/tests" --import-mode=importlib
       - name: Verify source distribution rebuild
         run: python -c "import pathlib,subprocess,sys; source=next(pathlib.Path('dist').glob('*.tar.gz')); subprocess.check_call([sys.executable,'-m','pip','wheel','--no-deps','--wheel-dir','rebuilt',str(source)])"
 
-  rust:
+  native:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Verify native Rust core
-        working-directory: reducers/core
-        run: cargo test --locked
-      - name: Verify reproducible WASM build
-        run: python scripts/build_reducer.py --check
-      - name: Verify native and WASM behavior
+      - run: npm ci --prefix views
+      - name: Verify compiled portable views and SDK behavior
         run: |
-          python -m pip install '.[reducers]'
-          python scripts/check_reducer_parity.py
-
-  browser:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python -m pip install '.[reducers,test,browser]'
+          npm run check --prefix views
+          npm test --prefix views
+      - name: Verify native storage and Wasm execution
+        run: |
+          cargo test --locked --manifest-path native/Cargo.toml -p foldlitedb-portable-engine
+          python scripts/build_native_notices.py --check
+      - run: python -m pip install '.[dev,browser]'
       - run: python -m playwright install --with-deps chromium
-      - run: python -m pytest tests/browser
+      - name: Verify Python API, browser worker, and native/browser parity
+        run: |
+          python -m pytest tests
+          python -m pytest tests/browser
+      - name: Verify replay benchmark
+        run: python scripts/benchmark_database.py --documents 256 --batch-size 64 --live-documents 8 --output native-benchmark-smoke.json
+      - name: Verify documentation examples and browser playground
+        run: |
+          python scripts/build_docs.py
+          python scripts/check_docs.py --execute --browser

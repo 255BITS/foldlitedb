@@ -1,0 +1,18 @@
+[package]
+name = "foldlitedb-portable-python"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Python bindings for the native Foldlite DB portable view engine"
+license = "MIT"
+repository = "https://github.com/255BITS/foldlitedb"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+foldlitedb-portable-engine = { path = "../engine" }
+pyo3 = { version = "=0.27.2", features = ["extension-module", "abi3-py311"] }
+serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }

@@ -1,0 +1,7 @@
+[
+  {"file": "index.html", "title": "Get started", "description": "Immutable document logs and rebuildable live views, with a Rust engine and portable AssemblyScript map/reduce."},
+  {"file": "playground.html", "title": "Browser playground", "description": "Run AssemblyScript map/reduce views locally in a browser worker, import documents, and verify replay."},
+  {"file": "portable.html", "title": "Portable views", "description": "Write a map and reducer in AssemblyScript, then run the same WebAssembly module in native Python or a browser."},
+  {"file": "api.html", "title": "Python API", "description": "The Rust-native Database and View API: immutable appends, snapshots, changes, checkpoint, and rebuild."},
+  {"file": "concepts.html", "title": "Documents and caches", "description": "Immutable source identity, deterministic folds, append-only durability, cache verification, and reconstruction."}
+]

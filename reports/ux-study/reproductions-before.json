@@ -1,0 +1,15 @@
+[
+  {
+    "issue": "Named batch without upstream positions",
+    "attempt": "Document('delivery-1', payload)",
+    "error": "TypeError",
+    "message": "Document.__init__() missing 1 required positional argument: 'position'",
+    "basis": "Catalogue agent had to choose one named add per event to get automatic positions."
+  },
+  {
+    "issue": "Cursor recovery guidance",
+    "error": "CursorExpired",
+    "message": "Cursor belongs to a different database, view module, or cache generation",
+    "basis": "Application must know to replace its projection from a new snapshot after reconstruction."
+  }
+]

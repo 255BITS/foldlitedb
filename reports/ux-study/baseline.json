@@ -1,0 +1,20 @@
+{
+  "method": "Three independent agents act as application developers using existing docs and public APIs before any UX edits. They execute distinct applications and record chronological evidence. Findings are simulated developer observations, not a study of human users. Root reproduces actionable issues before changing behavior.",
+  "goals": {
+    "telemetry": "Python backfill, idempotent delivery, live changes, reopen and cache loss",
+    "catalogue": "Immutable product lifecycle, domain vs event identity, lookup and cursor recovery",
+    "browser": "Custom AssemblyScript expense view, static browser dashboard and Python parity"
+  },
+  "baseline_sha256": {
+    "README.md": "ee0fba819a181bb7561f5496574cee6d2297e9c6be306b53000d160194071ebd",
+    "docs/index.html": "8c0e82d495e29fb78c9ad5732347ceb510800c1cb31a90c9f91eb392a6aa83bb",
+    "docs/api.html": "a60b43e33eb7bd66c7fbcb54a4891172af4529b64290cbd04cd012d0c21ddc27",
+    "docs/portable.html": "ae448aef70670f5235b6be0729180510debbd9ed3d79e815df95693d052f5f06",
+    "src/foldlitedb/database.py": "d8c15b832af5623bd7c1f0b37f508d14d1e149def8dca0dbf45873c909431e3b",
+    "src/foldlitedb/types.py": "452cabc312302c771d100e80ee9b30cb102b07dd1947f3275e245318f6b60a11",
+    "src/foldlitedb/portable_assets/client.js": "51e0dfc9f104f7671e0883e4922a0bc48093dfe146d8c53484b06487db512ee9",
+    "src/foldlitedb/portable_assets/worker.js": "c3c00b2854958e6d2fc5ecf7c314a172ceebb8444fa6f08fc07c0c9f640dcaa4",
+    "views/README.md": "9a834741ee3eadc5765523118eb3bf6db5a8bc9451d43f7e060d1cca573756ea",
+    "views/scripts/build.mjs": "7bcd2d7ee6c3f5208f24bded762238f5497a8abd1018d44e234e23a4b1d1a3ab"
+  }
+}

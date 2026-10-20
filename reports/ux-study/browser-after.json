@@ -1,0 +1,202 @@
+{
+  "study": "browser-author-after",
+  "completed_at": "2026-10-19T23:55:06.044408+00:00",
+  "status": "completed",
+  "baseline_report": "reports/ux-study/browser.json",
+  "baseline_report_sha256": "594c1daf1f4ae07e80abd7436ba79a732e4c8262a99e33f729391cf7583544a1",
+  "baseline_preserved": true,
+  "result": "Supported custom build command successfully regenerated the same expense module bytes. Updated browser runtime and native extension passed mapping previews, typed conflicts, immutable appends, export/replay, and exact cross-host result parity.",
+  "changes_owned": [
+    "views/scripts/build-view.mjs: one supported custom source/out-dir command, root-relative paths, source-stem filenames, protected output destinations, stage then publish outputs, concise actionable errors.",
+    "views/scripts/view-build.mjs: shared pinned compiler flags, clean child compiler environment, temporary compilation, isolated descriptor validation.",
+    "views/scripts/inspect-view.mjs: module size/imports, ABI exports/buffers/capacity, descriptor and SHA-256 validation; parent enforces a five-second inspection deadline.",
+    "views/scripts/build.mjs: reuse compile/manifest helper for bundled views; original artifacts and notices still pass byte-for-byte check.",
+    "views/package.json: build:view script; no dependency/lockfile changes.",
+    "views/test/custom-build.test.mjs: actual compilation including dotted filename, manifest/digest and map/reduce execution, ambient JSON_* reproducibility, negative compilation/ABI/imports/descriptor, output preservation, CLI/path/compiler diagnostics.",
+    "views/README.md and docs/portable.html: single custom build command, path roots, filename/descriptor distinction, concise browser result schemas, preview diagnostic, typed errors, worker-local sequences, whole resource-directory copying."
+  ],
+  "cli": {
+    "syntax": "npm run build:view --prefix views -- <source-relative-to-views.ts> --out-dir <directory-relative-to-views>",
+    "path_root": "views/ for both relative source and output, independent of caller cwd; absolute paths accepted",
+    "filenames": "<source-stem>.wasm and <source-stem>.json; descriptor name does not rename artifacts",
+    "executed": "npm run build:view --prefix views -- .build/ux-study-browser/expenses.ts --out-dir ../.build/ux-study/browser/after/portable",
+    "outcome": "Exit 0; expenses.wasm 63760 bytes plus matching expenses.json; same SHA-256 as baseline."
+  },
+  "checks": {
+    "npm_test": {
+      "command": "npm test --prefix views",
+      "passed": 13,
+      "failed": 0
+    },
+    "npm_check": {
+      "command": "npm run check --prefix views",
+      "result": "Verified metrics: 65139 bytes; Verified catalogue: 64790 bytes; third-party notices match."
+    },
+    "dotted_source_followup": {
+      "command": "node --test views/test/custom-build.test.mjs",
+      "source_filename": "invoice.totals.ts",
+      "descriptor_name": "invoice-summary",
+      "passed": 2,
+      "failed": 0
+    },
+    "browser": {
+      "command": "python .build/ux-study/browser/after/verify_browser.py",
+      "browser": "153.0.8010.12",
+      "checks": [
+        "valid/incompatible preview without progress changes",
+        "typed worker DocumentConflict and DatabaseError instanceof/code/name",
+        "UI append",
+        "JSONL file import",
+        "live group changes",
+        "exact fixture totals",
+        "replay equivalent",
+        "replay preserves old cursor",
+        "download exported records",
+        "reload clears state",
+        "restore preserves results, identities, payloads, and source positions",
+        "idempotent restore",
+        "invalid app input preserves state",
+        "conflicting resolved document rejected atomically",
+        "1025-document batch rejected atomically",
+        "390px viewport has no horizontal overflow"
+      ],
+      "page_errors": [],
+      "console": [],
+      "bad_http_responses": []
+    },
+    "native": {
+      "command": "python .build/ux-study/browser/after/verify_native.py",
+      "checks": [
+        "preview emission parity and no progress changes",
+        "identical Wasm SHA-256 in Chromium and Python View",
+        "native ingestion of downloaded resolved browser records",
+        "exact key/state/result parity",
+        "native idempotent re-ingestion",
+        "checkpoint and rebuild preserve computation and log bytes",
+        "native persistent reopen parity",
+        "plain-payload map/reduce parity across different batch boundaries"
+      ]
+    },
+    "module_sha256": "c930f8c37a49fa8d29cf2b4cf5ac52455bf61186c3b23aaf4219bd3df63a491f",
+    "same_as_baseline_module": true,
+    "same_browser_native_module": true,
+    "exact_key_state_result_parity": true,
+    "browser_preview": {
+      "valid": [
+        {
+          "key": "Food",
+          "value": 12.5
+        }
+      ],
+      "incompatible": [],
+      "progress_unchanged": true
+    },
+    "native_preview": {
+      "valid": [
+        {
+          "key": "Food",
+          "value": 12.5
+        }
+      ],
+      "incompatible": [],
+      "progress_unchanged": true
+    },
+    "typed_conflict": {
+      "name": "DocumentConflict",
+      "code": "DocumentConflict",
+      "message": "DocumentConflict: document identity already has different contents or position",
+      "typedConflict": true,
+      "typedDatabaseError": true
+    },
+    "oversized_batch_error": {
+      "name": "DatabaseError",
+      "message": "A batch must be an array of at most 1024 documents"
+    },
+    "replay_schema_and_result": {
+      "equivalent": true,
+      "documents": 7,
+      "groups": 4,
+      "module_sha256": "c930f8c37a49fa8d29cf2b4cf5ac52455bf61186c3b23aaf4219bd3df63a491f"
+    },
+    "results": {
+      "Café": {
+        "count": 1,
+        "total": 0
+      },
+      "Food": {
+        "count": 3,
+        "total": 47
+      },
+      "Home": {
+        "count": 1,
+        "total": 100
+      },
+      "Transport": {
+        "count": 2,
+        "total": 40
+      }
+    }
+  },
+  "baseline_findings_followup": [
+    {
+      "baseline_id": "B1",
+      "status": "addressed",
+      "evidence": "Portable guide documents batch/resolved-record/stats/replay return shapes, including equivalent; browser check uses equivalent successfully."
+    },
+    {
+      "baseline_id": "B2",
+      "status": "addressed by root runtime change and validated here",
+      "evidence": {
+        "name": "DocumentConflict",
+        "code": "DocumentConflict",
+        "message": "DocumentConflict: document identity already has different contents or position",
+        "typedConflict": true,
+        "typedDatabaseError": true
+      }
+    },
+    {
+      "baseline_id": "B3",
+      "status": "addressed",
+      "evidence": "One supported npm command compiles and writes the validated manifest; compiler flags shared with bundled build, same module SHA as baseline."
+    },
+    {
+      "baseline_id": "B4",
+      "status": "clarified",
+      "evidence": "Guide now states beside browser export/ingest that sequence is worker-local and regenerated; retained fields/results remain comparable."
+    }
+  ],
+  "development_corrections": [
+    {
+      "observed": "Negative ABI fixture without SDK import failed compilation first: ERROR AS111: Element assembly/sdk/index/abort not found.",
+      "resolution": "Correct the intentionally invalid-ABI fixture to include SDK input_ptr export so compilation succeeds and ABI validation itself is exercised."
+    },
+    {
+      "observed": "Output-dir-as-file initially emitted ENOTDIR at target lstat.",
+      "resolution": "Add up-front directory validation with Cannot use output directory ... path is not a directory; negative CLI tests pass without Node stacks."
+    },
+    {
+      "observed": "Root review identified that loader name validation rejected dotted stems allowed by builder.",
+      "resolution": "Root owns matching browser loader fix/coverage; CLI real compiler fixture now uses invoice.totals.ts."
+    }
+  ],
+  "remaining_limitations": [
+    "The study remains a small seven-document reproducibility fixture, not a performance or production-currency arithmetic claim.",
+    "The dashboard imports one bounded batch; no general import chunking/scaffolding CLI was added.",
+    "Publishing the two output files uses successive file renames after validation; the pair is not a filesystem transaction against concurrent readers."
+  ],
+  "evidence": {
+    "app": ".build/ux-study/browser/after/index.html",
+    "browser": ".build/ux-study/browser/after/browser-evidence.json",
+    "native": ".build/ux-study/browser/after/native-evidence.json",
+    "manifest": ".build/ux-study/browser/after/portable/expenses.json",
+    "wasm": ".build/ux-study/browser/after/portable/expenses.wasm",
+    "export": ".build/ux-study/browser/after/expenses-export.json",
+    "desktop_screenshot": ".build/ux-study/browser/after/dashboard-desktop.png",
+    "mobile_screenshot": ".build/ux-study/browser/after/dashboard-mobile.png"
+  },
+  "cleanup": {
+    "owned_browsers_closed": true,
+    "http_server_8768_stopped": true
+  },
+  "publishing": "No commits or external publication."
+}

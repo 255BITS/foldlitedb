@@ -1,0 +1,402 @@
+{
+  "study": "catalogue",
+  "perspective": "Independent offline Python application developer; public docs and API first",
+  "started_at": "2026-10-19T23:44:02.252049+00:00",
+  "status": "complete",
+  "constraints": [
+    "No library, docs, or tests edited",
+    "No other study reports read",
+    "No installs or publication",
+    "No source fallback yet"
+  ],
+  "first_expectations": [
+    "The bundled catalogue view should let me model product title revisions and withdrawal as new facts without writing AssemblyScript.",
+    "A product ID belongs in payload.id; ingestion ID should name each observation, so a title revision needs a new ingestion ID even when the product ID stays the same.",
+    "I should be able to retry an old delivery after subsequent lifecycle events without changing the current catalogue.",
+    "Category filtering should return an empty collection for a category never seen. A category whose last product was withdrawn may remain as a zero-count group; the docs do not explicitly demonstrate that case.",
+    "A saved cursor should work after an ordinary checkpointed reopen and raise CursorExpired after rebuild, with a fresh query as recovery."
+  ],
+  "chronology": [
+    {
+      "at": "2026-10-19T23:44:02.252055+00:00",
+      "step": "discovery",
+      "actions": [
+        "Read README.md",
+        "Read docs/api.html, docs/concepts.html, docs/portable.html#bundled",
+        "Read examples/catalogue.py",
+        "Inspected foldlitedb public exports and runtime signatures"
+      ],
+      "observations": [
+        "Import succeeds against the editable checkout; no install needed.",
+        "README explicitly says unnamed retries create observations. concepts identity section makes named retry and lifecycle semantics clear.",
+        "Portable guide specifies payload {category,id,title,deleted?}; deletion event can omit title.",
+        "add_many accepts payloads and a common source but no per-event IDs. I will use individual named add calls, because the small offline feed needs retries and automatic source positions.",
+        "documents() appears sufficient to debug raw retained observations; it has no category/product selector, so the application will filter exported payloads."
+      ],
+      "friction": [
+        "Catalogue payload schema is one paragraph linked from API; README gives only metrics payloads, so I followed the API accepted-payload link and also inspected the runnable catalogue example.",
+        "I cannot combine add_many convenience, automatic positions, and caller-supplied event IDs with the advertised signature. ingest(Document(...)) supplies identities but requires source positions too."
+      ],
+      "failed_calls": [],
+      "blocked": false,
+      "source_fallback": false
+    },
+    {
+      "at": "2026-10-19T23:45:04.177819+00:00",
+      "step": "application_first_run",
+      "command": "python .build/ux-study/catalogue/app.py",
+      "exit_code": 0,
+      "observations": [
+        "The application ran successfully on the first execution; there was no implementation source lookup.",
+        "Five initial products in three categories became three products after two title revisions and two withdrawals. All nine lifecycle facts remain available.",
+        "Used db.add(payload, id=event_id, source=...) for each delivery. Product IDs remain inside payload.id; automatic source positions resolved to 0 through 8.",
+        "A limit=1 change feed returned four ordered category postimages; applying them reproduced the full current catalogue.",
+        "Retried an old creation after revision, an old creation after withdrawal, and an old withdrawal. All returned their original Document receipts. Document count stayed 9 and engine sequence stayed 18.",
+        "An absent category returned zero rows with complete=true. A category whose only product was withdrawn returned a row with count=0 and items={}; application catalogue rendering filters it.",
+        "documents(limit=2) yielded all original observations in order. Filtering exported payloads for books/kiln exposed both its original title and its withdrawal.",
+        "Checkpointed reopen loaded the cache, replayed zero documents, preserved the cursor, and matched all rows, retained facts, and log SHA-256.",
+        "Explicit rebuild replayed all nine batches and nine documents, preserved rows including sequences and unchanged log bytes, and expired the prior cursor.",
+        "Deleting only the .cache file then reopening reconstructed the same rows and retained facts. Cache status was missing; replay reported nine batches and nine documents. The prior cache generation cursor expired.",
+        "A fresh snapshot after rebuild restored change polling with an empty change page."
+      ],
+      "failed_calls": [
+        {
+          "call": "db.add({'category': 'books', 'id': 'atlas', 'title': 'Wrong retry'}, id='delivery-105', source='offline-catalogue-import')",
+          "expected": true,
+          "message": "Document replay conflicts with an immutable id or source position",
+          "phase": "conflicting delivery",
+          "recovery": "Reject the mismatching delivery; a genuine new revision needs a new event ID.",
+          "type": "DocumentConflict"
+        },
+        {
+          "call": "db.changes(since='cf0e3380-a1b6-422b-8850-67592db3db8a:776d7261fcd9af1aec41981fe2dd32c8ae87937609af399ce7bc628f03bcfff6:18')",
+          "expected": true,
+          "message": "Cursor belongs to a different database, view module, or cache generation",
+          "phase": "explicit rebuild",
+          "recovery": "Read a fresh snapshot and replace the saved cursor.",
+          "type": "CursorExpired"
+        },
+        {
+          "call": "db.changes(since='63e9a085-f8b6-4fff-a323-3927cc770773:776d7261fcd9af1aec41981fe2dd32c8ae87937609af399ce7bc628f03bcfff6:18')",
+          "expected": true,
+          "message": "Cursor belongs to a different database, view module, or cache generation",
+          "phase": "missing cache reopen",
+          "recovery": "Read a fresh snapshot and replace the saved cursor.",
+          "type": "CursorExpired"
+        }
+      ],
+      "unexpected_failures": [],
+      "blocked": false,
+      "source_fallback": false,
+      "artifacts": [
+        ".build/ux-study/catalogue/app.py",
+        ".build/ux-study/catalogue/events.json",
+        ".build/ux-study/catalogue/result.json",
+        ".build/ux-study/catalogue/retained.json",
+        "/nvme/dev/255bits/foldlitedb/.build/ux-study/catalogue/run-c2fteteh"
+      ]
+    },
+    {
+      "at": "2026-10-19T23:45:39.153758+00:00",
+      "step": "focused_import_observability_probe",
+      "motivation": "The bundled view docs explicitly say malformed payloads emit nothing. After the successful valid fixture, verify what an importer sees if its supplier adapter passes name instead of the required title.",
+      "command": "python .build/ux-study/catalogue/import_probe.py",
+      "exit_code": 0,
+      "call": "db.add({'category':'stationery','id':'journal','name':'Field Journal'}, id='supplier-typo', source='supplier')",
+      "observations": [
+        "add returned a normal Document and no exception. stats reported one retained document, zero groups, and sequence 1.",
+        "Reading stationery returned no rows, just as a never-observed category would. documents() retained the malformed supplier payload, making manual diagnosis possible.",
+        "Recovery succeeded: map the supplier name into title and append a new event ID. The corrected product appeared and both observations remained retained.",
+        "This was a deliberate check of the documented contract, not an accidental schema failure in the main application."
+      ],
+      "failed_calls": [],
+      "blocked": false,
+      "source_fallback": false,
+      "artifacts": [
+        ".build/ux-study/catalogue/import_probe.py",
+        ".build/ux-study/catalogue/import-probe-result.json"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "rank": 1,
+      "severity": "medium",
+      "kind": "observability",
+      "title": "A malformed catalogue import receives an ordinary success receipt without explaining why it produced no item",
+      "evidence": [
+        ".build/ux-study/catalogue/import_probe.py:19",
+        ".build/ux-study/catalogue/import-probe-result.json: returned supplier-typo, exception=null, documents=1, groups=0, stationery_rows=[]",
+        "docs/portable.html:33 explicitly documents that malformed documents emit nothing"
+      ],
+      "impact": "A supplier field mismatch can make an intended product absent while the importer sees a successful add. The raw fact is retained, but the developer must know to inspect it and compare the payload with the view schema.",
+      "recovery_observed": "Retained payload exposed name instead of title. Appending supplier-corrected with title restored the item and kept both facts.",
+      "proposal": "Expose emitted-contribution counts or a zero-emission diagnostic in an optional ingestion diagnostic path. For the bundled catalogue, add a small payload validation helper or importer example that maps required fields and demonstrates checking zero-emission records.",
+      "qualification": "Behavior matches the explicit contract; this is a UX gap, not a demonstrated correctness bug."
+    },
+    {
+      "rank": 2,
+      "severity": "medium",
+      "kind": "api_ergonomics",
+      "title": "The convenient batch append cannot supply retry identities while allowing automatic positions",
+      "evidence": [
+        "docs/api.html:38 documents add_many(payloads, *, source=\"default\") with no per-record IDs",
+        "docs/api.html:43 describes ingest requiring explicit Document identities and positions",
+        ".build/ux-study/catalogue/app.py:28 uses named individual adds",
+        ".build/ux-study/catalogue/result.json: log.batches=9 for documents=9"
+      ],
+      "impact": "An offline import with caller event IDs must either coordinate positions and construct Documents or issue one append per event. I chose the latter to avoid inventing source offsets; it gives up convenient atomic batching. No throughput measurement was made.",
+      "recovery_observed": "Individual add(payload, id=event_id, source=...) calls safely allocated positions and handled duplicate delivery.",
+      "proposal": "Add a documented path for atomic named appends with automatic positions, such as optional per-payload IDs on add_many. Until then, include a focused new-event import recipe explaining when to choose named add versus explicit Document ingestion.",
+      "qualification": "The existing Document API supports explicit atomic batches; the gap concerns automatically positioned named observations."
+    },
+    {
+      "rank": 3,
+      "severity": "low",
+      "kind": "onboarding_documentation",
+      "title": "The two meanings of id need one joined lifecycle example",
+      "evidence": [
+        "docs/portable.html:33 uses payload id for catalogue item identity",
+        "docs/concepts.html:6 explains caller-supplied observation IDs",
+        "examples/catalogue.py appends unnamed payloads, so it does not demonstrate both ID layers",
+        ".build/ux-study/catalogue/events.json pairs event_id delivery-100/delivery-105 with product id atlas"
+      ],
+      "impact": "I had to combine the view schema, general identity documentation, and catalogue example to be confident that a revised title requires a new outer ID. The documents did teach the correct model; no accidental misuse occurred.",
+      "recovery_observed": "A fixture envelope with separate event_id and payload.id made the distinction explicit. Old create retries did not undo later lifecycle events.",
+      "proposal": "Extend the short catalogue example with two titles for the same payload.id and different add(..., id=...) delivery IDs, then retry the old event and show that the current title is unchanged."
+    },
+    {
+      "rank": 4,
+      "severity": "low",
+      "kind": "view_documentation",
+      "title": "Final withdrawal leaves an empty category row, a boundary not illustrated in the bundled view guide",
+      "evidence": [
+        ".build/ux-study/catalogue/app.py:103 queries clearance after its only product is withdrawn",
+        ".build/ux-study/catalogue/result.json: fully_withdrawn_category={count:0,items:{}}",
+        ".build/ux-study/catalogue/result.json: absent_category.rows=0 and complete=true"
+      ],
+      "impact": "A current catalogue that blindly renders every row includes empty categories. This is easy to handle once known; the absent-category API itself worked cleanly.",
+      "recovery_observed": "The application filters zero-count rows for current catalogue display and returns {} for both missing and empty category product collections.",
+      "proposal": "Add a two-line example of withdrawing the last item, showing its zero-count row and a rendering filter for apps that hide empty categories."
+    }
+  ],
+  "artifacts": {
+    "application": ".build/ux-study/catalogue/app.py",
+    "fixture": ".build/ux-study/catalogue/events.json",
+    "report": "reports/ux-study/catalogue.json",
+    "runtime_directory": "/nvme/dev/255bits/foldlitedb/.build/ux-study/catalogue/run-c2fteteh",
+    "result": ".build/ux-study/catalogue/result.json",
+    "retained_facts": ".build/ux-study/catalogue/retained.json",
+    "import_probe": ".build/ux-study/catalogue/import_probe.py",
+    "import_probe_result": ".build/ux-study/catalogue/import-probe-result.json",
+    "run_commands": [
+      "python .build/ux-study/catalogue/app.py",
+      "python .build/ux-study/catalogue/import_probe.py"
+    ]
+  },
+  "completed_at": "2026-10-19T23:47:05.000173+00:00",
+  "runtime": {
+    "python": "3.14.8",
+    "package_version": "0.1.0",
+    "package_location": "/nvme/dev/255bits/foldlitedb/src/foldlitedb/__init__.py",
+    "storage": "native append-only log",
+    "view": "View.bundled(\"catalogue\")",
+    "module_sha256": "776d7261fcd9af1aec41981fe2dd32c8ae87937609af399ce7bc628f03bcfff6"
+  },
+  "source_use": {
+    "public_api_exports_read": [
+      "src/foldlitedb/__init__.py"
+    ],
+    "implementation_source_fallbacks": [],
+    "blocked_before_fallback": false,
+    "note": "All behavior was implemented using README, local docs, examples/catalogue.py, and runtime signatures. No library implementation, tests, or other study reports were inspected."
+  },
+  "intuitive_experiences": [
+    {
+      "experience": "The immutable fact/current catalogue model fit title revision and withdrawal directly.",
+      "evidence": "Nine facts produced the asserted three-product catalogue; original titles and withdrawal facts remained inspectable."
+    },
+    {
+      "experience": "Payload product identity and ingestion identity were understandable after reading the schema and concept sections together.",
+      "evidence": "payload.id=atlas used delivery-100 and delivery-105; replaying delivery-100 after delivery-105 did not revert the title."
+    },
+    {
+      "experience": "Named retries were safe even after source progress advanced.",
+      "evidence": {
+        "catalogue_unchanged": true,
+        "documents_after": 9,
+        "documents_before": 9,
+        "retried_events": [
+          "delivery-100",
+          "delivery-101",
+          "delivery-107"
+        ],
+        "sequence_after": 18,
+        "sequence_before": 18
+      }
+    },
+    {
+      "experience": "Lifecycle change polling used the same Row result shape as a full snapshot.",
+      "evidence": "Four limit=1 change postimages reconstructed exactly EXPECTED in app.py."
+    },
+    {
+      "experience": "Retained-fact inspection explained the disappearance of a product.",
+      "evidence": [
+        {
+          "id": "delivery-101",
+          "payload": {
+            "category": "books",
+            "id": "kiln",
+            "title": "Practical Clay"
+          },
+          "position": 1,
+          "source": "offline-catalogue-import"
+        },
+        {
+          "id": "delivery-107",
+          "payload": {
+            "category": "books",
+            "deleted": true,
+            "id": "kiln"
+          },
+          "position": 7,
+          "source": "offline-catalogue-import"
+        }
+      ]
+    },
+    {
+      "experience": "The cache/log distinction was concrete and verifiable.",
+      "evidence": {
+        "cached_reopen_cache_status": "loaded",
+        "cached_reopen_replayed_documents": 0,
+        "missing_cache_status": "missing",
+        "missing_cache_replayed_documents": 9,
+        "unchanged_log_sha256": "e6e4fd8089fc23b6dca56262a10cfd16c44a7d94a31d6a4578d093d8f417558d"
+      }
+    },
+    {
+      "experience": "Cursor generation behavior matched the documented recovery model.",
+      "evidence": "A checkpointed reopen accepted the saved cursor. Both forms of reconstruction raised CursorExpired; query() supplied the recovery snapshot."
+    }
+  ],
+  "confusing_experiences": [
+    {
+      "experience": "I wanted named, retry-safe batch append with automatically allocated positions, but add_many only accepts unnamed payloads.",
+      "first_reaction": "Use the ergonomic batch API seen first in README.",
+      "document_search": "docs/api.html#append shows add_many(payloads, *, source) versus ingest(Document instances). Runtime inspect.signature confirmed it.",
+      "recovery": "Use individual add calls with event IDs; this produced nine committed batches for nine facts. The app did not need atomic ingestion of the fixture.",
+      "failed_call": null,
+      "qualification": "Discovered before attempting an unsupported call; no fabricated TypeError."
+    },
+    {
+      "experience": "The field id names both a product inside payload and a retained observation outside it.",
+      "first_reaction": "Confirm which ID survives a title change and which ID must change.",
+      "document_search": "docs/portable.html#bundled plus docs/concepts.html#identity and #ingestion-order clarified the two layers.",
+      "recovery": "Use fixture envelope event_id plus payload.id, and a deliver helper that keeps them visibly separate.",
+      "failed_call": null,
+      "qualification": "Documentation resolved this before application execution; the deliberate conflicting-retry probe verified the contract."
+    },
+    {
+      "experience": "A fully withdrawn category remains a zero-count group; absent categories have no group.",
+      "first_reaction": "The docs did not explicitly show whether the final withdrawal removes a category row.",
+      "document_search": "docs/portable.html#bundled describes item deletion and count/items, but does not demonstrate this boundary.",
+      "recovery": "Filter count=0 in current catalogue rendering and use an empty mapping as the application category API result.",
+      "failed_call": null
+    },
+    {
+      "experience": "Successful ingestion is not confirmation that a supplier payload reached the catalogue.",
+      "first_reaction": "The docs explicitly warn malformed records emit nothing; check whether the receipt or stats expose that cause.",
+      "document_search": "docs/portable.html#bundled and docs/api.html#maintenance.",
+      "recovery": "Inspect retained documents, fix the name-to-title adapter, and append a new event.",
+      "failed_call": null,
+      "qualification": "Deliberate documented-behavior probe; not an unexpected database correctness failure."
+    }
+  ],
+  "failed_calls": [
+    {
+      "call": "db.add({'category': 'books', 'id': 'atlas', 'title': 'Wrong retry'}, id='delivery-105', source='offline-catalogue-import')",
+      "expected": true,
+      "message": "Document replay conflicts with an immutable id or source position",
+      "phase": "conflicting delivery",
+      "recovery": "Reject the mismatching delivery; a genuine new revision needs a new event ID.",
+      "type": "DocumentConflict"
+    },
+    {
+      "call": "db.changes(since='cf0e3380-a1b6-422b-8850-67592db3db8a:776d7261fcd9af1aec41981fe2dd32c8ae87937609af399ce7bc628f03bcfff6:18')",
+      "expected": true,
+      "message": "Cursor belongs to a different database, view module, or cache generation",
+      "phase": "explicit rebuild",
+      "recovery": "Read a fresh snapshot and replace the saved cursor.",
+      "type": "CursorExpired"
+    },
+    {
+      "call": "db.changes(since='63e9a085-f8b6-4fff-a323-3927cc770773:776d7261fcd9af1aec41981fe2dd32c8ae87937609af399ce7bc628f03bcfff6:18')",
+      "expected": true,
+      "message": "Cursor belongs to a different database, view module, or cache generation",
+      "phase": "missing cache reopen",
+      "recovery": "Read a fresh snapshot and replace the saved cursor.",
+      "type": "CursorExpired"
+    }
+  ],
+  "unexpected_failures": [],
+  "blockers": [],
+  "outcome": {
+    "all_required_scenarios_asserted": true,
+    "main_application_first_run_exit_code": 0,
+    "import_probe_exit_code": 0,
+    "all_assertions_passed": true,
+    "expected_current_catalogue": {
+      "books": {
+        "atlas": "Pocket Field Guide, second edition"
+      },
+      "gear": {
+        "mug": "Enamel Trail Mug",
+        "tote": "Canvas Tote"
+      }
+    },
+    "actual_current_catalogue": {
+      "books": {
+        "atlas": "Pocket Field Guide, second edition"
+      },
+      "gear": {
+        "mug": "Enamel Trail Mug",
+        "tote": "Canvas Tote"
+      }
+    },
+    "retained_documents": 9,
+    "lifecycle_observations": {
+      "initial_products": 5,
+      "title_revisions": 2,
+      "withdrawals": 2
+    },
+    "checks": [
+      "Current catalogue and exact category query",
+      "Absent category",
+      "Fully withdrawn category",
+      "Ordered change feed applied to initial snapshot",
+      "Old creation retry after revision",
+      "Old creation retry after withdrawal",
+      "Withdrawal retry",
+      "Conflicting retry rejected without modifying facts",
+      "Retained fact inspection in ingestion order",
+      "Checkpointed reopen preserves outputs and cursor",
+      "Explicit rebuild preserves rows, states, results, sequences, facts, and log bytes",
+      "Explicit rebuild expires old change cursor",
+      "Fresh snapshot restores change polling",
+      "Missing cache reconstruction preserves outputs/facts/log and expires old cursor",
+      "Malformed supplier payload retained with zero groups, then corrected with a new event"
+    ],
+    "summary": "No blocker or demonstrated correctness bug. The small offline application worked from the public documentation on its first execution. The strongest UX opportunities concern named import batching and visibility of zero-emission records."
+  },
+  "scope_integrity": {
+    "library_docs_tests_changed": false,
+    "files_written_only_within": [
+      ".build/ux-study/catalogue/",
+      "reports/ux-study/catalogue.json"
+    ],
+    "other_study_agents_contacted": false,
+    "other_study_reports_read": false,
+    "installs": false,
+    "external_publication": false
+  }
+}

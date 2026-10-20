@@ -1,0 +1,386 @@
+{
+  "role": "Independent web developer; no library implementation edits",
+  "goal": "Build a static immutable-expense dashboard with a custom AssemblyScript category count/total view; prove browser/Python parity using the identical Wasm artifact.",
+  "initial_assumptions": [
+    "BrowserDatabase is an asynchronous in-memory database in a dedicated worker; export is needed before reload.",
+    "A custom module needs direct asc compilation plus a descriptor/digest manifest, not npm run build discovery.",
+    "The SDK can be imported from a custom source nested under views/; compiler module resolution may require that location.",
+    "rows() provides key/state/result records; browser exported resolved records need Document conversion for Python ingestion.",
+    "SDK example sources are authoring references; host/library implementation will be read only after a documented workflow blocks, with assumptions recorded first."
+  ],
+  "chronology": [
+    {
+      "step": 1,
+      "action": "Discover README/docs/SDK entry points with rg --files; read README.md, views/README.md, views/package.json; search docs for BrowserDatabase, authoring, compiler, replay, exports.",
+      "outcome": "README gives explicit custom compiler link and static browser asset-copy path. No ancestor AGENTS.md found."
+    },
+    {
+      "step": 2,
+      "action": "Read docs/portable.html authoring/browser/export sections; docs/api.html; views/assembly/examples/metrics.ts for structured count state.",
+      "outcome": "Enough public guidance to implement a count/total reducer without reading browser or native source."
+    },
+    {
+      "step": 3,
+      "command": "python -c 'import sys,foldlitedb; print(sys.executable); print(foldlitedb.__file__)'; node --version; python -c 'import playwright; print(playwright.__file__)'",
+      "outcome": "Python /usr/bin/python; editable foldlitedb from checkout; Node v22.23.1; Playwright available.",
+      "incidental_shell_error": "zsh:1: no matches found: .venv*",
+      "interpretation": "Only the optional glob probe failed; no product blocker."
+    },
+    {
+      "step": 4,
+      "command": "JSON_MODE=naive node node_modules/assemblyscript/bin/asc.js .build/ux-study-browser/expenses.ts --outFile ../.build/ux-study/browser/portable/expenses.wasm --transform json-as --runtime incremental --maximumMemory 256 --initialMemory 16 --stackSize 32768 --use abort=assembly/sdk/index/abort --optimizeLevel 3 --shrinkLevel 1",
+      "cwd": "views",
+      "outcome": "Compiled first try in 2.7s without warnings."
+    },
+    {
+      "step": 5,
+      "command": "node .build/ux-study/browser/manifest.mjs; copy portable_assets resources using read_bytes()",
+      "outcome": "Custom manifest descriptor/digest generated, browser files copied. SHA-256 c930f8c37a49fa8d29cf2b4cf5ac52455bf61186c3b23aaf4219bd3df63a491f."
+    },
+    {
+      "step": 6,
+      "command": "python -m http.server 8767 --bind 127.0.0.1 --directory .build/ux-study/browser",
+      "outcome": "Local static server started."
+    },
+    {
+      "step": 7,
+      "command": "python .build/ux-study/browser/verify_browser.py",
+      "outcome": "Chromium loaded custom module; UI append/import/live changes and category totals passed. Test assumed replay.matches, but response schema is not specified in browser guide. KeyError at replay assertion."
+    },
+    {
+      "step": 8,
+      "action": "Search docs for replay result names; inspect a live BrowserDatabase.replay return using Playwright page.evaluate.",
+      "snippet": "await window.expenseApp.db.add({category:\"Food\",amount:1}); return await window.expenseApp.db.replay();",
+      "outcome": {
+        "equivalent": true,
+        "documents": 1,
+        "groups": 1,
+        "module_sha256": "c930f8c37a49fa8d29cf2b4cf5ac52455bf61186c3b23aaf4219bd3df63a491f"
+      }
+    },
+    {
+      "step": 9,
+      "command": "python .build/ux-study/browser/verify_browser.py",
+      "outcome": "After fixing replay field assumption, restore raw-record comparison failed. Sequence numbers changed because original batches became one restored batch."
+    },
+    {
+      "step": 10,
+      "action": "Use documented retained identity fields and key/state/result comparisons rather than database-local sequence values.",
+      "outcome": "All 14 Chromium checks pass; no page errors, console messages, or bad HTTP responses."
+    },
+    {
+      "step": 11,
+      "command": "python .build/ux-study/browser/verify_native.py",
+      "snippet": "records = json.loads(export.read_text(), parse_int=float); documents = [Document(r[\"id\"], r[\"payload\"], int(r[\"position\"]), r[\"source\"]) for r in records]; view = View(module_path, sha256=manifest[\"sha256\"]); db.ingest(documents)",
+      "outcome": "Exact key/state/result equality with browser; matching module SHA-256; native repeated ingest replays all 7; checkpoint/rebuild/reopen preserve outputs; log bytes unchanged by rebuild; fresh plain-payload batches 3/4 also match."
+    },
+    {
+      "step": 12,
+      "action": "Replace raw replay JSON in app status with plain confirmation; rerun both browser and native verification. Visually inspect desktop/mobile screenshots.",
+      "outcome": "Both scripts pass; dashboard shows 7 expenses, $187 total, 4 category rows; no mobile horizontal overflow."
+    },
+    {
+      "step": 13,
+      "action": "Close all owned browsers in finally blocks and terminate local HTTP server with Ctrl-C.",
+      "outcome": "Server exits cleanly; evidence and report retained."
+    }
+  ],
+  "source_fallbacks": [
+    {
+      "after_failure": "KeyError: 'matches'",
+      "initial_assumption": "The replay boolean might be matches; guide only says replay reports equivalence and prints the whole object.",
+      "search": "rg -n replay|equivalent|matches docs views/README.md README.md",
+      "result": "Search included docs/static/playground.js:117, a public example that checks result.equivalent. A separate live BrowserDatabase call confirmed the complete return object.",
+      "private_implementation_read": false
+    }
+  ],
+  "failures": [
+    {
+      "stage": "first Chromium run",
+      "exact_error": "KeyError: 'matches'",
+      "classification": "Developer harness assumption; no claimed library defect",
+      "assumption": "Expected db.replay() equivalence boolean under matches; docs say reports equivalence but show whole result without schema.",
+      "next_step": "Inspect actual public replay response with a small browser snippet; no source fallback required."
+    },
+    {
+      "stage": "second Chromium run",
+      "exact_error": "AssertionError at assert restored['records'] == exported",
+      "classification": "Developer harness assumption contradicted by documented sequence semantics, not a product defect",
+      "workaround": "Compare retained identity/payload/source-position fields plus computation key/state/result; preserve original batch boundaries only if exact engine sequence equality is required."
+    }
+  ],
+  "findings": [
+    {
+      "id": "B1",
+      "severity": "low",
+      "kind": "documentation-gap",
+      "title": "Browser return shapes need a compact reference",
+      "observation": "The guide gives executable browser integration and prose method summaries, but no replay return schema. My first assertion guessed matches; the real field is equivalent. The actual call succeeds.",
+      "evidence": [
+        "docs/portable.html:169",
+        "docs/portable.html:189",
+        "First verify_browser.py run: KeyError: matches",
+        "Runtime result: {equivalent:true,documents:7,groups:4,module_sha256:...}"
+      ],
+      "workaround": "Inspect the returned object in Chromium, then use result.equivalent.",
+      "proposal": "Document replay() → {equivalent,documents,groups,module_sha256}; add concise signatures/result shapes for add, addMany, ingest, export, and stats, or provide TypeScript declarations.",
+      "impact": "One inspection/rerun; did not require reading host code or changing library behavior."
+    },
+    {
+      "id": "B2",
+      "severity": "low",
+      "kind": "api-ergonomics",
+      "title": "Browser conflict type is embedded in a generic Error message",
+      "observation": "A conflicting resolved record rejects atomically, with a useful message. The JS error has name Error, so differentiating conflict from validation requires parsing a message prefix.",
+      "evidence": {
+        "name": "Error",
+        "message": "DocumentConflict: document identity already has different contents or position"
+      },
+      "workaround": "Display the message for this small dashboard; do not branch on error class.",
+      "proposal": "Expose a stable error.code such as DocumentConflict and document the browser error contract; preserve the current descriptive message.",
+      "impact": "Relevant when an app offers retry/conflict recovery; no blocker for this dashboard."
+    },
+    {
+      "id": "B3",
+      "severity": "low",
+      "kind": "authoring-friction",
+      "title": "Custom modules require manual build and manifest scaffolding",
+      "observation": "The direct compiler command worked first try, but the app needed a long SDK-specific asc command plus a separate manifest program. npm run build intentionally covers only bundled modules, as README clearly explains.",
+      "evidence": [
+        "docs/portable.html:85",
+        "docs/portable.html:97",
+        ".build/ux-study/browser/manifest.mjs",
+        "Compile exit 0, no warnings, 2.7s"
+      ],
+      "workaround": "Adapt the documented command, relative SDK import, and manifest script into study-local files.",
+      "proposal": "Offer a documented script accepting custom source and output paths that applies pinned flags and writes the matching descriptor/digest manifest; keep current direct command as the transparent fallback.",
+      "impact": "Setup effort and copy/paste surface, not a compiler failure."
+    },
+    {
+      "id": "B4",
+      "severity": "informational",
+      "kind": "mental-model",
+      "title": "Preserved records retain identity while local sequence numbers can change",
+      "observation": "I initially compared complete browser exports before and after restore; that failed because sequence is batch-local engine progress. Re-reading the nearby replay section clarified comparing key/state/result and retained identity fields.",
+      "evidence": [
+        "docs/portable.html:218",
+        "docs/portable.html:231",
+        {
+          "original": [
+            1,
+            3,
+            5,
+            6,
+            7,
+            8,
+            12
+          ],
+          "restored": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      ],
+      "workaround": "Compare id,payload,position,source for retained records, and key,state,result for computation. Do not compare sequence or cursor across workers/databases.",
+      "proposal": "Repeat a one-line note immediately beside browser ingest/export: exported sequence is informational and regenerated on import. Existing full explanation is accurate.",
+      "impact": "One harness correction; explicitly not a data-loss or parity defect."
+    }
+  ],
+  "evidence": {
+    "browser": ".build/ux-study/browser/browser-evidence.json",
+    "native": ".build/ux-study/browser/native-evidence.json",
+    "export": ".build/ux-study/browser/expenses-export.json",
+    "manifest": ".build/ux-study/browser/portable/expenses.json",
+    "module": ".build/ux-study/browser/portable/expenses.wasm",
+    "native_log": ".build/ux-study/browser/expenses-native.fold",
+    "desktop_screenshot": ".build/ux-study/browser/dashboard-desktop.png",
+    "mobile_screenshot": ".build/ux-study/browser/dashboard-mobile.png",
+    "browser_verification_script": ".build/ux-study/browser/verify_browser.py",
+    "native_verification_script": ".build/ux-study/browser/verify_native.py"
+  },
+  "study": "browser-author",
+  "completed_at": "2026-10-19T23:48:04.219238+00:00",
+  "status": "completed",
+  "outcome": "Authored and compiled a category count/total view; built and exercised a local static dashboard in real Chromium; exact key/state/result parity with the native Python engine using identical Wasm bytes.",
+  "implementation_source_inspected": false,
+  "runtime_blockers": [],
+  "constraints_observed": [
+    "No library, documentation, test, bundled artifact, or package file edits.",
+    "App, fixtures, compiled Wasm/manifest, copied browser runtime, evidence and verification scripts only under .build/ux-study/browser/.",
+    "Custom AssemblyScript compiler input only under views/.build/ux-study-browser/.",
+    "Only this study report under reports/ux-study/browser.json; no other study reports read or agents contacted.",
+    "No dependency installs, external publishing, or external service calls; browser requests served locally."
+  ],
+  "public_sources_read": [
+    "README.md",
+    "views/README.md",
+    "views/package.json",
+    "docs/portable.html",
+    "docs/api.html",
+    "docs/concepts.html (search hits)",
+    "docs/index.html (search hits)",
+    "views/assembly/examples/metrics.ts"
+  ],
+  "application": {
+    "entry": ".build/ux-study/browser/index.html",
+    "javascript": ".build/ux-study/browser/app.js",
+    "view_source": "views/.build/ux-study-browser/expenses.ts",
+    "view": "expenses",
+    "descriptor": {
+      "abi": 1,
+      "name": "expenses",
+      "version": "1",
+      "state_version": "1",
+      "mergeable": false
+    },
+    "module_sha256": "c930f8c37a49fa8d29cf2b4cf5ac52455bf61186c3b23aaf4219bd3df63a491f",
+    "features": [
+      "Expense append form",
+      "JSON array and JSONL imports",
+      "Resolved record file restore",
+      "Live count/total summary table",
+      "Export via browser download",
+      "Replay verification",
+      "Mobile layout"
+    ],
+    "mapper": "String category plus finite numeric amount emits category → amount; malformed shapes emit nothing. UI validates records before append/import.",
+    "reducer": "Explicit {count,total} state; sequential addition; rejects invalid state/contributions and nonfinite overflow; merge disabled.",
+    "fixture_result": {
+      "Café": {
+        "count": 1,
+        "total": 0
+      },
+      "Food": {
+        "count": 3,
+        "total": 47
+      },
+      "Home": {
+        "count": 1,
+        "total": 100
+      },
+      "Transport": {
+        "count": 2,
+        "total": 40
+      }
+    },
+    "total_documents": 7,
+    "grand_total": 187,
+    "app_import_bound": "One addMany/ingest batch, at most 1024 records; no automatic chunking in this study app."
+  },
+  "validation": {
+    "browser_version": "153.0.8010.12",
+    "browser_checks": [
+      "UI append",
+      "JSONL file import",
+      "live group changes",
+      "exact fixture totals",
+      "replay equivalent",
+      "replay preserves old cursor",
+      "download exported records",
+      "reload clears state",
+      "restore preserves results, identities, payloads, and source positions",
+      "idempotent restore",
+      "invalid app input preserves state",
+      "conflicting resolved document rejected atomically",
+      "1025-document batch rejected atomically",
+      "390px viewport has no horizontal overflow"
+    ],
+    "native_checks": [
+      "identical Wasm SHA-256 in Chromium and Python View",
+      "native ingestion of downloaded resolved browser records",
+      "exact key/state/result parity",
+      "native idempotent re-ingestion",
+      "checkpoint and rebuild preserve computation and log bytes",
+      "native persistent reopen parity",
+      "plain-payload map/reduce parity across different batch boundaries"
+    ],
+    "same_wasm_digest_verified": true,
+    "exact_key_state_result_parity": true,
+    "replay": {
+      "equivalent": true,
+      "documents": 7,
+      "groups": 4,
+      "module_sha256": "c930f8c37a49fa8d29cf2b4cf5ac52455bf61186c3b23aaf4219bd3df63a491f"
+    },
+    "page_errors": [],
+    "console": [],
+    "bad_http_responses": [],
+    "original_browser_document_sequences": [
+      1,
+      3,
+      5,
+      6,
+      7,
+      8,
+      12
+    ],
+    "restored_browser_document_sequences": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "sequence_interpretation": "Sequences differ after restoring original 1/1/4/1 batches as one batch. IDs, payloads, source positions, key/state/result outputs match. This is explicitly documented behavior, not a defect."
+  },
+  "intuitive_successes": [
+    "README has a direct path to custom authoring, explains named build scope, and distinguishes browser memory from the Rust durable log.",
+    "The complete custom module example, public SDK helpers and structured metrics example were enough to author a new view without reading implementation internals.",
+    "Documented asc flags worked on the first compilation; descriptor extraction and digest manifest loaded in the worker on the first browser launch.",
+    "Asset copying via portable_assets().iterdir()/read_bytes() worked without path guessing or bundler setup.",
+    "Custom BrowserDatabase.connect({name,base}) worked on a plain Python static HTTP server.",
+    "rows, snapshot changes, replay, export, restored ingest and idempotent restore behaved as documented.",
+    "Conflict and oversized batch failures preserved existing state; the size-limit message states the actual 1024 bound.",
+    "Browser-to-Python Document conversion snippet worked for the custom view, not just the bundled example.",
+    "The exact custom bytes produced matching category counts, totals, state and key order in Chromium and Rust-native Python, including Unicode, zero and a negative credit."
+  ],
+  "limitations_of_study": [
+    "Seven valid expense records and four groups; no throughput, sustained memory, crash recovery, arbitrary view correctness, or production readiness claim.",
+    "Amounts chosen for exact binary representability; this is a reproducibility check, not a decimal-currency arithmetic guarantee.",
+    "No network/offline persistence, IndexedDB, or multi-tab coordination tested; documented browser lifetime is in-memory.",
+    "Only real local Chromium used; no Safari or Firefox compatibility claim."
+  ],
+  "reproduce": {
+    "compile_cwd": "views",
+    "compile": "JSON_MODE=naive node node_modules/assemblyscript/bin/asc.js .build/ux-study-browser/expenses.ts --outFile ../.build/ux-study/browser/portable/expenses.wasm --transform json-as --runtime incremental --maximumMemory 256 --initialMemory 16 --stackSize 32768 --use abort=assembly/sdk/index/abort --optimizeLevel 3 --shrinkLevel 1",
+    "manifest_cwd": "repository root",
+    "manifest": "node .build/ux-study/browser/manifest.mjs",
+    "serve": "python -m http.server 8767 --bind 127.0.0.1 --directory .build/ux-study/browser",
+    "verify_browser": "python .build/ux-study/browser/verify_browser.py",
+    "verify_native": "python .build/ux-study/browser/verify_native.py"
+  },
+  "cleanup": {
+    "all_owned_chromium_instances_closed": true,
+    "local_static_server_stopped": true
+  },
+  "expected_error_probes": [
+    {
+      "probe": "Conflicting immutable browser record",
+      "observed": {
+        "name": "Error",
+        "message": "DocumentConflict: document identity already has different contents or position"
+      },
+      "state_unchanged": true
+    },
+    {
+      "probe": "1025-document browser batch",
+      "observed": {
+        "name": "Error",
+        "message": "A batch must be an array of at most 1024 documents"
+      },
+      "state_unchanged": true
+    },
+    {
+      "probe": "Malformed expense import caught by application validation",
+      "observed": "Each expense needs a category string and a finite numeric amount.",
+      "state_unchanged": true
+    }
+  ]
+}

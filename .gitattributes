@@ -1,0 +1,4 @@
+# Preserve upstream license and generated notice text, including final newlines.
+native/licenses/** -whitespace
+src/foldlitedb/NATIVE_THIRD_PARTY_LICENSES.txt -whitespace
+src/foldlitedb/portable_assets/THIRD_PARTY_LICENSES.txt -whitespace

@@ -1,7 +1,11 @@
 include LICENSE README.md DESIGN.md
-recursive-include reducers *.rs *.toml Cargo.lock *.md
+recursive-include native *.rs *.toml Cargo.lock *.txt
+recursive-include views *.ts *.json *.mjs *.md
 recursive-include scripts *.py
 recursive-include tests *.py
 recursive-include examples *.py
+recursive-include docs *.html *.json *.css *.js *.svg
 global-exclude __pycache__ *.py[cod]
-prune reducers/core/target
+prune native/target
+prune views/node_modules
+prune views/.build

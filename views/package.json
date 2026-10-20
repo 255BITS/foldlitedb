@@ -1,0 +1,20 @@
+{
+  "name": "@foldlitedb/portable-views",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Portable AssemblyScript map/reduce views for FoldliteDB",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:view": "node scripts/build-view.mjs",
+    "check": "node scripts/build.mjs --check",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.28.20",
+    "json-as": "1.6.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
