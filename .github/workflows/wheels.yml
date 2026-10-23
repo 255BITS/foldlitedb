@@ -27,7 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24.22.1"
       - run: npm ci --prefix views
       - name: Verify bundled view modules and SDK behavior
         run: |
