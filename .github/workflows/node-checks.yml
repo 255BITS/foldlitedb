@@ -1,0 +1,21 @@
+name: Portable view runtime compatibility
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  views:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ["22.23.4", "24.22.1", "26.12.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci --prefix views
+      - run: npm run check --prefix views
+      - run: npm test --prefix views
