@@ -154,3 +154,59 @@ def test_imported_document_payloads_survive_browser_double_parsing(tmp_path):
         database.rebuild()
         assert [asdict(row) for row in database.documents()] == before
         assert next(database.rows()).result["sum"] == 1e18 + 128
+
+
+BOUNDARY_INTEGERS = [
+    2**53 - 1, -(2**53 - 1), 2**53, -(2**53), 2**53 + 1, -(2**53 + 1), 2**53 + 2,
+    2**63 - 1, -(2**63), -(2**63) + 1, 2**64 - 1,
+]
+
+
+def _python_accepts(value):
+    return int(float(value)) == value
+
+
+@pytest.mark.parametrize("value", BOUNDARY_INTEGERS)
+def test_native_host_applies_the_python_exact_integer_rule(tmp_path, value):
+    path = tmp_path / "exact.log"
+    with Database(path) as database:
+        # Python validation agrees with the native rule at every boundary.
+        if _python_accepts(value):
+            database.add({"metric": "python", "value": value}, id="python")
+        else:
+            with pytest.raises(DatabaseError, match="exactly representable"):
+                database.add({"metric": "python", "value": value}, id="python")
+        # Raw JSON bypasses Python validation and reaches the Rust host directly.
+        raw = ('{"op":"ingest","documents":[{"id":"native","payload":'
+               '{"metric":"native","nested":[%d]}}]}' % value)
+        log = path.read_bytes()
+        if _python_accepts(value):
+            stored = database._call_json(raw)["documents"][0]["payload"]["nested"][0]
+            assert stored == float(value)
+        else:
+            with pytest.raises(DatabaseError, match=str(value)):
+                database._call_json(raw)
+            assert path.read_bytes() == log
+        before = [asdict(row) for row in database.documents()]
+    with Database(path) as reopened:
+        assert [asdict(row) for row in reopened.documents()] == before
+
+
+def test_writer_health_is_reported_and_reopen_recovers(tmp_path):
+    path = tmp_path / "documents.log"
+    database = Database(path)
+    database.add({"metric": "x", "value": 2}, id="one")
+    assert database.stats()["log"]["writer_poisoned"] is False
+    with path.open("ab") as handle:
+        handle.write(b"B")
+    with pytest.raises(DatabaseError, match="uncertain"):
+        database.add({"metric": "x", "value": 3}, id="two")
+    assert database.stats()["log"]["writer_poisoned"] is True
+    assert next(database.rows()).result["sum"] == 2
+    with pytest.raises(DatabaseError, match="poisoned"):
+        database.close()
+    with Database(path) as reopened:
+        assert reopened.stats()["log"]["writer_poisoned"] is False
+        reopened.add({"metric": "x", "value": 3}, id="two")
+        assert reopened.add({"metric": "x", "value": 3}, id="two").position == 1
+        assert next(reopened.rows()).result["sum"] == 5

@@ -358,7 +358,16 @@ class Database:
                     "db.ingest_many(..., batch_size=...) with a smaller batch_size."
                 )
             encoded.append(_encode(record))
-        return self._call_json('{"op":"ingest","documents":[' + ",".join(encoded) + "]}")
+        try:
+            return self._call_json('{"op":"ingest","documents":[' + ",".join(encoded) + "]}")
+        except DatabaseError as error:
+            # The engine's limit errors are host-neutral; add the Python recovery.
+            if "(ABI_BUFFER_BYTES)" in str(error) or "(MAX_BATCH_" in str(error):
+                raise type(error)(
+                    f"{error} In Python, iterate db.ingest_many(..., batch_size=...) "
+                    "with a smaller batch_size."
+                ) from error
+            raise
 
     def add(self, payload: Any, *, id=None, source="default", position=None) -> Document:
         record = {"payload": payload, "source": source}
