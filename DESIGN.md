@@ -42,7 +42,10 @@ before acknowledging the batch, then exposes its already-computed derived state.
 A failed validation or view operation cannot commit a batch prefix. An I/O error
 can leave commit outcome uncertain, as with any durable append; reopen and retry
 using explicit document identities rather than assuming a failed acknowledgement
-means absence.
+means absence. Until then the writer is poisoned: it refuses appends and
+checkpoints while reads continue. `Engine::writer_poisoned()` and the
+`log.writer_poisoned` stat report this so applications can surface health and
+reopen.
 
 Opening verifies the complete log. An incomplete final frame can be discarded
 as an interrupted append. A complete frame with corrupt checksums or invalid
@@ -132,10 +135,19 @@ Modules have no host imports. ABI requests and responses are limited to 256 KiB,
 linear memory to 16 MiB, and native execution to a fuel budget. Ingestion is
 bounded to 1024 documents and 4096 emissions per batch. JSON nesting is bounded
 to 64 levels. Python releases the GIL while the native engine runs. These limits
-isolate individual operations; they do not bound accumulated host storage.
+isolate individual operations; they do not bound accumulated host storage. The
+Rust crate exports them (`ABI_BUFFER_BYTES`, `MAX_BATCH_DOCUMENTS`,
+`MAX_BATCH_EMISSIONS`, `MAX_LOG_FRAME_BYTES`, `MAX_JSON_DEPTH`,
+`MAX_SAFE_INTEGER`) so embedding applications can pre-validate, and a limit error
+names the operation, the size, and the limit rather than a host-specific API.
 
-JSON numbers follow finite IEEE-754 double semantics in both hosts. Python
-rejects integers that cannot be represented exactly as doubles. Source positions
+JSON numbers follow finite IEEE-754 double semantics in both hosts. The native
+engine, like Python before it, rejects integers that cannot be represented
+exactly as doubles (`int(float(n)) == n`) instead of rounding them. It checks
+payloads and keys during ingestion validation, before mapping or any durable
+write. A view response integer must be exact or the shortest JavaScript spelling
+of a double, as `JSON.stringify` emits. Accepted integers above 2^53 - 1 are
+returned with floating-point spelling. Source positions
 and engine sequences stay within JavaScript's nonnegative safe integer range.
 Canonical object keys and numeric formatting agree across hosts. Floating-point
 addition is not associative, so arbitrary merge trees can change rounding.

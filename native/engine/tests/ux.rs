@@ -1,4 +1,7 @@
-use foldlitedb_portable_engine::Engine;
+use foldlitedb_portable_engine::{
+    Engine, ABI_BUFFER_BYTES, MAX_BATCH_DOCUMENTS, MAX_BATCH_EMISSIONS, MAX_JSON_DEPTH,
+    MAX_LOG_FRAME_BYTES, MAX_SAFE_INTEGER,
+};
 use serde_json::{json, Value};
 use std::fs;
 
@@ -108,8 +111,12 @@ fn preview_maps_valid_and_malformed_catalogue_payloads_without_writes() {
 
 // This module permits descriptor and map only. Any reducer operation traps.
 fn map_only_module(response: Value) -> Vec<u8> {
+    raw_map_only_module(&response.to_string())
+}
+
+// The raw form keeps integer spellings that serde_json::Value cannot hold.
+fn raw_map_only_module(response: &str) -> Vec<u8> {
     let descriptor = json!({"ok":{"abi":1,"name":"map-only","version":"1","state_version":"1","mergeable":false}}).to_string();
-    let response = response.to_string();
     let escape =
         |text: &str| -> String { text.bytes().map(|byte| format!("\\{byte:02x}")).collect() };
     wat::parse_str(format!(
@@ -139,13 +146,15 @@ fn map_only_module(response: Value) -> Vec<u8> {
 
 #[test]
 fn preview_only_maps_and_normalizes_emissions_without_extra_fields() {
+    // 9007199254740994 is an exact double; 1000000000000000100 is the
+    // JavaScript shortest spelling of the double 1e18 + 128.
     let module = map_only_module(json!({"ok":[[{
-        "key":9007199254740993_u64,"value":{"large":1000000000000000100_u64,"zero":-0.0},"ignored":true
+        "key":9007199254740994_u64,"value":{"large":1000000000000000100_u64,"zero":-0.0},"ignored":true
     }]]}));
     let mut engine = Engine::open(":memory:", &module).unwrap();
     let before = call(&mut engine, json!({"op":"stats"}));
     let expected =
-        json!([{"key":9007199254740992.0_f64,"value":{"large":1e18_f64+128.0,"zero":-0.0}}]);
+        json!([{"key":9007199254740994.0_f64,"value":{"large":1e18_f64+128.0,"zero":-0.0}}]);
     for _ in 0..2 {
         let preview = call(&mut engine, json!({"op":"preview","payload":null}));
         assert_eq!(preview, expected);
@@ -159,6 +168,60 @@ fn preview_only_maps_and_normalizes_emissions_without_extra_fields() {
         .unwrap_err();
     assert!(error.contains("Wasm execution failed"), "{error}");
     assert_eq!(call(&mut engine, json!({"op":"stats"})), before);
+}
+
+#[test]
+fn public_limits_match_the_documented_contract() {
+    assert_eq!(ABI_BUFFER_BYTES, 262_144);
+    assert_eq!(MAX_BATCH_DOCUMENTS, 1024);
+    assert_eq!(MAX_BATCH_EMISSIONS, 4096);
+    assert_eq!(MAX_LOG_FRAME_BYTES, 8 * 1024 * 1024);
+    assert_eq!(MAX_JSON_DEPTH, 64);
+    assert_eq!(MAX_SAFE_INTEGER, (1 << 53) - 1);
+    let mut engine = Engine::open(":memory:", METRICS).unwrap();
+    let documents: Vec<Value> = (0..MAX_BATCH_DOCUMENTS)
+        .map(|_| json!({"payload":{"metric":"x","value":1}}))
+        .collect();
+    assert_eq!(
+        call(&mut engine, json!({"op":"ingest","documents":documents}))["inserted"],
+        MAX_BATCH_DOCUMENTS
+    );
+    // A single payload just above the ABI limit names the map operation.
+    let padding = "x".repeat(ABI_BUFFER_BYTES);
+    let error = engine
+        .execute(json!({"op":"preview","payload":{"metric":"x","value":1,"padding":padding}}))
+        .unwrap_err();
+    assert!(error.starts_with("Wasm map request is"), "{error}");
+    assert!(error.contains(&ABI_BUFFER_BYTES.to_string()), "{error}");
+}
+
+#[test]
+fn inexact_integer_view_outputs_are_rejected_before_any_write() {
+    // A guest using 64-bit integer arithmetic can emit integers that no
+    // double represents; they are rejected rather than silently rounded.
+    for (response, literal) in [
+        (r#"{"ok":[[{"key":9007199254740993,"value":1}]]}"#, "9007199254740993"),
+        (r#"{"ok":[[{"key":"x","value":{"n":18446744073709551615}}]]}"#, "18446744073709551615"),
+        (r#"{"ok":[[{"key":"x","value":-9223372036854775807}]]}"#, "-9223372036854775807"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("guest.fold");
+        let mut engine =
+            Engine::open(path.to_str().unwrap(), &raw_map_only_module(response)).unwrap();
+        let log = fs::read(&path).unwrap();
+        for request in [
+            json!({"op":"preview","payload":null}),
+            json!({"op":"ingest","documents":[{"payload":null}]}),
+        ] {
+            let error = engine.execute(request).unwrap_err();
+            assert!(
+                error.contains(literal) && error.contains("not exactly representable"),
+                "{error}"
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), log);
+        assert_eq!(call(&mut engine, json!({"op":"stats"}))["documents"], 0);
+    }
 }
 
 #[test]
@@ -313,8 +376,11 @@ fn batch_and_cursor_errors_give_recovery_and_closed_preview_fails() {
         .unwrap_err();
     assert!(
         error.contains("1024 documents")
+            && error.contains("MAX_BATCH_DOCUMENTS")
+            && error.contains("1025")
             && error.contains("smaller batches")
-            && error.contains("ingest_many")
+            && !error.contains("ingest_many"),
+        "{error}"
     );
     let payload = json!({"metric":"x","value":1,"padding":"x".repeat(150000)});
     assert_eq!(
@@ -324,8 +390,10 @@ fn batch_and_cursor_errors_give_recovery_and_closed_preview_fails() {
     let error = engine
         .execute(json!({"op":"ingest","documents":[{"payload":payload},{"payload":payload}]}))
         .unwrap_err();
-    assert!(error.contains("Wasm request exceeds the 262144-byte ABI buffer"));
-    assert!(error.contains("smaller batches") && error.contains("ingest_many"));
+    // The message is host-neutral: it names the operation, size and limit.
+    assert!(error.starts_with("Wasm map request is 3"), "{error}");
+    assert!(error.contains("exceeds the 262144-byte ABI limit (ABI_BUFFER_BYTES)"));
+    assert!(error.contains("smaller batches") && !error.contains("ingest_many"));
     assert_eq!(call(&mut engine, json!({"op":"stats"})), before);
     let error = engine.execute(json!({"op":"query","limit":0})).unwrap_err();
     assert!(!error.contains(RECOVERY));

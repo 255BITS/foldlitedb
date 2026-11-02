@@ -12,10 +12,38 @@ use std::collections::BTreeMap;
 use storage::{Batch, Storage};
 use uuid::Uuid;
 
-const MAX_SAFE_SEQUENCE: u64 = 9_007_199_254_740_991;
-const MAX_BATCH: usize = 1024;
+/// Largest integer `n` such that every integer in `0..=n` is exactly
+/// representable as an IEEE-754 double (JavaScript `Number.MAX_SAFE_INTEGER`).
+///
+/// Source positions and engine sequences never exceed it. Payload integers
+/// above it are accepted only when exactly representable as a double, and they
+/// are returned with floating-point JSON spelling (for example
+/// `9007199254740992.0`). Applications that read numbers back into integer
+/// types should keep domain integers within `-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER`
+/// or encode them as strings.
+pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Byte limit of one ABI v1 request, and separately of one response, including
+/// its JSON envelope. Every `map`, `identity`, `add`, `finalize` and
+/// `descriptor` call is bounded by it; a batch's single `map` request contains
+/// every newly inserted payload, and a per-group `add` request contains the
+/// previous state and all of that group's new values.
+pub const ABI_BUFFER_BYTES: usize = runtime::BUFFER_SIZE;
+
+/// Maximum documents in one atomic ingestion batch.
+pub const MAX_BATCH_DOCUMENTS: usize = 1024;
+
+/// Maximum map emissions (key/value contributions) produced by one batch.
+pub const MAX_BATCH_EMISSIONS: usize = 4096;
+
+/// Maximum encoded size of one committed log frame (one batch of documents).
+pub const MAX_LOG_FRAME_BYTES: usize = storage::MAX_FRAME_BYTES;
+
+/// Maximum JSON nesting depth of payloads, keys, states and results.
+pub const MAX_JSON_DEPTH: usize = 64;
+
+const MAX_SAFE_SEQUENCE: u64 = MAX_SAFE_INTEGER;
 const MAX_PAGE: usize = 1024;
-const MAX_CONTRIBUTIONS: usize = 4096;
 const CURSOR_RECOVERY: &str = "Obtain a fresh snapshot with db.query() and replace the previous results before resuming changes.";
 type Result<T> = std::result::Result<T, String>;
 
@@ -179,6 +207,13 @@ struct Stage {
     replayed: usize,
 }
 
+/// One open document log (or `:memory:` database) with its Wasm view.
+///
+/// Requests are JSON objects passed to [`Engine::execute`]. Limits for
+/// pre-validation are the crate-level constants [`ABI_BUFFER_BYTES`],
+/// [`MAX_BATCH_DOCUMENTS`], [`MAX_BATCH_EMISSIONS`], [`MAX_LOG_FRAME_BYTES`],
+/// [`MAX_JSON_DEPTH`] and [`MAX_SAFE_INTEGER`]. After an I/O error the writer
+/// is poisoned; check [`Engine::writer_poisoned`] and reopen to recover.
 pub struct Engine {
     storage: Option<Storage>,
     runtime: Runtime,
@@ -260,6 +295,15 @@ impl Engine {
 
     /// Payloads and keys have JavaScript/IEEE-754 numeric semantics. Source
     /// positions and cursors retain exact JavaScript-safe integer checks.
+    ///
+    /// As in the Python host, a payload or query-key integer must be exactly
+    /// representable as a double (`9007199254740993` and `u64::MAX` fail;
+    /// `2^53 + 2` and `i64::MIN` are accepted). The check runs before mapping
+    /// and before any durable write, so a rejected batch commits nothing.
+    /// Accepted integers above [`MAX_SAFE_INTEGER`] are returned with floating
+    /// JSON spelling. Integer literals beyond the 64-bit range are parsed as
+    /// doubles by `serde_json` before the engine sees them, so callers that
+    /// build requests from text should validate such literals themselves.
     pub fn execute(&mut self, request: Value) -> Result<Value> {
         if self.storage.is_none() {
             return Err("Database is closed".into());
@@ -288,12 +332,34 @@ impl Engine {
             }
             "rebuild" => self.rebuild(),
             "close" => {
-                self.checkpoint()?;
+                // A failed final checkpoint is reported, but the handle and its
+                // ownership lock are released either way so the log can be reopened.
+                let checkpointed = self.checkpoint();
                 self.storage.take();
-                Ok(json!({"closed":true}))
+                checkpointed.map(|()| json!({"closed":true}))
             }
             _ => Err("Unknown portable engine operation".into()),
         }
+    }
+
+    /// Whether a persistent log writer is poisoned by an earlier I/O error.
+    ///
+    /// A failed append or sync leaves the commit outcome uncertain, so the
+    /// writer refuses further ingestion and checkpoints. Reads keep serving the
+    /// last acknowledged state. Recover by closing the engine (or dropping it)
+    /// and calling [`Engine::open`] again: opening verifies the log and discards
+    /// an interrupted tail. Then retry with explicit document ids or source
+    /// positions, which makes an append that did reach the log an identical
+    /// replay rather than a duplicate. This check is cheap and does no I/O.
+    /// It is `false` for `:memory:` and for a closed engine.
+    pub fn writer_poisoned(&self) -> bool {
+        self.storage.as_ref().is_some_and(Storage::poisoned)
+    }
+
+    /// Whether the engine is open and its writer can accept ingestion: not
+    /// closed and not poisoned. See [`Engine::writer_poisoned`] for recovery.
+    pub fn is_writable(&self) -> bool {
+        self.storage.is_some() && !self.writer_poisoned()
     }
 
     fn cursor(&self, sequence: u64) -> String {
@@ -430,6 +496,7 @@ impl Engine {
             .get("key")
             .map(|key| {
                 validate_json(key, 0)?;
+                validate_exact_integers(key)?;
                 canonical_json(key)
             })
             .transpose()?;
@@ -574,7 +641,8 @@ impl Engine {
             "cache":{"status":self.cache_status,"bytes":self.cache_bytes,"log_offset":self.cache_offset},
             "replay":{"batches":self.replay_batches,"documents":self.replay_documents},
             "replay_batches":self.replay_batches,"replay_documents":self.replay_documents,
-            "log":{"bytes":bytes,"batches":batches,"recovered_tail_bytes":self.recovered_tail_bytes}}),
+            "log":{"bytes":bytes,"batches":batches,"recovered_tail_bytes":self.recovered_tail_bytes,
+                "writer_poisoned":self.writer_poisoned()}}),
         )
     }
 }
@@ -590,12 +658,12 @@ impl Drop for Engine {
 }
 
 fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<Stage> {
-    if documents.len() > MAX_BATCH {
-        return Err(
-            "An ingest batch may contain at most 1024 documents. Use smaller batches or iterate \
-             db.ingest_many(..., batch_size=...) with a smaller batch_size."
-                .into(),
-        );
+    if documents.len() > MAX_BATCH_DOCUMENTS {
+        return Err(format!(
+            "An ingest batch may contain at most {MAX_BATCH_DOCUMENTS} documents \
+             (MAX_BATCH_DOCUMENTS); this batch has {}. Split it into smaller batches.",
+            documents.len()
+        ));
     }
     let mut staged = Stage {
         documents: Vec::new(),
@@ -740,6 +808,7 @@ fn cursor_error(message: &str) -> String {
 
 fn canonical_payload(payload: &Value) -> Result<(String, Value)> {
     validate_json(payload, 0)?;
+    validate_exact_integers(payload)?;
     let text = canonical_json(payload)?;
     let mut payload = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     normalize_json_numbers(&mut payload);
@@ -772,8 +841,11 @@ fn map_documents(runtime: &Runtime, payloads: Vec<Value>) -> Result<Vec<Vec<Valu
                 .get("value")
                 .ok_or("A map contribution requires value")?;
             contributions += 1;
-            if contributions > MAX_CONTRIBUTIONS {
-                return Err("A batch may emit at most 4096 contributions".into());
+            if contributions > MAX_BATCH_EMISSIONS {
+                return Err(format!(
+                    "A batch may emit at most {MAX_BATCH_EMISSIONS} contributions \
+                     (MAX_BATCH_EMISSIONS). Split it into smaller batches."
+                ));
             }
             validate_json(key, 0)?;
             validate_json(value, 0)?;
@@ -826,8 +898,8 @@ fn validate_record(record: &RetainedDocument) -> Result<()> {
     validate_json(&record.payload, 0)
 }
 fn validate_json(value: &Value, depth: usize) -> Result<()> {
-    if depth > 64 {
-        return Err("JSON nesting exceeds 64".into());
+    if depth > MAX_JSON_DEPTH {
+        return Err(format!("JSON nesting exceeds {MAX_JSON_DEPTH}"));
     }
     match value {
         Value::Array(values) => {
@@ -846,6 +918,33 @@ fn validate_json(value: &Value, depth: usize) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+/// The Python host's rule, `int(float(n)) == n`: an integer is accepted only
+/// when converting it to the nearest IEEE-754 double loses nothing. Floating
+/// JSON numbers are doubles by definition. Integer literals outside the 64-bit
+/// range are already parsed as doubles by `serde_json`.
+pub(crate) fn integer_is_exact_double(number: &serde_json::Number) -> bool {
+    if let Some(value) = number.as_u64() {
+        (value as f64) as u128 == u128::from(value)
+    } else if let Some(value) = number.as_i64() {
+        (value as f64) as i128 == i128::from(value)
+    } else {
+        true
+    }
+}
+/// Rejects host-supplied integers that a double cannot represent exactly,
+/// before any mapping or durable write, rather than silently rounding them.
+fn validate_exact_integers(value: &Value) -> Result<()> {
+    match value {
+        Value::Number(number) if !integer_is_exact_double(number) => Err(format!(
+            "JSON integer {number} is not exactly representable as an IEEE-754 double \
+             (nearest is {}); encode larger identifiers as strings",
+            ryu_js::Buffer::new().format_finite(number.as_f64().unwrap_or(0.0))
+        )),
+        Value::Array(values) => values.iter().try_for_each(validate_exact_integers),
+        Value::Object(values) => values.values().try_for_each(validate_exact_integers),
+        _ => Ok(()),
+    }
 }
 fn next_sequence(sequence: u64) -> Result<u64> {
     sequence

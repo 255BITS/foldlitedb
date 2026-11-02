@@ -348,15 +348,29 @@ fn browser_number_spellings_are_normalized_for_mapping_export_and_replay() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("large-numbers.db");
     let mut engine = Engine::open(path.to_str().unwrap(), METRICS).unwrap();
-    // JSON.stringify(1e18 + 128) emits this decimal spelling even though its
-    // integer mathematical value differs from the represented binary double.
-    let wire = r#"{"op":"ingest","documents":[{"id":"large","payload":{"metric":"x","value":1000000000000000100,"nested":[9007199254740993]}}]}"#;
+    // JSON.stringify(1e18 + 128) emits 1000000000000000100, whose integer value
+    // differs from the represented double. As in the Python host, an integer
+    // literal must be exact; importers parse browser numbers as doubles first.
+    for literal in ["1000000000000000100", "9007199254740993"] {
+        let wire = format!(
+            r#"{{"op":"ingest","documents":[{{"id":"large","payload":{{"metric":"x","value":{literal}}}}}]}}"#
+        );
+        let error = engine
+            .execute(serde_json::from_str(&wire).unwrap())
+            .unwrap_err();
+        assert!(error.contains(literal) && error.contains("IEEE-754"), "{error}");
+    }
+    assert_eq!(execute(&mut engine, json!({"op":"stats"}))["documents"], 0);
+    let wire = r#"{"op":"ingest","documents":[{"id":"large","payload":{"metric":"x","value":1.0000000000000001e18,"nested":[9007199254740992,9007199254740994]}}]}"#;
     let inserted = execute(&mut engine, serde_json::from_str(wire).unwrap());
     let payload = inserted["documents"][0]["payload"].clone();
     let expected = 1e18_f64 + 128.0;
     assert_eq!(payload["value"].as_f64(), Some(expected));
     assert!(payload["value"].is_f64());
     assert_eq!(payload["nested"][0].as_f64(), Some(9_007_199_254_740_992.0));
+    assert_eq!(payload["nested"][1].as_f64(), Some(9_007_199_254_740_994.0));
+    // The AssemblyScript reducer spells its double sum as 1000000000000000100;
+    // that guest spelling denotes the double and is accepted.
     let rows = execute(&mut engine, json!({"op":"query"}));
     assert_eq!(rows["rows"][0]["result"]["sum"].as_f64(), Some(expected));
     let exported = execute(&mut engine, json!({"op":"documents"}));
@@ -375,6 +389,95 @@ fn browser_number_spellings_are_normalized_for_mapping_export_and_replay() {
     drop(engine);
     let mut reopened = Engine::open(path.to_str().unwrap(), METRICS).unwrap();
     assert_eq!(execute(&mut reopened, json!({"op":"documents"})), exported);
+    drop(reopened);
+    fs_remove_cache(&path);
+    let mut rebuilt = Engine::open(path.to_str().unwrap(), METRICS).unwrap();
+    // A rebuilt cache is a new generation; documents and results still agree.
+    assert_eq!(
+        execute(&mut rebuilt, json!({"op":"documents"}))["documents"],
+        exported["documents"]
+    );
+    assert_eq!(execute(&mut rebuilt, json!({"op":"query"}))["rows"], rows["rows"]);
+}
+
+fn fs_remove_cache(path: &std::path::Path) {
+    let mut cache = path.as_os_str().to_owned();
+    cache.push(".cache");
+    std::fs::remove_file(cache).unwrap();
+}
+
+#[test]
+fn payload_integers_must_be_exact_doubles_matching_the_python_rule() {
+    // Python: int(float(n)) == n. Boundaries around 2^53 and the 64-bit range.
+    let accepted: Vec<Value> = vec![
+        json!(9_007_199_254_740_991_u64),
+        json!(-9_007_199_254_740_991_i64),
+        json!(9_007_199_254_740_992_u64),
+        json!(-9_007_199_254_740_992_i64),
+        json!(9_007_199_254_740_994_u64),
+        json!(-9_007_199_254_740_994_i64),
+        json!(i64::MIN),
+        json!(1_u64 << 63),
+        json!(0),
+        json!(9_007_199_254_740_993.0_f64),
+    ];
+    let rejected: Vec<Value> = vec![
+        json!(9_007_199_254_740_993_u64),
+        json!(-9_007_199_254_740_993_i64),
+        json!(u64::MAX),
+        json!(i64::MAX),
+        json!(i64::MIN + 1),
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("exact.db");
+    let mut engine = Engine::open(path.to_str().unwrap(), METRICS).unwrap();
+    for (index, value) in rejected.iter().enumerate() {
+        let log = std::fs::read(&path).unwrap();
+        for payload in [
+            json!({"metric":"x","value":value}),
+            json!({"metric":"x","value":1,"nested":{"deep":[value]}}),
+        ] {
+            let error = engine
+                .execute(json!({"op":"ingest","documents":[
+                    {"id":format!("ok-{index}"),"payload":{"metric":"y","value":1}},
+                    {"id":format!("bad-{index}"),"payload":payload}
+                ]}))
+                .unwrap_err();
+            assert!(
+                error.contains(&value.to_string()) && error.contains("exactly representable"),
+                "{error}"
+            );
+            let error = engine
+                .execute(json!({"op":"preview","payload":payload}))
+                .unwrap_err();
+            assert!(error.contains(&value.to_string()), "{error}");
+        }
+        let error = engine
+            .execute(json!({"op":"query","key":value}))
+            .unwrap_err();
+        assert!(error.contains(&value.to_string()), "{error}");
+        // Validation precedes the durable append: no batch prefix is written.
+        assert_eq!(std::fs::read(&path).unwrap(), log);
+        assert_eq!(execute(&mut engine, json!({"op":"stats"}))["documents"], 0);
+    }
+    let documents: Vec<Value> = accepted
+        .iter()
+        .enumerate()
+        .map(|(index, value)| json!({"id":index.to_string(),"payload":{"metric":"n","value":value}}))
+        .collect();
+    let inserted = execute(&mut engine, json!({"op":"ingest","documents":documents}));
+    assert_eq!(inserted["inserted"], accepted.len());
+    for (document, value) in inserted["documents"].as_array().unwrap().iter().zip(&accepted) {
+        assert_eq!(document["payload"]["value"].as_f64(), value.as_f64());
+    }
+    let exported = execute(&mut engine, json!({"op":"documents"}));
+    let result = execute(&mut engine, json!({"op":"query"}))["rows"].clone();
+    drop(engine);
+    let mut reopened = Engine::open(path.to_str().unwrap(), METRICS).unwrap();
+    assert_eq!(execute(&mut reopened, json!({"op":"documents"})), exported);
+    let rebuilt = execute(&mut reopened, json!({"op":"rebuild"}));
+    assert_eq!(rebuilt["documents"], accepted.len());
+    assert_eq!(execute(&mut reopened, json!({"op":"query"}))["rows"], result);
 }
 
 #[test]

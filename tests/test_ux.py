@@ -151,7 +151,7 @@ def test_preview_does_not_promise_reducer_success_or_batch_fit():
         assert db.stats() == before
         payload = {"metric": "x", "value": 1, "padding": "x" * 150000}
         assert db.preview(payload) == [{"key": "x", "value": 1}]
-        with pytest.raises(DatabaseError, match="Wasm request exceeds the 262144-byte ABI buffer") as error:
+        with pytest.raises(DatabaseError, match=r"Wasm map request is \d+ bytes, which exceeds the 262144-byte ABI limit") as error:
             db.ingest([Document("one", payload), Document("two", payload)])
         assert "smaller batches" in str(error.value) and "ingest_many" in str(error.value)
         assert db.stats() == before
