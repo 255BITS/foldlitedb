@@ -286,6 +286,10 @@ impl Storage {
         result
     }
 
+    pub fn poisoned(&self) -> bool {
+        matches!(self, Self::Disk(disk) if disk.poisoned)
+    }
+
     pub fn metadata(&self) -> (bool, u64, u64) {
         match self {
             Self::Memory { batches } => (false, 0, batches.len() as u64),

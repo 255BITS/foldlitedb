@@ -62,13 +62,18 @@ impl Runtime {
     }
 
     pub fn call(&self, request: Value) -> Result<Value, String> {
+        let op = request
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
         let input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
         if input.len() > BUFFER_SIZE {
-            return Err(
-                "Wasm request exceeds the 262144-byte ABI buffer. Use smaller batches or iterate \
-                 db.ingest_many(..., batch_size=...) with a smaller batch_size."
-                    .into(),
-            );
+            return Err(format!(
+                "Wasm {op} request is {} bytes, which exceeds the {BUFFER_SIZE}-byte ABI limit \
+                 (ABI_BUFFER_BYTES). Use smaller batches, payloads, or view states.",
+                input.len()
+            ));
         }
         // A fresh instance makes each operation independent of hidden guest globals.
         let limits = StoreLimitsBuilder::new()
@@ -133,7 +138,10 @@ impl Runtime {
             .map_err(|e| format!("Wasm execution failed: {e}"))?;
         let output_len = usize::try_from(output_len).map_err(|_| "Negative Wasm output length")?;
         if output_len == 0 || output_len > BUFFER_SIZE {
-            return Err("Wasm output length must be between 1 and 262144 bytes".into());
+            return Err(format!(
+                "Wasm {op} response length {output_len} must be between 1 and {BUFFER_SIZE} bytes \
+                 (ABI_BUFFER_BYTES)"
+            ));
         }
         // Guests may relocate their output while executing (for example after
         // growing memory). Validate the post-execution pointer that is read.
@@ -175,6 +183,19 @@ impl Runtime {
     }
 }
 
+// Guests have JavaScript number semantics, and JavaScript-style serializers
+// (JSON.stringify, the AssemblyScript SDK) spell some integral doubles above
+// 2^53 as their shortest round-trip decimal, e.g. 1e18 + 128 as
+// 1000000000000000100. That spelling denotes a double and is accepted. Any
+// other inexact integer, such as 9007199254740993 from 64-bit integer
+// arithmetic, cannot come from a double and would otherwise be silently rounded.
+fn guest_integer_is_double(number: &serde_json::Number) -> bool {
+    crate::integer_is_exact_double(number)
+        || number.as_f64().is_some_and(|value| {
+            ryu_js::Buffer::new().format_finite(value) == number.to_string()
+        })
+}
+
 // Match the browser finiteJSON depth convention: the envelope starts at zero,
 // and every array element/object property adds one, including primitive leaves.
 fn validate_response_json(value: &Value, depth: usize) -> Result<(), String> {
@@ -184,6 +205,12 @@ fn validate_response_json(value: &Value, depth: usize) -> Result<(), String> {
     match value {
         Value::Number(number) if !number.as_f64().is_some_and(f64::is_finite) => {
             return Err("Wasm response JSON numbers must be finite".into());
+        }
+        Value::Number(number) if !guest_integer_is_double(number) => {
+            return Err(format!(
+                "Wasm response JSON integer {number} is not exactly representable as an \
+                 IEEE-754 double; views must emit double-valued numbers or strings"
+            ));
         }
         Value::Array(values) => {
             for value in values {

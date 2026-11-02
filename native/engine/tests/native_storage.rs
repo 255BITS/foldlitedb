@@ -360,6 +360,7 @@ fn external_log_modification_poisoned_writer_never_publishes_state() {
     let path = directory.path().join("events.fold");
     let mut engine = open(&path);
     add(&mut engine, "one", 5);
+    assert!(!engine.writer_poisoned() && engine.is_writable());
     fs::OpenOptions::new()
         .append(true)
         .open(&path)
@@ -370,7 +371,10 @@ fn external_log_modification_poisoned_writer_never_publishes_state() {
         .execute(json!({"op":"ingest","documents":[{"payload":{"metric":"x","value":3}}]}))
         .unwrap_err();
     assert!(error.contains("uncertain"));
-    assert_eq!(call(&mut engine, json!({"op":"stats"}))["documents"], 1);
+    assert!(engine.writer_poisoned() && !engine.is_writable());
+    let stats = call(&mut engine, json!({"op":"stats"}));
+    assert_eq!(stats["documents"], 1);
+    assert_eq!(stats["log"]["writer_poisoned"], true);
     assert!(engine
         .execute(json!({"op":"checkpoint"}))
         .unwrap_err()
@@ -402,4 +406,47 @@ fn log_inode_lock_rejects_symlink_and_hardlink_alias_owners() {
     }
     drop(owner);
     drop(open(&symbolic));
+}
+
+#[test]
+fn poisoned_writer_recovers_by_close_reopen_and_retry_with_explicit_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("events.fold");
+    let mut engine = open(&path);
+    add(&mut engine, "one", 5);
+    let memory = Engine::open(":memory:", METRICS).unwrap();
+    assert!(!memory.writer_poisoned() && memory.is_writable());
+    // An interrupted foreign append makes the next durable append fail.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"B")
+        .unwrap();
+    let retry = json!({"op":"ingest","documents":[{"id":"two","payload":{"metric":"x","value":3}}]});
+    assert!(engine.execute(retry.clone()).is_err());
+    assert!(engine.writer_poisoned());
+    // Reads keep serving the last acknowledged state.
+    assert_eq!(call(&mut engine, json!({"op":"query"}))["rows"][0]["result"]["sum"], 5);
+    // Close reports the checkpoint failure but still releases ownership.
+    assert!(engine
+        .execute(json!({"op":"close"}))
+        .unwrap_err()
+        .contains("poisoned"));
+    assert!(!engine.writer_poisoned() && !engine.is_writable());
+    let mut reopened = open(&path);
+    assert!(reopened.is_writable());
+    assert_eq!(
+        call(&mut reopened, json!({"op":"stats"}))["log"]["recovered_tail_bytes"],
+        1
+    );
+    let retried = call(&mut reopened, retry.clone());
+    assert_eq!(retried["inserted"], 1);
+    // A second identical retry is an idempotent replay.
+    assert_eq!(call(&mut reopened, retry)["replayed"], 1);
+    assert_eq!(
+        call(&mut reopened, json!({"op":"query"}))["rows"][0]["result"]["sum"],
+        8
+    );
+    drop(engine);
 }
