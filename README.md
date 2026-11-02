@@ -178,7 +178,8 @@ is not compiled into this browser build.
 Browser state is lost on reload or close. Export resolved documents first. The
 preview bounds documents, groups, history, and request sizes. Persistent browser
 storage, log/history compaction, and multiple views per native database remain
-future work. JSON numbers use IEEE-754 double precision; use strings for exact
+future work. JSON numbers use IEEE-754 double precision; integers a double
+cannot represent exactly are rejected, so use strings for exact
 arbitrary-precision identifiers.
 
 ## Development and documentation
