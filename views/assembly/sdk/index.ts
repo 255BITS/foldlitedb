@@ -139,9 +139,21 @@ export function dispatch(view: View, length: i32): i32 {
   const parser = new Parser(text);
   const requestValue = parser.value();
   if (parser.error.length > 0) return failure(parser.error);
-  if (!finiteJSON(requestValue)) return failure("Request must contain finite JSON within 64 nesting levels");
+  // Validate each explicit datum at depth zero, not its ABI wrapper.
+  if (!finiteJSON(requestValue, -2)) return failure("Request must contain finite JSON within 64 data nesting levels");
   const request = object(requestValue);
   if (request == null) return failure("Request must be an object");
+  const fields = request.keys();
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    const child = request.get(field)!;
+    if ((field == "documents" || field == "values") && child.type == JSON.Types.Array) {
+      const elements = child.get<JSON.Arr>();
+      for (let j = 0; j < elements.length; j++) {
+        if (!finiteJSON(elements.at(j))) return failure("Request data exceeds 64 nesting levels");
+      }
+    } else if (!finiteJSON(child)) return failure("Request data exceeds 64 nesting levels");
+  }
   const operation = request.get("op");
   if (operation == null || operation.type != JSON.Types.String) return failure("Request requires a string op");
   const op = operation.get<string>();

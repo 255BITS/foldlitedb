@@ -1,13 +1,13 @@
 /* One view, one isolated worker. Retained documents and committed view state are
    in memory; reload the page to discard them, or export documents for replay. */
-import {ViewModule, ViewError, canonical, finiteJSON} from './host.js';
+import {ViewModule, ViewError, canonical, databaseRequestJSON} from './host.js';
 import {DocumentConflict, SourceOrderError, CursorExpired, serializeError} from './errors.js';
 
 const utf8 = new TextEncoder();
 const MAX_DOCUMENTS = 20000, MAX_BATCH = 1024, MAX_GROUPS = 4096, MAX_EVENTS = 100000;
 const MAX_RETAINED_BYTES = 16 * 1024 * 1024, MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 const clone = value => JSON.parse(JSON.stringify(value));
-const bytes = value => utf8.encode(canonical(value)).length;
+const bytes = value => utf8.encode(JSON.stringify(value)).length;
 function nonnegative(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) throw new ViewError(`${label} must be a nonnegative safe integer`);
   return value;
@@ -62,7 +62,7 @@ class MemoryDatabase {
   }
   ingest(input) {
     if (!Array.isArray(input) || input.length > MAX_BATCH) throw new ViewError(`A batch must be an array of at most ${MAX_BATCH} documents`);
-    finiteJSON(input);
+    databaseRequestJSON({op: 'ingest', documents: input});
     const identities = new Map(this.identities), positions = new Map(this.positions), checkpoints = new Map(this.checkpoints), states = new Map(this.states);
     const appended = [], events = [], resolved = [];
     let sequence = this.sequence, documentBytes = this.documentBytes, historyBytes = this.historyBytes, replayed = 0;
@@ -96,8 +96,10 @@ class MemoryDatabase {
       appended.push(document); resolved.push(document);
     }
     const groups = new Map();
-    if (appended.length) {
-      const mapped = mapPayloads(this.view, appended.map(document => document.payload));
+    // Underscore-prefixed sources are retained internal metadata in both hosts.
+    const mappedDocuments = appended.filter(document => !document.source.startsWith('_'));
+    if (mappedDocuments.length) {
+      const mapped = mapPayloads(this.view, mappedDocuments.map(document => document.payload));
       for (const contributions of mapped) {
         for (const contribution of contributions) {
           const key = canonical(contribution.key);
@@ -165,7 +167,7 @@ class MemoryDatabase {
     return {equivalent: canonical(values(this)) === canonical(values(rebuilt)), documents: this.documents.length, groups: this.states.size, module_sha256: this.view.spec.sha256};
   }
   request(request) {
-    finiteJSON(request);
+    databaseRequestJSON(request);
     switch (request.op) {
       case 'ingest': return this.ingest(request.documents);
       case 'preview': {
