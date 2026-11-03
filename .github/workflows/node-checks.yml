@@ -2,7 +2,7 @@ name: Portable view runtime compatibility
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [master, develop]
 permissions:
   contents: read
 jobs:
