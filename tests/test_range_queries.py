@@ -27,7 +27,7 @@ def callback_view(name="range-fixture"):
 
 @pytest.fixture(params=["portable", "callback"])
 def mixed_db(request):
-    fixture = json.loads(FIXTURE.read_text())
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
     view = View(bytes.fromhex(fixture["hex"])) if request.param == "portable" else callback_view()
     with Database(":memory:", view) as database:
         database.add({"keys": list(reversed(fixture["keys"]))})
@@ -69,7 +69,7 @@ def collect(database, **selector):
 
 
 def test_complete_mixed_key_order_and_paged_rows(mixed_db):
-    expected = json.loads(FIXTURE.read_text())["keys"]
+    expected = json.loads(FIXTURE.read_text(encoding="utf-8"))["keys"]
     assert_keys(collect(mixed_db), expected)
     assert_keys(list(mixed_db.rows(limit=3)), expected)
 
@@ -118,7 +118,7 @@ def test_prefixes_are_structural_and_include_exact_prefix(mixed_db, prefix, expe
 
 
 def test_empty_prefixes_are_restricted_to_their_container_type(mixed_db):
-    expected = json.loads(FIXTURE.read_text())["keys"]
+    expected = json.loads(FIXTURE.read_text(encoding="utf-8"))["keys"]
     assert_keys(collect(mixed_db, prefix=""), [key for key in expected if isinstance(key, str)])
     assert_keys(collect(mixed_db, prefix=[]), [key for key in expected if isinstance(key, list)])
 
@@ -309,11 +309,13 @@ def test_real_020_cache_and_snapshot_cursor_upgrade_without_wasm_replay(tmp_path
     with Database(path) as database:
         assert database.stats()["cache"]["status"] == "loaded"
         assert database.stats()["replay"]["documents"] == 0
-        assert path.read_bytes() == original_log
         assert_keys(database.query(cursor=V020_CURSOR).rows, ['"', "A", "B"])
         assert database.changes(since=V020_CURSOR).rows == ()
         with pytest.raises(DatabaseError, match="[Aa]fter|expired"):
             database.query(cursor=V020_CURSOR, after=json.dumps([V020_CURSOR, '"A"']))
+    # Windows ownership locks prevent other handles from reading an active log.
+    assert path.read_bytes() == original_log
+    with Database(path) as database:
         database.add({"metric": "A", "value": 7})
         assert database.changes(since=V020_CURSOR).rows[0].result["sum"] == 9
         snapshot = database.query(cursor=V020_CURSOR)

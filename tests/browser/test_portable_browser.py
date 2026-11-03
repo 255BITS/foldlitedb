@@ -401,7 +401,7 @@ def test_shared_conformance_sources_depth_and_relocated_output(portable_page):
 
 
 def _query_keys_fixture():
-    return json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "query_keys.json").read_text())
+    return json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "query_keys.json").read_text(encoding="utf-8"))
 
 
 def test_semantic_key_order_and_range_prefix_pages_match_native(portable_page):

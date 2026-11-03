@@ -2,12 +2,16 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.3.0. Each version links its GitHub release;
+before moving existing databases to 0.3.1. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
 
-## [0.3.0](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.0) — 2026-11-03
+## [0.3.1](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.1) — 2026-11-03
+
+This release includes the range-query changes prepared for 0.3.0. **0.3.0 was
+not published to PyPI:** its Windows validation caught test fixture encoding and
+open-log locking assumptions. Its GitHub tag is retained without moving it.
 
 ### Queries
 
@@ -32,8 +36,15 @@ the 0.2.0 release also includes a receipt for its tested distributions.
 
 - Add this consolidated history and a dedicated upgrade guide with backup,
   migration, verification, cutover, rollback, and compatibility steps.
-- Document range/prefix semantics, executable examples, and the 0.2.0-to-0.3.0
+- Document range/prefix semantics, executable examples, and the 0.2.0-to-0.3.1
   query compatibility steps. Include the changelog in source distributions.
+
+### Cross-platform verification
+
+- Read the shared Unicode query fixture explicitly as UTF-8 and compare log
+  bytes after releasing the database's Windows ownership lock.
+- Run the Windows Python 3.11 installed-wheel/source-rebuild checks on every
+  pull request and mainline push, alongside the existing Linux checks.
 
 ## [0.2.0](https://github.com/255BITS/foldlitedb/releases/tag/v0.2.0) — 2026-11-03
 
