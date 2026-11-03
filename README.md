@@ -16,10 +16,10 @@ the [view authoring guide](docs/portable.html).
 
 ## Install
 
-Use Python 3.11+ to install the 0.1.4 release:
+Use Python 3.11+ to install the 0.2.0 release:
 
 ```sh
-python -m pip install foldlitedb==0.1.4
+python -m pip install foldlitedb==0.2.0
 ```
 
 Native wheels are provided for Linux x86-64 and ARM64, macOS Intel and Apple
@@ -46,7 +46,7 @@ a wheel, run `python -m pip wheel . --no-deps --wheel-dir dist`. Install that
 wheel on a matching platform with `python -m pip install /path/to/the-built.whl`;
 installing a built wheel needs neither Rust nor Node. See the
 [release guide](docs/releasing.html) for PyPI Trusted Publisher setup and the
-0.1.4 publication workflow.
+0.2.0 publication workflow.
 
 ## Append documents, read a live view
 
