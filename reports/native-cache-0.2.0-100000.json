@@ -1,0 +1,182 @@
+{
+  "schema": "foldlitedb-native-cache-benchmark/v2",
+  "runtime": {
+    "python": "3.14.8",
+    "platform": "Linux-7.2.11-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "storage_path": "/tmp/foldlitedb-benchmark-w9qbxp8s",
+    "mount": {
+      "filesystems": [
+        {
+          "target": "/tmp",
+          "source": "tmpfs",
+          "fstype": "tmpfs",
+          "options": "rw,nosuid,nodev,seclabel,size=65893560k,nr_inodes=1048576,inode64,usrquota"
+        }
+      ]
+    }
+  },
+  "settings": {
+    "documents": 100000,
+    "keys": 16,
+    "batch_size": 100,
+    "uncached_suffix_documents": 20
+  },
+  "view_sha256": "e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93",
+  "source_sha256": {
+    "native/engine/src/lib.rs": "6b87b1972e3848d13f68415ae3211925fedda728fa284c36f92599b78f750d57",
+    "native/engine/src/storage.rs": "61a4be36a1d2ae072edf91c52accb959ed21c8ede22fddf85f89cad79f66da31",
+    "native/engine/src/runtime.rs": "0228515e5eee5150cee768e65118d76739fcbfa749957d9e3d83c2c97afd0e66",
+    "native/Cargo.lock": "2d16881332a1c5c1ecdd3dc705cfe52fb40e284e9b41d0b9d25be75a778997da",
+    "src/foldlitedb/database.py": "463bf35319df1e435ca23a09ae3b80b710badd7cde6bbc98c77b59d1410f0abc",
+    "scripts/benchmark_database.py": "8f4b77ec3c1da19bfc29a05751762de58f7147923cf8108dda5828f08593f6f8"
+  },
+  "method": "Single run with filesystem cache retained. Warm open verifies all log bytes but executes only uncached Wasm batches. Timings include Python/native transport. Durable ingestion includes one limit=1 snapshot query after each committed batch; latency percentiles describe complete batches, not individual documents. Peak RSS is the process high-water mark across all phases, excluding the child suffix writer. No timing threshold or cross-engine claim.",
+  "results": {
+    "seconds": {
+      "durable_ingest": 25.80594510998344,
+      "checkpoint": 0.12704020802630112,
+      "cached_reopen": 0.30576145503437147,
+      "uncached_suffix_reopen": 0.29213806602638215,
+      "missing_cache_rebuild": 25.015777872002218,
+      "explicit_rebuild": 26.14011696400121
+    },
+    "documents_per_second": {
+      "durable_ingest": 3875.076056071801,
+      "missing_cache_rebuild": 3998.2766281252793
+    },
+    "durable_batch_to_query_latency": {
+      "samples": 1000,
+      "unit": "seconds",
+      "p50": 0.025257415953092277,
+      "p95": 0.030502206995151937,
+      "p99": 0.03318865300389007,
+      "max": 0.03579567797714844
+    },
+    "process_peak_rss": {
+      "bytes": 420724736,
+      "method": "/proc/self/status VmHWM; whole benchmark process, excludes child writer"
+    },
+    "cached_reopen_stats": {
+      "cache": {
+        "bytes": 13417340,
+        "log_offset": 9103336,
+        "status": "loaded"
+      },
+      "checkpoints": {
+        "benchmark": 99999
+      },
+      "cursor": "5de2ef1d-71b7-4178-91df-cedc80fcf232:e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93:116000",
+      "descriptor": {
+        "abi": 1,
+        "mergeable": true,
+        "name": "metrics",
+        "state_version": "1",
+        "version": "1"
+      },
+      "documents": 100000,
+      "generation": "5de2ef1d-71b7-4178-91df-cedc80fcf232",
+      "groups": 16,
+      "log": {
+        "batches": 1000,
+        "bytes": 9103336,
+        "format": 2,
+        "read_only": false,
+        "recovered_tail_bytes": 0,
+        "writer_poisoned": false
+      },
+      "module_sha256": "e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93",
+      "replay": {
+        "batches": 0,
+        "documents": 0
+      },
+      "replay_batches": 0,
+      "replay_documents": 0,
+      "sequence": 116000,
+      "storage": "append-only-log"
+    },
+    "suffix_reopen_stats": {
+      "cache": {
+        "bytes": 13417340,
+        "log_offset": 9103336,
+        "status": "loaded"
+      },
+      "checkpoints": {
+        "benchmark": 100019
+      },
+      "cursor": "5de2ef1d-71b7-4178-91df-cedc80fcf232:e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93:116036",
+      "descriptor": {
+        "abi": 1,
+        "mergeable": true,
+        "name": "metrics",
+        "state_version": "1",
+        "version": "1"
+      },
+      "documents": 100020,
+      "generation": "5de2ef1d-71b7-4178-91df-cedc80fcf232",
+      "groups": 16,
+      "log": {
+        "batches": 1001,
+        "bytes": 9105251,
+        "format": 2,
+        "read_only": false,
+        "recovered_tail_bytes": 0,
+        "writer_poisoned": false
+      },
+      "module_sha256": "e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93",
+      "replay": {
+        "batches": 1,
+        "documents": 20
+      },
+      "replay_batches": 1,
+      "replay_documents": 20,
+      "sequence": 116036,
+      "storage": "append-only-log"
+    },
+    "missing_cache_stats": {
+      "cache": {
+        "bytes": 0,
+        "log_offset": 0,
+        "status": "missing"
+      },
+      "checkpoints": {
+        "benchmark": 100019
+      },
+      "cursor": "8ded4a76-3d39-47ce-8197-044d969a4146:e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93:116036",
+      "descriptor": {
+        "abi": 1,
+        "mergeable": true,
+        "name": "metrics",
+        "state_version": "1",
+        "version": "1"
+      },
+      "documents": 100020,
+      "generation": "8ded4a76-3d39-47ce-8197-044d969a4146",
+      "groups": 16,
+      "log": {
+        "batches": 1001,
+        "bytes": 9105251,
+        "format": 2,
+        "read_only": false,
+        "recovered_tail_bytes": 0,
+        "writer_poisoned": false
+      },
+      "module_sha256": "e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93",
+      "replay": {
+        "batches": 1001,
+        "documents": 100020
+      },
+      "replay_batches": 1001,
+      "replay_documents": 100020,
+      "sequence": 116036,
+      "storage": "append-only-log"
+    },
+    "verified_rows": 16,
+    "immutable_log_sha256": "8df83e940976608d692d860b4e3329f39bf87ad61a53ae54611a03293414d9d7",
+    "storage_bytes": {
+      "metrics.fold.cache": 13422291,
+      "metrics.fold": 9105251,
+      "metrics.fold.lock": 9
+    }
+  }
+}
