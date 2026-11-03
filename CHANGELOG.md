@@ -2,8 +2,8 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.2.0. GitHub release notes and distribution
-receipts are linked from each release.
+before moving existing databases to 0.2.0. Each version links its GitHub release;
+the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
 
