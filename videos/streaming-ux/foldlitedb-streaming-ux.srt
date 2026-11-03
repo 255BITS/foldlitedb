@@ -1,0 +1,283 @@
+1
+00:00:00,650 --> 00:00:03,309
+A dashboard should feel like a live instrument.
+
+2
+00:00:03,429 --> 00:00:09,373
+A new observation arrives, the right number changes, and the person using it keeps their
+place.
+
+3
+00:00:09,493 --> 00:00:18,131
+Foldlite D B gives you the building blocks for that experience: immutable documents,
+incrementally maintained views, and cursor based updates.
+
+4
+00:00:18,251 --> 00:00:22,918
+Let's look at the engineering underneath, starting with a quick map reduce refresher.
+
+5
+00:00:24,488 --> 00:00:27,472
+Think of each document as an observation you keep.
+
+6
+00:00:27,592 --> 00:00:35,661
+The native Rust engine validates a batch, computes its view changes, then appends and
+syncs the complete batch before acknowledging it.
+
+7
+00:00:35,781 --> 00:00:37,139
+Documents are immutable.
+
+8
+00:00:37,259 --> 00:00:41,009
+Indexes, reduced state, and change history are derived.
+
+9
+00:00:41,129 --> 00:00:48,327
+That separation is useful: the facts outlive any particular interpretation, and a broken
+cache can be reconstructed.
+
+10
+00:00:49,897 --> 00:00:54,890
+Map turns a document into zero or more key and value contributions.
+
+11
+00:00:55,010 --> 00:01:01,790
+Here, three latency observations emit the same key, with values forty two, twelve, and
+six.
+
+12
+00:01:01,910 --> 00:01:05,033
+The host groups those contributions by key.
+
+13
+00:01:05,153 --> 00:01:12,490
+Reduce folds them into explicit state: count three, sum sixty, minimum six, maximum forty
+two.
+
+14
+00:01:12,610 --> 00:01:17,161
+Finalize derives the public result, including a mean of twenty.
+
+15
+00:01:17,281 --> 00:01:19,046
+That's the bundled metrics view.
+
+16
+00:01:20,616 --> 00:01:24,111
+Now another latency observation arrives: eighteen.
+
+17
+00:01:24,231 --> 00:01:30,349
+The engine maps the new document and adds its contribution to the existing latency state.
+
+18
+00:01:30,469 --> 00:01:35,821
+Count becomes four, sum becomes seventy eight, and the mean becomes nineteen point five.
+
+19
+00:01:35,941 --> 00:01:38,670
+The unrelated checkout group keeps its result.
+
+20
+00:01:38,790 --> 00:01:45,500
+You're maintaining an answer as observations arrive, without replaying all previous
+observations for every update.
+
+21
+00:01:47,070 --> 00:01:51,796
+For a native view consumer, start with a snapshot and keep its cursor.
+
+22
+00:01:51,916 --> 00:01:57,686
+Drain all snapshot pages against that same snapshot, then ask for changes after the
+cursor.
+
+23
+00:01:57,806 --> 00:02:01,010
+Change rows contain complete resulting key states.
+
+24
+00:02:01,130 --> 00:02:08,723
+Replace each affected key in your application state, drain the change pages, and save the
+resulting state together with its cursor.
+
+25
+00:02:08,843 --> 00:02:13,998
+Your application chooses the network transport; a cursor alone is not a subscription.
+
+26
+00:02:15,568 --> 00:02:19,701
+Here's a working example with a different placement of the same computation.
+
+27
+00:02:19,821 --> 00:02:23,536
+A local application streams documents over server sent events.
+
+28
+00:02:23,656 --> 00:02:31,841
+The browser ingests them into Foldlite's worker, runs the actual metrics WebAssembly
+module, and applies changed rows by key.
+
+29
+00:02:31,961 --> 00:02:35,189
+Watch latency update while checkout stays put.
+
+30
+00:02:35,309 --> 00:02:39,233
+Pause the connection, let more facts arrive, then reconnect.
+
+31
+00:02:39,353 --> 00:02:42,743
+The browser catches up from its last applied document cursor.
+
+32
+00:02:44,313 --> 00:02:47,993
+Reliable streaming needs an explicit recovery story.
+
+33
+00:02:48,113 --> 00:02:55,730
+Register a subscriber before capturing its replay watermark, then replay the missing
+prefix before following live updates.
+
+34
+00:02:55,850 --> 00:03:01,655
+Foldlite's stream helper skips queued duplicates and uses bounded subscriber queues.
+
+35
+00:03:01,775 --> 00:03:03,946
+Overflow produces a gap event.
+
+36
+00:03:04,066 --> 00:03:09,104
+Reconnect from the last applied stream cursor, or bootstrap again when required.
+
+37
+00:03:09,224 --> 00:03:12,823
+Keep document stream cursors separate from view cursors.
+
+38
+00:03:12,943 --> 00:03:18,354
+After a native rebuild, expired view cursors require a fresh snapshot.
+
+39
+00:03:19,924 --> 00:03:22,710
+The portable part is especially interesting.
+
+40
+00:03:22,830 --> 00:03:27,486
+Write map and reduce in AssemblyScript and compile one WebAssembly module.
+
+41
+00:03:27,606 --> 00:03:32,145
+Those exact bytes run inside the native Rust engine and a browser worker.
+
+42
+00:03:32,265 --> 00:03:36,421
+Inputs and state are explicit, and the view must be deterministic.
+
+43
+00:03:36,541 --> 00:03:40,059
+The worker keeps computation away from the page's main thread.
+
+44
+00:03:40,179 --> 00:03:45,845
+The browser host owns in memory storage; it does not run the Rust durable log engine.
+
+45
+00:03:47,415 --> 00:03:49,749
+A native checkpoint accelerates recovery.
+
+46
+00:03:49,869 --> 00:03:55,140
+Its identity includes the exact module digest and a verified log prefix.
+
+47
+00:03:55,260 --> 00:04:01,738
+Reopen verifies the log, loads a valid cache, and computes the uncached suffix.
+
+48
+00:04:01,858 --> 00:04:08,777
+Lose the cache, or change the module bytes, and the engine rebuilds derived state from the
+original batches.
+
+49
+00:04:08,897 --> 00:04:14,459
+Preserve the document log and exact view artifact to reproduce an interpretation.
+
+50
+00:04:14,579 --> 00:04:19,281
+Stable document identities also make identical ingestion retries a no op.
+
+51
+00:04:20,851 --> 00:04:22,569
+You can model more than metrics.
+
+52
+00:04:22,689 --> 00:04:31,338
+The bundled catalogue view folds item events in ingestion order: add an item, rename it,
+then remove it from the result with a deletion event.
+
+53
+00:04:31,458 --> 00:04:33,873
+The source observations remain intact.
+
+54
+00:04:33,993 --> 00:04:37,581
+This fold is order sensitive, so it is not mergeable.
+
+55
+00:04:37,701 --> 00:04:42,391
+Implement merge only when independent states really can combine correctly.
+
+56
+00:04:42,511 --> 00:04:48,212
+Timestamps do not reorder your events; the application chooses the domain order before
+ingestion.
+
+57
+00:04:49,782 --> 00:04:51,813
+The current design has clear limits.
+
+58
+00:04:51,933 --> 00:04:55,486
+One native database holds one view and has one active owner.
+
+59
+00:04:55,606 --> 00:04:58,729
+Host memory grows with documents, groups, and history.
+
+60
+00:04:58,849 --> 00:05:02,785
+Browser storage is in memory, so export before reload.
+
+61
+00:05:02,905 --> 00:05:07,746
+There is no built in replication or automatic multi client synchronization.
+
+62
+00:05:07,866 --> 00:05:11,338
+Your application owns the transport and bootstrap policy.
+
+63
+00:05:11,458 --> 00:05:18,424
+Those boundaries help you judge where this fits, without assuming distributed system
+features or unmeasured performance.
+
+64
+00:05:19,994 --> 00:05:25,799
+The compelling idea is a short, inspectable path from an accepted fact to a changed pixel.
+
+65
+00:05:25,919 --> 00:05:31,898
+Keep observations, maintain the view, apply updates by key, and make recovery deliberate.
+
+66
+00:05:32,018 --> 00:05:37,985
+That is a strong foundation for telemetry dashboards, activity feeds, and evolving
+catalogues.
+
+67
+00:05:38,105 --> 00:05:42,970
+Explore the playground, read the design, or run the demo included with this video.

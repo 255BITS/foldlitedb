@@ -1,0 +1,74 @@
+[
+  {
+    "id": "hook",
+    "label": "THE USER EXPERIENCE",
+    "title": "Make the UI follow the facts.",
+    "narration": "A dashboard should feel like a live instrument. A new observation arrives, the right number changes, and the person using it keeps their place. Foldlite D B gives you the building blocks for that experience: immutable documents, incrementally maintained views, and cursor based updates. Let's look at the engineering underneath, starting with a quick map reduce refresher."
+  },
+  {
+    "id": "facts",
+    "label": "01 / THE MODEL",
+    "title": "Keep facts. Derive the interface.",
+    "narration": "Think of each document as an observation you keep. The native Rust engine validates a batch, computes its view changes, then appends and syncs the complete batch before acknowledging it. Documents are immutable. Indexes, reduced state, and change history are derived. That separation is useful: the facts outlive any particular interpretation, and a broken cache can be reconstructed."
+  },
+  {
+    "id": "mapreduce",
+    "label": "02 / MAP, GROUP, REDUCE",
+    "title": "A refresher in three observations.",
+    "narration": "Map turns a document into zero or more key and value contributions. Here, three latency observations emit the same key, with values forty two, twelve, and six. The host groups those contributions by key. Reduce folds them into explicit state: count three, sum sixty, minimum six, maximum forty two. Finalize derives the public result, including a mean of twenty. That's the bundled metrics view."
+  },
+  {
+    "id": "incremental",
+    "label": "03 / INCREMENTAL COMPUTATION",
+    "title": "New fact. Existing state. New result.",
+    "narration": "Now another latency observation arrives: eighteen. The engine maps the new document and adds its contribution to the existing latency state. Count becomes four, sum becomes seventy eight, and the mean becomes nineteen point five. The unrelated checkout group keeps its result. You're maintaining an answer as observations arrive, without replaying all previous observations for every update."
+  },
+  {
+    "id": "protocol",
+    "label": "04 / FROM VIEWS TO PIXELS",
+    "title": "Snapshot. Cursor. Changed keys.",
+    "narration": "For a native view consumer, start with a snapshot and keep its cursor. Drain all snapshot pages against that same snapshot, then ask for changes after the cursor. Change rows contain complete resulting key states. Replace each affected key in your application state, drain the change pages, and save the resulting state together with its cursor. Your application chooses the network transport; a cursor alone is not a subscription."
+  },
+  {
+    "id": "demo",
+    "label": "05 / WORKING BROWSER DEMO",
+    "title": "The page stays put. The data moves.",
+    "narration": "Here's a working example with a different placement of the same computation. A local application streams documents over server sent events. The browser ingests them into Foldlite's worker, runs the actual metrics WebAssembly module, and applies changed rows by key. Watch latency update while checkout stays put. Pause the connection, let more facts arrive, then reconnect. The browser catches up from its last applied document cursor."
+  },
+  {
+    "id": "recovery",
+    "label": "06 / CORRECTNESS UNDER INTERRUPTION",
+    "title": "Recovery is part of the UX.",
+    "narration": "Reliable streaming needs an explicit recovery story. Register a subscriber before capturing its replay watermark, then replay the missing prefix before following live updates. Foldlite's stream helper skips queued duplicates and uses bounded subscriber queues. Overflow produces a gap event. Reconnect from the last applied stream cursor, or bootstrap again when required. Keep document stream cursors separate from view cursors. After a native rebuild, expired view cursors require a fresh snapshot."
+  },
+  {
+    "id": "portable",
+    "label": "07 / PORTABLE COMPUTATION",
+    "title": "One view module. Two hosts.",
+    "narration": "The portable part is especially interesting. Write map and reduce in AssemblyScript and compile one WebAssembly module. Those exact bytes run inside the native Rust engine and a browser worker. Inputs and state are explicit, and the view must be deterministic. The worker keeps computation away from the page's main thread. The browser host owns in memory storage; it does not run the Rust durable log engine."
+  },
+  {
+    "id": "rebuild",
+    "label": "08 / RECONSTRUCTIBILITY",
+    "title": "A cache is an accelerator.",
+    "narration": "A native checkpoint accelerates recovery. Its identity includes the exact module digest and a verified log prefix. Reopen verifies the log, loads a valid cache, and computes the uncached suffix. Lose the cache, or change the module bytes, and the engine rebuilds derived state from the original batches. Preserve the document log and exact view artifact to reproduce an interpretation. Stable document identities also make identical ingestion retries a no op."
+  },
+  {
+    "id": "ordered",
+    "label": "09 / BEYOND SUMS AND AVERAGES",
+    "title": "Fold an item’s lifecycle.",
+    "narration": "You can model more than metrics. The bundled catalogue view folds item events in ingestion order: add an item, rename it, then remove it from the result with a deletion event. The source observations remain intact. This fold is order sensitive, so it is not mergeable. Implement merge only when independent states really can combine correctly. Timestamps do not reorder your events; the application chooses the domain order before ingestion."
+  },
+  {
+    "id": "boundaries",
+    "label": "10 / THE ENGINEERING TRADEOFF",
+    "title": "Small surface. Explicit boundaries.",
+    "narration": "The current design has clear limits. One native database holds one view and has one active owner. Host memory grows with documents, groups, and history. Browser storage is in memory, so export before reload. There is no built in replication or automatic multi client synchronization. Your application owns the transport and bootstrap policy. Those boundaries help you judge where this fits, without assuming distributed system features or unmeasured performance."
+  },
+  {
+    "id": "outro",
+    "label": "BUILD SOMETHING THAT FEELS LIVE",
+    "title": "From facts to a living interface.",
+    "narration": "The compelling idea is a short, inspectable path from an accepted fact to a changed pixel. Keep observations, maintain the view, apply updates by key, and make recovery deliberate. That is a strong foundation for telemetry dashboards, activity feeds, and evolving catalogues. Explore the playground, read the design, or run the demo included with this video."
+  }
+]
