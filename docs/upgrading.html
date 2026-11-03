@@ -45,7 +45,7 @@ if destination.exists():
 
 Database.migrate(source, destination)</code></pre>
 <p>Both paths must be persistent files in existing parent directories. The destination must not exist and must differ from the source. Primary filenames ending in <code>.cache</code> or <code>.lock</code>, or containing <code>.cache.</code>, are reserved case-insensitively; <code>metrics-v2.fold</code> is suitable.</p>
-<p>Migration verifies the source, preserves document IDs, sources, positions, order, and original batch boundaries, and leaves source bytes unchanged. It refuses an active owner or an existing destination and removes a partial new destination if copying fails. It does not copy old cursor generations or transplant caches. Ordinary opens reject reserved legacy primary names; explicit migration can copy such an old source into a permitted destination.</p>
+<p>Migration verifies the source, preserves document IDs, sources, positions, order, and original batch boundaries, and leaves source bytes unchanged. It refuses an active owner or an existing destination. If copying fails, it removes its partial destination when possible and reports cleanup failures; inspect any remaining destination before retrying. It does not copy old cursor generations or transplant caches. Ordinary opens reject reserved legacy primary names; explicit migration can copy such an old source into a permitted destination.</p>
 
 <h2 id="verify">5. Compare documents, results, and rebuilt results</h2>
 <p>With writers still stopped, compare resolved documents and view output under the same computation. The verifier streams through bounded pages and excludes database-local cursors and row sequence metadata from the comparison.</p>
