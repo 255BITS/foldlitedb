@@ -225,7 +225,13 @@ fn incomplete_final_frame_header_and_payload_are_recovered_but_corruption_is_not
     add(&mut engine, "one", 1);
     drop(engine);
     let original = fs::read(&path).unwrap();
-    for fragment in [b"BA".to_vec(), original[56..original.len() - 1].to_vec()] {
+    let mut digest = Sha256::new();
+    digest.update(Sha256::digest(&original[..56]));
+    digest.update(&original[56..]);
+    let prefix: [u8; 32] = digest.finalize().into();
+    let mut interrupted = original[56..original.len() - 1].to_vec();
+    interrupted[52..84].copy_from_slice(&prefix);
+    for fragment in [b"BA".to_vec(), interrupted] {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(&fragment).unwrap();
         file.sync_all().unwrap();
@@ -423,11 +429,15 @@ fn poisoned_writer_recovers_by_close_reopen_and_retry_with_explicit_ids() {
         .unwrap()
         .write_all(b"B")
         .unwrap();
-    let retry = json!({"op":"ingest","documents":[{"id":"two","payload":{"metric":"x","value":3}}]});
+    let retry =
+        json!({"op":"ingest","documents":[{"id":"two","payload":{"metric":"x","value":3}}]});
     assert!(engine.execute(retry.clone()).is_err());
     assert!(engine.writer_poisoned());
     // Reads keep serving the last acknowledged state.
-    assert_eq!(call(&mut engine, json!({"op":"query"}))["rows"][0]["result"]["sum"], 5);
+    assert_eq!(
+        call(&mut engine, json!({"op":"query"}))["rows"][0]["result"]["sum"],
+        5
+    );
     // Close reports the checkpoint failure but still releases ownership.
     assert!(engine
         .execute(json!({"op":"close"}))
@@ -449,4 +459,300 @@ fn poisoned_writer_recovers_by_close_reopen_and_retry_with_explicit_ids() {
         8
     );
     drop(engine);
+}
+
+#[test]
+fn reset_keeps_ownership_and_validates_the_module_before_mutating_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reset.fold");
+    let mut owner = open(&path);
+    add(&mut owner, "one", 1);
+    assert!(Engine::open_with_options(path.to_str().unwrap(), METRICS, true).is_err());
+    add(&mut owner, "two", 2);
+    drop(owner);
+    let original = fs::read(&path).unwrap();
+    assert!(Engine::open_with_options(path.to_str().unwrap(), b"invalid", true).is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let mut reset = Engine::open_with_options(path.to_str().unwrap(), METRICS, true).unwrap();
+    assert_eq!(call(&mut reset, json!({"op":"stats"}))["documents"], 0);
+    add(&mut reset, "replacement", 3);
+    assert!(Engine::open_with_options(path.to_str().unwrap(), METRICS, true).is_err());
+    drop(reset);
+    let mut reopened = open(&path);
+    assert_eq!(call(&mut reopened, json!({"op":"stats"}))["documents"], 1);
+    assert_eq!(
+        call(&mut reopened, json!({"op":"query"}))["rows"][0]["result"]["sum"],
+        3
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reset_rejects_live_owners_through_hardlinks_and_symbolic_aliases() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("original.fold");
+    let mut owner = open(&path);
+    add(&mut owner, "one", 7);
+    let hard = directory.path().join("hard.fold");
+    let symbolic = directory.path().join("symbolic.fold");
+    fs::hard_link(&path, &hard).unwrap();
+    std::os::unix::fs::symlink(&path, &symbolic).unwrap();
+    for alias in [&hard, &symbolic] {
+        assert!(Engine::open_with_options(alias.to_str().unwrap(), METRICS, true).is_err());
+    }
+    assert_eq!(call(&mut owner, json!({"op":"stats"}))["documents"], 1);
+}
+
+#[test]
+fn sidecar_namespace_cannot_be_opened_as_a_primary_in_either_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data");
+    for suffix in [".cache", ".lock", ".cache.anything.tmp", ".CACHE"] {
+        let reserved = sibling(&path, suffix);
+        assert!(Engine::open(reserved.to_str().unwrap(), METRICS)
+            .err()
+            .unwrap()
+            .contains("reserved"));
+        assert!(!reserved.exists());
+    }
+    let mut owner = open(&path);
+    add(&mut owner, "one", 3);
+    for suffix in [".cache", ".lock"] {
+        assert!(Engine::open(sibling(&path, suffix).to_str().unwrap(), METRICS).is_err());
+    }
+    call(&mut owner, json!({"op":"checkpoint"}));
+    add(&mut owner, "two", 4);
+    drop(owner);
+    let mut reopened = open(&path);
+    assert_eq!(
+        call(&mut reopened, json!({"op":"query"}))["rows"][0]["result"]["sum"],
+        7
+    );
+}
+
+#[test]
+fn an_existing_log_or_unrelated_file_in_a_sidecar_is_not_overwritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let other = directory.path().join("other.fold");
+    let mut other_owner = open(&other);
+    add(&mut other_owner, "one", 11);
+    drop(other_owner);
+    let source = fs::read(&other).unwrap();
+    let path = directory.path().join("data");
+    let cache = sibling(&path, ".cache");
+    fs::write(&cache, &source).unwrap();
+    assert!(Engine::open(path.to_str().unwrap(), METRICS)
+        .err()
+        .unwrap()
+        .contains("authoritative"));
+    assert_eq!(fs::read(&cache).unwrap(), source);
+    assert!(!path.exists());
+    fs::remove_file(&cache).unwrap();
+
+    let mut owner = open(&path);
+    add(&mut owner, "two", 13);
+    let unrelated = b"a separate file whose bytes must survive";
+    fs::write(&cache, unrelated).unwrap();
+    call(&mut owner, json!({"op":"checkpoint"}));
+    let preserved = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("data.cache.unrecognized.")
+        })
+        .unwrap();
+    assert_eq!(fs::read(preserved).unwrap(), unrelated);
+    assert_eq!(&fs::read(&cache).unwrap()[..8], b"FOLDCAC1");
+
+    let lock_path = directory.path().join("unrelated.lock");
+    fs::write(&lock_path, unrelated).unwrap();
+    assert!(Engine::open(
+        directory.path().join("unrelated").to_str().unwrap(),
+        METRICS
+    )
+    .is_err());
+    assert_eq!(fs::read(&lock_path).unwrap(), unrelated);
+}
+
+#[cfg(unix)]
+#[test]
+fn sidecar_symbolic_links_cannot_redirect_checkpoint_or_ownership_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data");
+    let victim = directory.path().join("victim");
+    fs::write(&victim, b"keep").unwrap();
+    std::os::unix::fs::symlink(&victim, sibling(&path, ".cache")).unwrap();
+    assert!(Engine::open(path.to_str().unwrap(), METRICS).is_err());
+    fs::remove_file(sibling(&path, ".cache")).unwrap();
+    // The first failed open established a stable lock. Replacing it is an
+    // external operation and must be rejected by the next open as well.
+    fs::remove_file(sibling(&path, ".lock")).unwrap();
+    std::os::unix::fs::symlink(&victim, sibling(&path, ".lock")).unwrap();
+    assert!(Engine::open(path.to_str().unwrap(), METRICS).is_err());
+    assert_eq!(fs::read(&victim).unwrap(), b"keep");
+}
+
+fn frames(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut offset = 56;
+    let mut result = Vec::new();
+    while offset < bytes.len() {
+        let size = u64::from_le_bytes(bytes[offset + 4..offset + 12].try_into().unwrap()) as usize;
+        result.push(&bytes[offset..offset + 84 + size]);
+        offset += 84 + size;
+    }
+    result
+}
+
+#[test]
+fn persisted_predecessors_detect_whole_frame_omission_reorder_and_cross_log_splices() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("events.fold");
+    let mut owner = open(&path);
+    for (id, value) in [("one", 1), ("two", 10), ("three", 100)] {
+        add(&mut owner, id, value);
+    }
+    drop(owner);
+    let original = fs::read(&path).unwrap();
+    assert_eq!(&original[..8], b"FOLDLOG2");
+    let original_frames = frames(&original);
+    let other_path = directory.path().join("other.fold");
+    let mut other = open(&other_path);
+    add(&mut other, "foreign", 999);
+    drop(other);
+    let foreign_bytes = fs::read(other_path).unwrap();
+    let foreign_frames = frames(&foreign_bytes);
+    for replacement in [
+        [&original[..56], original_frames[0], original_frames[2]].concat(),
+        // Even an unfinished tail must not hide a provably wrong predecessor.
+        [
+            &original[..56],
+            original_frames[0],
+            &original_frames[2][..84],
+        ]
+        .concat(),
+        [
+            &original[..56],
+            original_frames[0],
+            &original_frames[2][..68],
+        ]
+        .concat(),
+        [
+            &original[..56],
+            original_frames[1],
+            original_frames[0],
+            original_frames[2],
+        ]
+        .concat(),
+        [
+            &original[..56],
+            original_frames[0],
+            foreign_frames[0],
+            original_frames[2],
+        ]
+        .concat(),
+    ] {
+        fs::write(&path, &replacement).unwrap();
+        assert!(Engine::open(path.to_str().unwrap(), METRICS)
+            .err()
+            .unwrap()
+            .contains("predecessor"));
+        assert_eq!(fs::read(&path).unwrap(), replacement);
+    }
+}
+
+fn legacy_log(bytes: &[u8]) -> Vec<u8> {
+    let mut header = b"FOLDLOG1".to_vec();
+    header.extend(&bytes[8..24]);
+    header.extend(Sha256::digest(&header));
+    for frame in frames(bytes) {
+        header.extend(b"BAT1");
+        header.extend(&frame[4..52]);
+        header.extend(&frame[84..]);
+    }
+    header
+}
+
+#[test]
+fn legacy_logs_are_read_only_and_copy_migration_preserves_batches_and_source_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy.fold");
+    let mut owner = open(&path);
+    call(
+        &mut owner,
+        json!({"op":"ingest","documents":[
+            {"id":"one","payload":{"metric":"x","value":1}},
+            {"id":"two","payload":{"metric":"x","value":2}}
+        ]}),
+    );
+    add(&mut owner, "three", 3);
+    let expected = call(&mut owner, json!({"op":"query"}))["rows"].clone();
+    drop(owner);
+    let bytes = legacy_log(&fs::read(&path).unwrap());
+    fs::write(&path, &bytes).unwrap();
+    let mut legacy = open(&path);
+    let stats = call(&mut legacy, json!({"op":"stats"}));
+    assert_eq!(stats["log"]["read_only"], true);
+    assert_eq!(stats["log"]["format"], 1);
+    assert!(!legacy.is_writable());
+    assert_eq!(call(&mut legacy, json!({"op":"query"}))["rows"], expected);
+    assert!(legacy
+        .execute(json!({"op":"ingest","documents":[{"payload":null}]}))
+        .unwrap_err()
+        .contains("read-only"));
+    assert!(!legacy.writer_poisoned());
+    assert!(Engine::migrate_log(
+        path.to_str().unwrap(),
+        directory.path().join("blocked.fold").to_str().unwrap()
+    )
+    .is_err());
+    drop(legacy);
+    let destination = directory.path().join("migrated.fold");
+    Engine::migrate_log(path.to_str().unwrap(), destination.to_str().unwrap()).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let mut migrated = open(&destination);
+    assert!(migrated.is_writable());
+    let stats = call(&mut migrated, json!({"op":"stats"}));
+    assert_eq!(stats["log"]["batches"], 2);
+    assert_eq!(stats["log"]["format"], 2);
+    assert_eq!(call(&mut migrated, json!({"op":"query"}))["rows"], expected);
+    add(&mut migrated, "four", 4);
+    drop(migrated);
+    let original_destination = fs::read(&destination).unwrap();
+    assert!(Engine::migrate_log(path.to_str().unwrap(), destination.to_str().unwrap()).is_err());
+    assert_eq!(fs::read(destination).unwrap(), original_destination);
+    // Names now reserved for sidecars remain recoverable by explicit migration.
+    let reserved_source = directory.path().join("old-database.cache");
+    fs::write(&reserved_source, &bytes).unwrap();
+    let rescued = directory.path().join("rescued.fold");
+    Engine::migrate_log(reserved_source.to_str().unwrap(), rescued.to_str().unwrap()).unwrap();
+    assert_eq!(fs::read(reserved_source).unwrap(), bytes);
+    assert_eq!(
+        call(&mut open(&rescued), json!({"op":"stats"}))["documents"],
+        3
+    );
+}
+
+#[test]
+fn migration_never_creates_missing_sources_or_modifies_incomplete_source_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.fold");
+    let destination = directory.path().join("destination.fold");
+    assert!(Engine::migrate_log(missing.to_str().unwrap(), destination.to_str().unwrap()).is_err());
+    assert!(!missing.exists() && !destination.exists());
+    let mut owner = open(&missing);
+    add(&mut owner, "one", 1);
+    drop(owner);
+    let mut bytes = fs::read(&missing).unwrap();
+    bytes.extend(b"BA");
+    fs::write(&missing, &bytes).unwrap();
+    assert!(
+        Engine::migrate_log(missing.to_str().unwrap(), destination.to_str().unwrap())
+            .unwrap_err()
+            .contains("incomplete tail")
+    );
+    assert_eq!(fs::read(&missing).unwrap(), bytes);
+    assert!(!destination.exists());
 }
