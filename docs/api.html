@@ -128,11 +128,14 @@ with Database(":memory:") as automatic:
 
 <h2 id="reads">Rows, snapshots, and changes</h2>
 <span id="portable-reads"></span>
-<pre class="signature"><code>db.rows(*, key=&lt;omitted&gt;, limit=100) → iterator[Row]
-db.query(*, key=&lt;omitted&gt;, limit=100, cursor=None, after=None) → Snapshot
+<pre class="signature"><code>db.rows(*, key=&lt;omitted&gt;, start_key=&lt;omitted&gt;, end_key=&lt;omitted&gt;,
+        prefix=&lt;omitted&gt;, inclusive_start=True, inclusive_end=True, limit=100) → iterator[Row]
+db.query(*, key=&lt;omitted&gt;, start_key=&lt;omitted&gt;, end_key=&lt;omitted&gt;,
+         prefix=&lt;omitted&gt;, inclusive_start=True, inclusive_end=True,
+         limit=100, cursor=None, after=None) → Snapshot
 db.changes(*, since, limit=100) → ChangePage</code></pre>
-<p><code>rows</code> lazily follows snapshot pages, pinning the committed prefix on first iteration. <code>limit</code> is a page size from 1 through 1024, not a total row limit. Omit <code>key</code> for every group or supply any JSON key, including null, for exact filtering. Rows follow canonical JSON lexical order consistent with the browser. No operation lock spans a yield into application code.</p>
-<p>A <code>Row</code> has <code>key</code>, reducer <code>state</code>, finalized <code>result</code>, and committed <code>sequence</code>. A <code>Snapshot</code> has <code>rows</code>, <code>cursor</code>, <code>after</code>, and <code>complete</code>. Continue with both returned cursor and after token, preserving the key filter. New ingestion does not change the pinned snapshot.</p>
+<p><code>rows</code> lazily follows snapshot pages, pinning the committed prefix on first iteration. <code>limit</code> is a page size from 1 through 1024, not a total row limit. Omit all selectors for every group or supply any JSON <code>key</code>, including null, for exact filtering. No operation lock spans a yield into application code.</p>
+<p>A <code>Row</code> has <code>key</code>, reducer <code>state</code>, finalized <code>result</code>, and committed <code>sequence</code>. A <code>Snapshot</code> has <code>rows</code>, <code>cursor</code>, <code>after</code>, and <code>complete</code>. Continue with both returned cursor and after token, preserving every selector and inclusive flag. Page size may change. Changed selectors, another snapshot, and legacy query tokens fail explicitly. New ingestion does not change the pinned snapshot.</p>
 <pre data-run="python"><code>with Database(":memory:") as db:
     db.add_many([
         {"metric": "a", "value": 2},
@@ -151,6 +154,34 @@ db.changes(*, since, limit=100) → ChangePage</code></pre>
     assert changes.rows[0].result["mean"] == 3
     while not changes.complete:
         changes = db.changes(since=changes.cursor, limit=1)</code></pre>
+
+<h3 id="ranges">Range and prefix selection</h3>
+<p>Use exactly one selector mode: an exact <code>key</code>, a range with either or both of <code>start_key</code>/<code>end_key</code>, or a <code>prefix</code>. Combining modes raises <code>DatabaseError</code>. Range bounds are inclusive by default; set <code>inclusive_start=False</code> or <code>inclusive_end=False</code> to exclude an endpoint. These options must be booleans. Omitted bounds are open; an explicit <code>None</code> is a JSON null bound. If the start sorts after the end, the result is empty. Traversal is ascending.</p>
+<p>A string prefix matches strings beginning with its characters. An array prefix matches arrays beginning with the same complete elements, compared by JSON structure rather than text. It includes an array equal to the prefix. Nested elements must match completely: <code>["sales", [2026]]</code> does not prefix-match <code>["sales", [2026, 11]]</code>. Empty string and array prefixes match all strings and arrays respectively. Other prefix types are invalid. All views, including named Python callbacks, use these selectors; for example <code>db.query("sales", prefix=["alice"])</code>.</p>
+<p>Key order is <code>null &lt; false &lt; true &lt; numbers &lt; strings &lt; arrays &lt; objects</code>. Numbers compare numerically, so <code>2</code> precedes <code>10</code>. Strings compare by Unicode codepoint, independently of locale; this differs from CouchDB's ICU ordering. Arrays compare their elements recursively, then shorter arrays first when one is a complete prefix. Objects compare codepoint-sorted member names and each corresponding value recursively, then shorter equal member sequences first. Member insertion order does not affect equality or ordering.</p>
+<pre data-run="python"><code>from foldlitedb import OrderedFold, View
+
+sales = View(
+    "sales", version="1",
+    map=lambda document: [(
+        [document.payload["customer"], document.payload["day"]],
+        document.payload["amount"],
+    )],
+    reducer=OrderedFold(0, lambda total, amount: total + amount, version="1"),
+)
+with Database(":memory:", sales) as db:
+    db.add_many([
+        {"customer": "alice", "day": "2026-11-01", "amount": 10},
+        {"customer": "alice", "day": "2026-11-02", "amount": 20},
+        {"customer": "bob", "day": "2026-11-02", "amount": 30},
+    ])
+    assert [row.result for row in db.rows(prefix=["alice"], limit=1)] == [10, 20]
+    selected = db.query(start_key=["alice", "2026-11-01"],
+                        end_key=["alice", "2026-11-02"], inclusive_start=False)
+    assert [(row.key, row.result) for row in selected.rows] == [
+        (["alice", "2026-11-02"], 20),
+    ]</code></pre>
+<p>Range queries select existing per-key state and results; they do not re-reduce the selected keys, return raw map emissions, or implement CouchDB <code>group_level</code>. Include the dimensions you need in emitted keys. The native host seeks a derived ordered index; browser and callback hosts sort their in-memory groups. The document log and ingestion sequence order are unchanged.</p>
 <p><code>changes</code> returns committed group postimages after a snapshot or change cursor. <code>since=0</code> reads retained history from the start. A page has <code>rows</code>, continuation <code>cursor</code>, and <code>complete</code>; continue with that cursor. Repeated changes to a key in one batch coalesce. A page can split group updates from one batch. Zero-emission documents still advance progress.</p>
 <p>Cursors bind to the database generation and exact module. Checkpointed reopen can reuse them; rebuild, cache reconstruction, or module replacement expires them. A new database or browser worker cannot reuse another's cursor. There is no history compaction API.</p>
 
