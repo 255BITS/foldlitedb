@@ -33,7 +33,10 @@
 <a href="portable.html">Portable views</a>
 <a href="api.html">Python API</a>
 <a href="concepts.html">Documents and caches</a>
-<a href="releasing.html" aria-current="page">Releases</a></nav>
+<a href="upgrading.html">Upgrade guide</a>
+<a href="releasing.html" aria-current="page">Releases</a>
+      <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">Changelog <span aria-hidden="true">↗</span></a>
+    </nav>
     <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
@@ -51,6 +54,10 @@
 <tr><td>Environment</td><td><code>pypi</code></td></tr>
 </tbody></table>
 <p>The repository's <code>pypi</code> environment permits tags matching <code>v*</code>. The publishing job alone receives <code>id-token: write</code>. No stored PyPI password or API token is needed. A pending publisher creates the project on its first successful upload; see the <a href="https://docs.pypi.org/trusted-publishers/adding-a-project/">PyPI instructions</a>.</p>
+
+<h2 id="release-notes">Maintain the changelog and upgrade guide</h2>
+<p>Record changes in the canonical <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">CHANGELOG.md</a>. Before tagging, move the unreleased changes into a version section with its release link; confirm its UTC publication date against the published release. Preserve historical entries, and distinguish unpublished version preparations from published releases.</p>
+<p>When storage or API behavior changes, update the <a href="upgrading.html">upgrade guide</a> with executable migration examples, compatibility changes, verification, and rollback expectations. Link that guide from the release notes. The same changelog is linked from the repository and website; do not maintain a separate copy of its history.</p>
 
 <h2 id="checks">Release checks</h2>
 <p><code>release.yml</code> runs when a GitHub release is published. It requires the tag to equal <code>v</code> plus the version in <code>pyproject.toml</code>, and checks that the Python module and both Rust crates declare that same version. Every build checks out the resolved source commit.</p>
@@ -74,6 +81,7 @@ cd /tmp
 <p>On Windows, use the virtual environment's <code>Scripts\python.exe</code>. Retain the GitHub Actions run and artifact hashes as the release receipt.</p>
 </main>
     <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#publisher">Register the first publisher</a>
+<a href="#release-notes">Maintain the changelog and upgrade guide</a>
 <a href="#checks">Release checks</a>
 <a href="#publish">Publish 0.2.0</a>
 <a href="#verify">Verify the published package</a></aside>

@@ -33,7 +33,10 @@
 <a href="portable.html">Portable views</a>
 <a href="api.html">Python API</a>
 <a href="concepts.html">Documents and caches</a>
-<a href="releasing.html">Releases</a></nav>
+<a href="upgrading.html">Upgrade guide</a>
+<a href="releasing.html">Releases</a>
+      <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">Changelog <span aria-hidden="true">↗</span></a>
+    </nav>
     <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
@@ -44,6 +47,7 @@
 <div class="flow" aria-label="Immutable documents become mapped groups and rebuildable views"><div><strong>01 &nbsp; Append</strong><small>Immutable JSON documents</small></div><span aria-hidden="true">→</span><div><strong>02 &nbsp; Map</strong><small>Emit a key and contribution</small></div><span aria-hidden="true">→</span><div><strong>03 &nbsp; Fold</strong><small>Derive a rebuildable live view</small></div></div>
 
 <div class="note preview"><p><strong>Foldlite DB 0.2.0.</strong> Python 3.11+ is required. Native wheels are provided for Linux x86-64 and ARM64, macOS Intel and Apple Silicon, and Windows x86-64.</p></div>
+<p>Upgrading an existing database? Follow the <a href="upgrading.html">step-by-step upgrade guide</a>, and check the <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">consolidated changelog</a> for release history and compatibility changes.</p>
 
 <h2 id="install">Install</h2>
 <pre><code>python -m pip install foldlitedb==0.2.0</code></pre>

@@ -33,7 +33,10 @@
 <a href="portable.html">Portable views</a>
 <a href="api.html" aria-current="page">Python API</a>
 <a href="concepts.html">Documents and caches</a>
-<a href="releasing.html">Releases</a></nav>
+<a href="upgrading.html">Upgrade guide</a>
+<a href="releasing.html">Releases</a>
+      <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">Changelog <span aria-hidden="true">↗</span></a>
+    </nav>
     <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
@@ -93,6 +96,7 @@ Database.migrate(source, destination)</code></pre>
 <p>Use a context manager or <code>close()</code>. Clean close checkpoints persistent derived state and releases ownership. Closing is idempotent; later operations raise <code>DatabaseError</code>. <code>PortableDatabase</code> is an exact alias.</p>
 <p>Reopen validates the complete log and reuses a compatible cache, then replays any uncached suffix. A missing or invalid cache rebuilds. Different module bytes automatically rebuild the view from the same documents. Reconstruction creates a new cursor generation; a valid checkpoint preserves generation across reopen. Old external-database files are not this log format.</p>
 <p>New databases use <code>FOLDLOG2</code> frames with persisted predecessor hashes. Existing <code>FOLDLOG1</code> logs remain readable and exportable but reject new appends. Close their owner, then call <code>Database.migrate("old.fold", "new.fold")</code> to verify and copy their original batches into a new log. The source is unchanged; an existing destination is never replaced. Verify the new log with the intended view before retiring the source backup. Stats report <code>log.format</code> and <code>log.read_only</code>.</p>
+<p>The <a href="upgrading.html">upgrade guide</a> walks through backup, source inspection, migration, verification, cutover, rollback, and application compatibility checks.</p>
 <p>Primary filenames ending in <code>.cache</code> or <code>.lock</code>, or containing <code>.cache.</code>, are reserved for sidecars. Conflicting source logs or symbolic links at auxiliary paths cause an error. Unrecognized cache bytes are preserved under a unique <code>.cache.unrecognized.*</code> filename when replaced by a valid checkpoint.</p>
 <p><code>reset=True</code> is explicitly destructive. Native ownership locks remain held throughout reset; an active owner prevents it. Invalid modules are rejected before reset changes data. Reset I/O errors are reported and may leave an uncertain outcome. <code>generation</code> is an optional identity for an external source generation; a mismatch raises <code>GenerationMismatch</code>.</p>
 <pre data-run="python"><code>from foldlitedb import Database, View

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Upgrade 0.1.x document logs to 0.2.0 with backup, verified migration, cutover, rollback, and callback/browser compatibility steps.">
+  <meta name="color-scheme" content="light">
+  <title>Upgrade guide · Foldlite DB</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="Foldlite DB home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 5h22v7H12v6h12v7H5z" fill="currentColor"/><path d="m12 12 15-7v7z" fill="#81b697"/></svg>
+      <span>foldlite<span class="brand-db">db</span></span>
+    </a>
+    <span class="development-badge">Development preview</span>
+    <a class="source-link" href="https://github.com/255BITS/foldlitedb">Source <span aria-hidden="true">↗</span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  </header>
+  <aside class="sidebar" id="sidebar" aria-label="Documentation navigation">
+    <form class="search" role="search" action="api.html">
+      <label for="doc-search">Search documentation</label>
+      <input id="doc-search" type="search" placeholder="Find an API or concept…" autocomplete="off" aria-controls="search-results">
+      <div id="search-results" class="search-results" aria-live="polite" hidden></div>
+    </form>
+    <p class="nav-label">Documentation</p>
+    <nav><a href="index.html">Get started</a>
+<a href="playground.html">Browser playground</a>
+<a href="portable.html">Portable views</a>
+<a href="api.html">Python API</a>
+<a href="concepts.html">Documents and caches</a>
+<a href="upgrading.html" aria-current="page">Upgrade guide</a>
+<a href="releasing.html">Releases</a>
+      <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">Changelog <span aria-hidden="true">↗</span></a>
+    </nav>
+    <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
+  </aside>
+  <div class="page-layout">
+    <main id="content" tabindex="-1"><p class="eyebrow">Upgrade guide · 0.1.x to 0.2.0</p>
+<h1>Upgrade to Foldlite DB 0.2.0</h1>
+<p class="lead">Back up a closed source log, copy it into the new format, verify its documents and view, then move the application to the new filename. Keep the original until the cutover is verified.</p>
+<p>The <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">consolidated changelog</a> covers every published release. The <a href="https://github.com/255BITS/foldlitedb/releases/tag/v0.2.0">0.2.0 release</a> includes distribution hashes and validation receipts.</p>
+
+<h2 id="before-you-start">Before you start</h2>
+<p>This guide upgrades native <code>FOLDLOG1</code> document logs from 0.1.x to <code>FOLDLOG2</code>. New 0.2.0 databases already use the new format. Browser databases have no native log to migrate; see <a href="#browser">browser upgrades</a>. Compact external projection caches have a different source of truth; see <a href="#projections">external projections</a>.</p>
+<p>Use Python 3.11 or newer. Preserve the exact Wasm module, or Python callback code, versions, references, and other reproducible inputs needed by your view. Migration copies facts and batch boundaries; it does not change your computation or repair already incorrect application data. Plan new snapshot cursors for the migrated database.</p>
+
+<h2 id="backup">1. Stop writers and back up the source</h2>
+<ol>
+  <li>Stop producers, background imports, and consumers that hold the database open. Close its owner cleanly before copying files.</li>
+  <li>Copy the original document log to a separate backup location. Keep the view artifacts and reference inputs with that backup. Confirm the copied log exists and has the expected size or checksum.</li>
+  <li>Keep the original filename in place for comparison. Choose a different destination, such as <code>metrics-v2.fold</code>.</li>
+</ol>
+<p>If the old primary filename uses the newly reserved sidecar namespace, make an independent closed-log copy under a permitted name such as <code>metrics-original.fold</code> and use that copy as the source in steps 3–5. Keep the untouched original as well. This lets the new reader inspect and compare it without bypassing filename protection.</p>
+<p>The log contains the retained documents. Its <code>.cache</code> sibling is disposable; copying a cache alone is not a backup. Do not delete a live owner's <code>.lock</code> file. Do not use <code>reset=True</code> to upgrade: reset explicitly discards source documents.</p>
+
+<h2 id="install">2. Install 0.2.0 in a separate environment</h2>
+<pre><code>python -m venv .venv-upgrade
+. .venv-upgrade/bin/activate
+python -m pip install --only-binary=:all: foldlitedb==0.2.0
+python -c "from importlib.metadata import version; print(version('foldlitedb'))"</code></pre>
+<p>On Windows Command Prompt, activate with <code>.venv-upgrade\Scripts\activate.bat</code>. Matching wheels need no compiler. For other source-build environments, follow the <a href="index.html#install">installation prerequisites</a>. Keep the previous environment available until cutover is complete.</p>
+
+<h2 id="inspect">3. Inspect the closed log with its intended view</h2>
+<p>The Python snippets in steps 3–5 run in order in the same session or script, from the directory containing your log. This example uses bundled metrics. For a custom portable view, replace <code>View.bundled("metrics")</code> with your preserved module, for example <code>View("metrics-original.wasm")</code>. For ordinary callback views, pass your preserved callback definition.</p>
+<pre data-upgrade-step="inspect"><code>from pathlib import Path
+from foldlitedb import Database, View
+
+source = Path("metrics.fold")
+if not source.is_file():
+    raise FileNotFoundError(source)  # Avoid creating an empty database by mistake.
+
+view = View.bundled("metrics")
+with Database(source, view) as original:
+    log = original.stats()["log"]
+    print({"format": log["format"], "read_only": log["read_only"]})</code></pre>
+<p>A legacy log reports <code>format: 1</code> and <code>read_only: True</code>. Reads and export work; new appends fail with migration guidance. If it reports format 2, skip the copy migration: it already uses the current format. Opening may recover an interrupted final frame, which is why the raw closed-log backup comes first.</p>
+
+<h2 id="migrate">4. Copy into a new log</h2>
+<pre data-upgrade-step="migrate"><code>destination = Path("metrics-v2.fold")
+if destination.exists():
+    raise FileExistsError(destination)
+
+Database.migrate(source, destination)</code></pre>
+<p>Both paths must be persistent files in existing parent directories. The destination must not exist and must differ from the source. Primary filenames ending in <code>.cache</code> or <code>.lock</code>, or containing <code>.cache.</code>, are reserved case-insensitively; <code>metrics-v2.fold</code> is suitable.</p>
+<p>Migration verifies the source, preserves document IDs, sources, positions, order, and original batch boundaries, and leaves source bytes unchanged. It refuses an active owner or an existing destination. If copying fails, it removes its partial destination when possible and reports cleanup failures; inspect any remaining destination before retrying. It does not copy old cursor generations or transplant caches. Ordinary opens reject reserved legacy primary names; explicit migration can copy such an old source into a permitted destination.</p>
+
+<h2 id="verify">5. Compare documents, results, and rebuilt results</h2>
+<p>With writers still stopped, compare resolved documents and view output under the same computation. The verifier streams through bounded pages and excludes database-local cursors and row sequence metadata from the comparison.</p>
+<pre data-upgrade-step="verify"><code>from itertools import zip_longest
+
+def require_equal(left, right, label):
+    missing = object()
+    for number, (a, b) in enumerate(zip_longest(left, right, fillvalue=missing), 1):
+        if a != b:
+            raise RuntimeError(f"{label} differs at entry {number}")
+
+def view_values(database):
+    for row in database.rows():
+        yield row.key, row.state, row.result
+
+with Database(source, view) as original, Database(destination, view) as migrated:
+    require_equal(original.documents(), migrated.documents(), "Documents")
+    require_equal(view_values(original), view_values(migrated), "View")
+    migrated.rebuild()
+    require_equal(view_values(original), view_values(migrated), "Rebuilt view")
+    print("Verified", migrated.stats()["documents"], "documents")
+    print("Destination format:", migrated.stats()["log"]["format"])</code></pre>
+<p>Expected output names the same document count and destination format <code>2</code>. A mismatch stops the upgrade; keep both files and investigate the view artifacts or source data before resuming writes. A cache/checkpoint error reports accelerator failure and does not undo already committed log data.</p>
+
+<h2 id="cutover">6. Switch the application and replace cursors</h2>
+<ol>
+  <li>Configure the application to use <code>metrics-v2.fold</code> with its verified view and the 0.2.0 environment. Avoid renaming or mixing old sidecars into the new database.</li>
+  <li>Recreate application state from a fresh snapshot. Old cursors belong to the original database generation; portable change-feed consumers must resume from the new snapshot's cursor.</li>
+  <li>Resume one database owner and normal producers. Stable source IDs and positions still support identical retries.</li>
+  <li>Check the application’s expected results and writer health. Keep the original log, backup, and previous environment until the cutover is accepted.</li>
+</ol>
+
+<h2 id="compatibility">Application compatibility checks</h2>
+<table><thead><tr><th>Area</th><th>0.2.0 behavior and action</th></tr></thead><tbody>
+<tr><td>Callback reads</td><td>A primary callback supplies <code>query()</code>/<code>rows()</code>. Additional registered callbacks use <code>query(name)</code>. Snapshot pages are descriptor-bound; historical pages can replay original batches.</td></tr>
+<tr><td>Callback live feeds and preview</td><td>Primary callback <code>changes()</code>/<code>preview()</code> explicitly fail. Use fresh query snapshots, or inspect the mapper with a resolved <code>Document</code>. Portable Wasm views retain both operations.</td></tr>
+<tr><td>Callback code changes</td><td>Update the view/reducer version or references when behavior or captured inputs change. Ordinary callback caches then reconstruct from documents. Callbacks remain trusted deterministic Python.</td></tr>
+<tr><td>Metadata sources</td><td>Source names beginning <code>_</code> are retained metadata and do not map in either host. If older browser data used such names for observations, resolve that source policy before cutover; copying a log does not rename identities.</td></tr>
+<tr><td>Numbers</td><td>Unrepresentable integer inputs are rejected rather than rounded, a rule enforced natively since 0.1.4. Use strings for exact large identifiers.</td></tr>
+<tr><td>Authoring tools</td><td>Use the <a href="portable.html#authoring">documented Node runtime range</a> to rebuild modules. Installing a matching Python wheel needs no Node runtime.</td></tr>
+</tbody></table>
+
+<h2 id="projections">External projection caches</h2>
+<p><code>materialize_jsonl_view</code> keeps compact cursor/state documents; the external stream is authoritative and its raw history is not retained in that cache. Do not treat that file as a replacement for the external source.</p>
+<p>Preserve the external stream, generation identity, callback code, and references. Close the old cache owner, select a fresh permitted cache filename, and run the helper against the verified external source with 0.2.0. This regenerates state and consumed progress together. Copy migration is available if retaining a legacy cache is necessary, but it does not turn compact metadata into a source archive. A changed descriptor or source generation must reconstruct from the external source; historical external snapshots are unavailable.</p>
+
+<h2 id="browser">Browser upgrades</h2>
+<p>Export resolved documents before reloading or closing the old worker. Deploy the complete new <code>portable_assets</code> directory, including modules, manifests, and client/worker/host/error files; do not mix old hosts with new manifests or Wasm. Start a new worker, ingest the exported records with their original IDs, sources, positions, and order, and compare keys, states, and results. Obtain new cursors. Browser state remains in memory and has no native log migration step.</p>
+
+<h2 id="rollback">Rollback</h2>
+<p>Before the new log accepts writes, rollback means returning the application to the untouched original log and its matching previous environment/view. Older binaries do not understand FOLDLOG2; an in-place downgrade is unsupported.</p>
+<p>After new writes, the original file no longer contains all accepted observations. Preserve both logs and plan replay/reconciliation of the new observations from your authoritative source before switching back. Simply pointing at the old filename would omit those writes. Never discard the converted log as part of an unverified rollback.</p>
+
+<h2 id="troubleshooting">If a step fails</h2>
+<table><thead><tr><th>Message or symptom</th><th>Next step</th></tr></thead><tbody>
+<tr><td>Legacy log is read-only</td><td>Complete copy migration and configure the new filename.</td></tr>
+<tr><td>Already open or cannot be locked</td><td>Stop and close every owner. Do not remove the ownership lock to bypass it.</td></tr>
+<tr><td>Destination exists</td><td>Choose a fresh filename or inspect the existing migrated copy. Do not reset or overwrite it to retry.</td></tr>
+<tr><td>Migration source has an incomplete tail</td><td>Keep the raw backup. Work on a copy, open/close it normally with the intended view to recover an interrupted tail, then retry migration. Complete-frame corruption must fail; do not edit or remove frames to force acceptance.</td></tr>
+<tr><td>Unsupported or corrupt header</td><td>Confirm that this is a Foldlite native document log and that the backup is intact. Copy migration does not convert another database's format.</td></tr>
+<tr><td>Checkpoint or close fails</td><td>Keep the document log. Fix the reported cache-path, disk-space, or size issue; a failed accelerator save does not roll back durable appends. See <a href="concepts.html">documents and caches</a>.</td></tr>
+</tbody></table>
+</main>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#before-you-start">Before you start</a>
+<a href="#backup">1. Stop writers and back up the source</a>
+<a href="#install">2. Install 0.2.0 in a separate environment</a>
+<a href="#inspect">3. Inspect the closed log with its intended view</a>
+<a href="#migrate">4. Copy into a new log</a>
+<a href="#verify">5. Compare documents, results, and rebuilt results</a>
+<a href="#cutover">6. Switch the application and replace cursors</a>
+<a href="#compatibility">Application compatibility checks</a>
+<a href="#projections">External projection caches</a>
+<a href="#browser">Browser upgrades</a>
+<a href="#rollback">Rollback</a>
+<a href="#troubleshooting">If a step fails</a></aside>
+  </div>
+  <footer>Foldlite DB · MIT licensed <span>Built from this repository. Development APIs may change.</span></footer>
+</body>
+</html>
