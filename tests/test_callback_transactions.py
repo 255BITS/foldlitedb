@@ -1,7 +1,5 @@
 """Callback projections share native acceptance, commit, and replay boundaries."""
 from concurrent.futures import ThreadPoolExecutor
-import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -232,3 +230,43 @@ def test_prepared_native_transaction_is_invalidated_by_mutation():
         with pytest.raises(DatabaseError, match="prepared"):
             db._call({"op": "commit_prepared", "token": staged["token"]})
         assert [doc.id for doc in db.documents()] == ["two"]
+
+
+def test_callback_cursors_cannot_be_reused_with_a_different_named_view():
+    with Database(":memory:", total_view()) as db:
+        db.register(View("other", version="1", map=lambda d: [("z", d.payload["value"])],
+                         reducer=OrderedFold(0, lambda s, v: s + v, version="1")))
+        db.add_many([{"key": "a", "value": 1}, {"key": "b", "value": 2}])
+        first = db.query("totals", limit=1)
+        with pytest.raises(DatabaseError, match="different view descriptor"):
+            db.query("other", cursor=first.cursor, after=first.after)
+
+
+def test_historical_query_cannot_clear_an_outer_callback_mutation_guard():
+    snapshot = None
+    def mapper(doc):
+        if doc.payload["value"] == 3:
+            db.query(cursor=snapshot.cursor)
+            db.add({"value": 999})
+        return [("total", doc.payload["value"])]
+    with Database(":memory:", total_view(mapper=mapper)) as db:
+        db.add({"value": 1})
+        snapshot = db.query()
+        db.add({"value": 2})
+        with pytest.raises(DatabaseError, match="must not mutate"):
+            db.add({"value": 3})
+        assert total(db) == 3
+        assert [doc.payload["value"] for doc in db.documents()] == [1, 2]
+
+
+def test_callback_maps_receive_independent_payload_copies():
+    def mutate(doc):
+        doc.payload["value"] = 99
+        return [("total", doc.payload["value"])]
+    with Database(":memory:", total_view(mapper=mutate)) as db:
+        db.register(View("other", version="1", map=lambda d: [("other", d.payload["value"])],
+                         reducer=OrderedFold(0, lambda s, v: s + v, version="1")))
+        db.add({"value": 2})
+        assert total(db) == 99
+        assert db.query("other").rows[0].result == 2
+        assert next(db.documents()).payload == {"value": 2}
