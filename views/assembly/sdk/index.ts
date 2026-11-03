@@ -30,6 +30,7 @@ export abstract class View {
     public mergeable: bool = false,
     public version: string = "1",
     public stateVersion: string = "1",
+    public reduceGroups: bool = false,
   ) {}
   abstract map(document: JSON.Value): Emission[];
   abstract identity(): JSON.Value;
@@ -127,6 +128,65 @@ function failure(message: string): i32 {
   return write('{"error":' + JSON.stringify<string>(message) + '}');
 }
 
+// Opting in promises independent groups and equivalent behavior across chunks,
+// retries, and fresh instances. Views must keep all durable state explicit.
+function reduceGroups(view: View, request: JSON.Obj): i32 {
+  if (!view.reduceGroups) return failure("This view does not support reduce_groups");
+  const supplied = request.get("groups");
+  if (supplied == null || supplied.type != JSON.Types.Array) return failure("reduce_groups requires a groups array");
+  const groups = supplied.get<JSON.Arr>();
+  if (groups.length < 1 || groups.length > 32) return failure("reduce_groups requires 1..32 groups");
+  let rows = "";
+  for (let i = 0; i < groups.length; i++) {
+    const group = object(groups.at(i));
+    if (group == null) return failure("A reduction group must be an object");
+    const fields = group.keys();
+    for (let j = 0; j < fields.length; j++) {
+      if (fields[j] != "state" && fields[j] != "values") return failure("A reduction group accepts only state and values");
+    }
+    const values = group.get("values");
+    if (values == null || values.type != JSON.Types.Array) return failure("A reduction group requires values");
+    const contributions = values.get<JSON.Arr>();
+    for (let j = 0; j < contributions.length; j++) {
+      if (!finiteJSON(contributions.at(j))) return failure("Request data must contain finite JSON within 64 nesting levels");
+    }
+    let previous = group.get("state");
+    let identityField = "";
+    if (previous == null) {
+      // Match the identity response round trip before add, including limits.
+      const identity = view.identity();
+      if (view.error.length > 0) return failure(view.error);
+      if (!finiteJSON(identity, 1)) return failure("View returned invalid or nonfinite JSON");
+      const text = JSON.stringify<JSON.Value>(identity);
+      if (String.UTF8.byteLength(text) + 7 > CAPACITY) return write('{"ok":{"split":true}}');
+      identityField = '"identity":' + text + ",";
+      const identityParser = new Parser(text);
+      previous = identityParser.value();
+      if (identityParser.error.length > 0) return failure(identityParser.error);
+    } else if (!finiteJSON(previous)) return failure("Request data must contain finite JSON within 64 nesting levels");
+    const addRequest = '{"op":"add","state":' + JSON.stringify<JSON.Value>(previous) + ',"values":' + JSON.stringify<JSON.Value>(values) + '}';
+    if (String.UTF8.byteLength(addRequest) > CAPACITY) return write('{"ok":{"split":true}}');
+    const state = view.add(previous, contributions);
+    if (view.error.length > 0) return failure(view.error);
+    if (!finiteJSON(state, 1)) return failure("View returned invalid or nonfinite JSON");
+    const stateText = JSON.stringify<JSON.Value>(state);
+    if (String.UTF8.byteLength(stateText) + 7 > CAPACITY) return write('{"ok":{"split":true}}');
+    // Finalizers can mutate their argument. Reparse the exact serialized state
+    // that legacy add would return, rather than sharing the retained state.
+    const stateParser = new Parser(stateText);
+    const copied = stateParser.value();
+    if (stateParser.error.length > 0) return failure(stateParser.error);
+    const result = view.finalize(copied);
+    if (view.error.length > 0) return failure(view.error);
+    if (!finiteJSON(result, 1)) return failure("View returned invalid or nonfinite JSON");
+    const row = '{' + identityField + '"state":' + stateText + ',"result":' + JSON.stringify<JSON.Value>(result) + '}';
+    if (i > 0) rows += ',';
+    rows += row;
+    if (String.UTF8.byteLength(rows) + 20 > CAPACITY) return write('{"ok":{"split":true}}');
+  }
+  return write('{"ok":{"groups":[' + rows + ']}}');
+}
+
 export function dispatch(view: View, length: i32): i32 {
   // The previous call's temporary objects are unreachable here. This explicit
   // collection plus the incremental runtime bounds memory across long sessions.
@@ -139,10 +199,12 @@ export function dispatch(view: View, length: i32): i32 {
   const parser = new Parser(text);
   const requestValue = parser.value();
   if (parser.error.length > 0) return failure(parser.error);
-  // Validate each explicit datum at depth zero, not its ABI wrapper.
-  if (!finiteJSON(requestValue, -2)) return failure("Request must contain finite JSON within 64 data nesting levels");
   const request = object(requestValue);
   if (request == null) return failure("Request must be an object");
+  const operation = request.get("op");
+  if (operation == null || operation.type != JSON.Types.String) return failure("Request requires a string op");
+  const op = operation.get<string>();
+  if (op == "reduce_groups") return reduceGroups(view, request);
   const fields = request.keys();
   for (let i = 0; i < fields.length; i++) {
     const field = fields[i];
@@ -150,13 +212,10 @@ export function dispatch(view: View, length: i32): i32 {
     if ((field == "documents" || field == "values") && child.type == JSON.Types.Array) {
       const elements = child.get<JSON.Arr>();
       for (let j = 0; j < elements.length; j++) {
-        if (!finiteJSON(elements.at(j))) return failure("Request data exceeds 64 nesting levels");
+        if (!finiteJSON(elements.at(j))) return failure("Request data must contain finite JSON within 64 nesting levels");
       }
-    } else if (!finiteJSON(child)) return failure("Request data exceeds 64 nesting levels");
+    } else if (!finiteJSON(child)) return failure("Request data must contain finite JSON within 64 nesting levels");
   }
-  const operation = request.get("op");
-  if (operation == null || operation.type != JSON.Types.String) return failure("Request requires a string op");
-  const op = operation.get<string>();
   let result = JSON.Value.empty();
   if (op == "descriptor") {
     const descriptor = new JSON.Obj();
@@ -165,6 +224,7 @@ export function dispatch(view: View, length: i32): i32 {
     descriptor.set<string>("version", view.version);
     descriptor.set<string>("state_version", view.stateVersion);
     descriptor.set<bool>("mergeable", view.mergeable);
+    if (view.reduceGroups) descriptor.set<bool>("reduce_groups", true);
     result = JSON.Value.from(descriptor);
   } else if (op == "map") {
     const documents = request.get("documents");

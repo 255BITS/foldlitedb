@@ -22,7 +22,7 @@ try {
   const response = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(api.memory.buffer, outputPtr, length)));
   if (!response || !Object.hasOwn(response, 'ok') || Object.hasOwn(response, 'error')) throw new Error(`Descriptor request failed: ${response?.error ?? 'expected an ok envelope'}`);
   const descriptor = response.ok;
-  if (!descriptor || descriptor.abi !== 1 || typeof descriptor.name !== 'string' || !descriptor.name || typeof descriptor.version !== 'string' || !descriptor.version || typeof descriptor.state_version !== 'string' || !descriptor.state_version || typeof descriptor.mergeable !== 'boolean') throw new Error('Invalid view descriptor: expected abi, name, version, state_version, and mergeable');
+  if (!descriptor || descriptor.abi !== 1 || typeof descriptor.name !== 'string' || !descriptor.name || typeof descriptor.version !== 'string' || !descriptor.version || typeof descriptor.state_version !== 'string' || !descriptor.state_version || typeof descriptor.mergeable !== 'boolean' || (Object.hasOwn(descriptor, 'reduce_groups') && typeof descriptor.reduce_groups !== 'boolean')) throw new Error('Invalid view descriptor: expected abi, name, version, state_version, and mergeable');
   process.stdout.write(JSON.stringify({ abi: 1, module: process.argv[3], sha256: createHash('sha256').update(bytes).digest('hex'), descriptor }));
 } catch (error) {
   process.stderr.write(`Compiled module is not a portable view: ${error.message}\n`);

@@ -7,6 +7,13 @@ the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
 
+- Add optional `reduce_groups` execution for bounded groups of ordered contributions,
+  with separate-operation fallback for legacy modules and singleton capacity limits.
+  Preserve group sequence order, state/finalizer isolation, and atomic document batches.
+- Opt bundled metrics and catalogue modules into grouped reduction. Rebuilt bundled
+  module digests reconstruct disposable caches and expire old snapshot/change cursors;
+  document logs need no migration. Update browser hosts and modules together.
+
 ## [0.3.2](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.2) — 2026-11-03
 
 ### Native execution

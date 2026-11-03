@@ -10,6 +10,30 @@ const MAX_MEMORY: usize = 16 * 1024 * 1024;
 // Fuel is an execution limit, so arbitrary views may still exhaust this budget.
 const CALL_FUEL: u64 = 500_000_000;
 
+/// Retryable resource limits are distinct from view failures and malformed output.
+/// Only the optional group path may split a request after a capacity error.
+pub(crate) enum CallError {
+    Failure(String),
+    Capacity(String),
+}
+impl From<String> for CallError {
+    fn from(message: String) -> Self {
+        Self::Failure(message)
+    }
+}
+impl From<&str> for CallError {
+    fn from(message: &str) -> Self {
+        Self::Failure(message.into())
+    }
+}
+impl CallError {
+    fn message(self) -> String {
+        match self {
+            Self::Failure(message) | Self::Capacity(message) => message,
+        }
+    }
+}
+
 pub struct Runtime {
     engine: Engine,
     module: Module,
@@ -58,6 +82,9 @@ impl Runtime {
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty())
             || !descriptor.get("mergeable").is_some_and(Value::is_boolean)
+            || descriptor
+                .get("reduce_groups")
+                .is_some_and(|value| !value.is_boolean())
         {
             return Err("Invalid ABI-v1 view descriptor".into());
         }
@@ -66,6 +93,10 @@ impl Runtime {
     }
 
     pub fn call(&self, request: Value) -> Result<Value, String> {
+        self.call_inner(request).map_err(CallError::message)
+    }
+
+    fn call_inner(&self, request: Value) -> Result<Value, CallError> {
         let op = request
             .get("op")
             .and_then(Value::as_str)
@@ -73,11 +104,11 @@ impl Runtime {
             .to_owned();
         let input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
         if input.len() > BUFFER_SIZE {
-            return Err(format!(
+            return Err(CallError::Capacity(format!(
                 "Wasm {op} request is {} bytes, which exceeds the {BUFFER_SIZE}-byte ABI limit \
                  (ABI_BUFFER_BYTES). Use smaller batches, payloads, or view states.",
                 input.len()
-            ));
+            )));
         }
         // A fresh instance makes each operation independent of hidden guest globals.
         let limits = StoreLimitsBuilder::new()
@@ -137,13 +168,21 @@ impl Runtime {
             .get_typed_func::<i32, i32>(&store, "execute")
             .map_err(|e| format!("Invalid execute export: {e}"))?
             .call(&mut store, input.len() as i32)
-            .map_err(|e| format!("Wasm execution failed: {e}"))?;
+            .map_err(|e| {
+                let message = format!("Wasm execution failed: {e}");
+                if e.as_trap_code() == Some(wasmi::TrapCode::OutOfFuel) {
+                    CallError::Capacity(message)
+                } else {
+                    CallError::Failure(message)
+                }
+            })?;
         let output_len = usize::try_from(output_len).map_err(|_| "Negative Wasm output length")?;
         if output_len == 0 || output_len > BUFFER_SIZE {
             return Err(format!(
                 "Wasm {op} response length {output_len} must be between 1 and {BUFFER_SIZE} bytes \
                  (ABI_BUFFER_BYTES)"
-            ));
+            )
+            .into());
         }
         // Guests may relocate their output while executing (for example after
         // growing memory). Validate the post-execution pointer that is read.
@@ -167,7 +206,11 @@ impl Runtime {
             .map_err(|e| e.to_string())?;
         let envelope: Value = serde_json::from_slice(&output)
             .map_err(|e| format!("Invalid Wasm response JSON: {e}"))?;
-        validate_response_json(&envelope, 0)?;
+        if op == "reduce_groups" {
+            validate_group_response(&envelope)?;
+        } else {
+            validate_response_json(&envelope, 0)?;
+        }
         let object = envelope
             .as_object()
             .filter(|object| object.len() == 1)
@@ -176,12 +219,123 @@ impl Runtime {
             let message = error
                 .as_str()
                 .ok_or("Wasm error envelope must contain a string")?;
-            return Err(format!("View rejected operation: {message}"));
+            return Err(format!("View rejected operation: {message}").into());
         }
-        envelope
-            .get("ok")
-            .cloned()
-            .ok_or_else(|| "Wasm response requires an ok or error envelope".into())
+        envelope.get("ok").cloned().ok_or_else(|| {
+            CallError::Failure("Wasm response requires an ok or error envelope".into())
+        })
+    }
+
+    /// Inputs are in canonical group order. A missing state requests identity;
+    /// JSON null is an ordinary existing state. Every attempt uses a fresh guest.
+    pub fn reduce_groups(&self, groups: &[Value]) -> Result<Vec<(Value, Value)>, String> {
+        let mut output = Vec::with_capacity(groups.len());
+        if self.descriptor.get("reduce_groups") != Some(&Value::Bool(true)) {
+            for group in groups {
+                output.push(self.reduce_one(group)?);
+            }
+        } else {
+            for chunk in groups.chunks(32) {
+                self.reduce_chunk(chunk, &mut output)?;
+            }
+        }
+        Ok(output)
+    }
+
+    fn reduce_one(&self, group: &Value) -> Result<(Value, Value), String> {
+        let state = match group.get("state") {
+            Some(state) => state.clone(),
+            None => self.call(json!({"op":"identity"}))?,
+        };
+        let state = self.call(json!({"op":"add","state":state,"values":group["values"]}))?;
+        let result = self.call(json!({"op":"finalize","state":state}))?;
+        Ok((state, result))
+    }
+
+    fn split_groups(
+        &self,
+        groups: &[Value],
+        output: &mut Vec<(Value, Value)>,
+    ) -> Result<(), String> {
+        if groups.len() == 1 {
+            output.push(self.reduce_one(&groups[0])?);
+        } else {
+            let middle = groups.len() / 2;
+            self.reduce_chunk(&groups[..middle], output)?;
+            self.reduce_chunk(&groups[middle..], output)?;
+        }
+        Ok(())
+    }
+
+    fn reduce_chunk(
+        &self,
+        groups: &[Value],
+        output: &mut Vec<(Value, Value)>,
+    ) -> Result<(), String> {
+        let request = json!({"op":"reduce_groups","groups":groups});
+        let response = match self.call_inner(request) {
+            Ok(response) => response,
+            Err(CallError::Capacity(_)) => return self.split_groups(groups, output),
+            Err(error) => return Err(error.message()),
+        };
+        if response == json!({"split":true}) {
+            return self.split_groups(groups, output);
+        }
+        let rows = response
+            .as_object()
+            .filter(|object| object.len() == 1)
+            .and_then(|object| object.get("groups"))
+            .and_then(Value::as_array)
+            .filter(|rows| rows.len() == groups.len())
+            .ok_or(
+                "reduce_groups must return one state/result per group or an exact split signal",
+            )?;
+        for (row, input) in rows.iter().zip(groups) {
+            let new_group = input.get("state").is_none();
+            let object = row
+                .as_object()
+                .filter(|object| object.len() == if new_group { 3 } else { 2 })
+                .filter(|object| object.contains_key("identity") == new_group)
+                .ok_or(
+                    "A reduced group must contain state/result and identity only for a new group",
+                )?;
+            let state = object
+                .get("state")
+                .ok_or("A reduced group requires state")?;
+            let result = object
+                .get("result")
+                .ok_or("A reduced group requires result")?;
+            output.push((state.clone(), result.clone()));
+        }
+        Ok(())
+    }
+}
+
+// Transport levels must not shrink the legacy per-response data depth budget.
+// Shape validation in reduce_chunk rejects any other success payload.
+fn validate_group_response(envelope: &Value) -> Result<(), String> {
+    let groups = envelope
+        .get("ok")
+        .and_then(|value| value.get("groups"))
+        .and_then(Value::as_array);
+    if let Some(groups) = groups {
+        for group in groups {
+            if let Some(identity) = group.get("identity") {
+                validate_response_json(identity, 1)?;
+            }
+            if let Some(state) = group.get("state") {
+                validate_response_json(state, 1)?;
+            }
+            if let Some(result) = group.get("result") {
+                validate_response_json(result, 1)?;
+            }
+        }
+        // Validate unknown fields too, so malformed responses cannot hide values.
+        let mut shell = envelope.clone();
+        shell["ok"]["groups"] = json!([]);
+        validate_response_json(&shell, 0)
+    } else {
+        validate_response_json(envelope, 0)
     }
 }
 
@@ -193,9 +347,9 @@ impl Runtime {
 // arithmetic, cannot come from a double and would otherwise be silently rounded.
 fn guest_integer_is_double(number: &serde_json::Number) -> bool {
     crate::integer_is_exact_double(number)
-        || number.as_f64().is_some_and(|value| {
-            ryu_js::Buffer::new().format_finite(value) == number.to_string()
-        })
+        || number
+            .as_f64()
+            .is_some_and(|value| ryu_js::Buffer::new().format_finite(value) == number.to_string())
 }
 
 // Match the browser finiteJSON depth convention: the envelope starts at zero,
@@ -228,3 +382,7 @@ fn validate_response_json(value: &Value, depth: usize) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

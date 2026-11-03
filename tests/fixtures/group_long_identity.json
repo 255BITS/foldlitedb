@@ -1,0 +1,13 @@
+{
+  "abi": 1,
+  "module": "group_long_identity.wasm",
+  "sha256": "d0011490626dcc2ae1e716df09eadc3a091996bd0b00ed0c9168d774a8158367",
+  "descriptor": {
+    "abi": 1,
+    "name": "group-long-identity",
+    "version": "1",
+    "state_version": "1",
+    "mergeable": false,
+    "reduce_groups": true
+  }
+}

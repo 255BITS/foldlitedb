@@ -2,7 +2,7 @@ include LICENSE README.md DESIGN.md CHANGELOG.md
 recursive-include native *.rs *.toml Cargo.lock *.txt
 recursive-include views *.ts *.json *.mjs *.md
 recursive-include scripts *.py
-recursive-include tests *.py
+recursive-include tests *.py *.json *.wasm
 recursive-include examples *.py
 recursive-include docs *.html *.json *.css *.js *.svg
 recursive-include src/foldlitedb/reducers/assets *

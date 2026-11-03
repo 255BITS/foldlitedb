@@ -149,6 +149,66 @@ JSON, unsupported operations, and invalid argument shapes return error envelopes
 | `{op:"finalize",state}` | Public result |
 | `{op:"merge",left,right}` | Merged state, if supported |
 
+### Optional grouped reduction
+
+Set the fifth `View` constructor argument to `true` to advertise
+`reduce_groups: true` in the descriptor, for example
+`super("totals", false, "1", "1", true)`. It is disabled by default. The bundled
+metrics and catalogue views opt in. Existing modules and older hosts continue
+to use `identity`, `add`, and `finalize` separately.
+
+Opting in promises that every group produces equivalent state and result across
+fresh instances, operation boundaries, chunk sizes, and retries. Identity, add,
+and finalize must not communicate through mutable globals, depend on other
+groups, or depend on JSON object member enumeration order. Contribution arrays
+retain their original order; grouping does not require `merge` or reassociate
+floating-point arithmetic.
+
+The optional request is
+`{op:"reduce_groups",groups:[{values:[...],state?:...},...]}`, with 1 through 32
+groups. Omitted `state` requests identity; explicit JSON `null` is a retained
+state. Success is `{ok:{groups:[{state,result,identity?:...},...]}}` in request
+order. A new group's row includes the original serialized `identity` so the host
+can validate that intermediate response before discarding it. A row for an
+existing state contains only `state` and `result`. The SDK serializes and parses
+identity before add, then copies the serialized new state before finalize, so
+finalizers may mutate their argument without changing retained state.
+
+The exact `{ok:{split:true}}` response requests a smaller chunk when its combined
+output would exceed capacity. Hosts also split oversized encoded requests and
+native fuel exhaustion; a singleton that cannot fit the combined operation
+falls back to the separate operations. Ordinary view errors, malformed output,
+and other traps reject the complete batch. Requests and responses keep their
+separate 256 KiB limits. Each input state/value keeps its existing depth budget;
+identity, state, and result are validated as individual legacy responses at
+depth one beneath the response envelope. All chunk work finishes before the
+document batch commits.
+
+Compare grouped and separate operations on the same SDK and native runtime with
+`python scripts/benchmark_groups.py --documents 4096 --repeats 5 --output groups-benchmark.json`
+from the repository root, after installing the view compiler dependencies. It
+checks identical states, results, and sequences while timing in-memory ingestion;
+use `scripts/benchmark_database.py` for Python transport and durable storage.
+
+On an Apple M2 Ultra with Wasmi 2.0, 4,096 small metric documents and five
+alternating repetitions produced these median ingestion rates. Every state,
+result, and sequence matched the separate-operation path. These are in-memory
+fixture results; durable ingestion and other views need their own measurements.
+
+| Keys | Documents per batch | Legacy documents per second | Grouped documents per second | Throughput ratio |
+| --- | --- | --- | --- | --- |
+| 1 | 100 | 21,797 | 22,043 | 1.01× |
+| 1 | 1,024 | 22,111 | 21,891 | 0.99× |
+| 16 | 100 | 10,071 | 14,448 | 1.43× |
+| 16 | 1,024 | 19,632 | 20,641 | 1.05× |
+| 1,024 | 100 | 2,500 | 4,950 | 1.98× |
+| 1,024 | 1,024 | 2,426 | 4,860 | 2.00× |
+
+The [raw benchmark](../reports/grouped-reduction-2026-11-03.json) records every
+sample, module and source hashes, runtime, and method. Single-key cases were
+approximately unchanged; this optimization helps most when a batch touches many
+independent groups.
+
 The manifest binds each compiled artifact to its descriptor:
 
 ```json

@@ -1,0 +1,573 @@
+{
+  "schema": "foldlitedb-grouped-reduction-benchmark/v1",
+  "settings": {
+    "documents": 4096,
+    "repeats": 5,
+    "output": "reports/grouped-reduction-2026-11-03.json"
+  },
+  "runtime": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (Homebrew)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.3",
+    "cpu": "Apple M2 Ultra"
+  },
+  "method": "In-memory release Rust Engine with identical document and batch boundaries. Modules use the same SDK/source; only reduce_groups opt-in differs. Engine open and result verification are outside the timer. Variant order alternates by repetition. Every result state, finalized result and sequence is compared against the other variant. No Python transport or durable sync is timed.",
+  "module_sha256": {
+    "grouped": "14837f4152b4a6ec74a6bea2d23b2ee8ebfabce80272eebe4bd7fc5b168db295",
+    "legacy": "45ca5578a630231d300a32e37be0f5882b93cc19b1f7f56decf397166c303342"
+  },
+  "source_sha256": {
+    "native/Cargo.lock": "90eb201d1b6eb7b5796a78d251d8a8ec62c44a271daa4cb4634a6cc52aa18e88",
+    "native/engine/src/runtime.rs": "9b7080f3e4ff6662032d391b0276a8241bbd3a798d6e9f33975b31e4539ea175",
+    "native/engine/src/lib.rs": "38f2cde31d14c46c0af86b6dba48a85ebf81d535458ddb027e4d55832464b6e7",
+    "views/assembly/sdk/index.ts": "69c331c3eca0e6d821f96a26bf628deee5e53f4354615ad0b5027031d65b22e3",
+    "views/assembly/examples/metrics.ts": "36d0c83c545cefe6b43d5b3ae70288d9e10b0b02fac0ae1a9f2116ce4af8beb6",
+    "native/engine/examples/benchmark_groups.rs": "f8d5c8ee520f0248be7ee82c1504bd58dca91459fd0dab74133bb17cffd2cc42",
+    "scripts/benchmark_groups.py": "1c9e057a6ed69a1ee2d125350ba27ca88b5a962110382b16a1965a8436e10a34"
+  },
+  "summary": [
+    {
+      "keys": 1,
+      "batch_size": 100,
+      "median_documents_per_second": {
+        "grouped": 22042.87677494803,
+        "legacy": 21796.968243935236
+      },
+      "throughput_ratio": 1.0112817768168842
+    },
+    {
+      "keys": 1,
+      "batch_size": 1024,
+      "median_documents_per_second": {
+        "grouped": 21890.83228992466,
+        "legacy": 22111.272983935454
+      },
+      "throughput_ratio": 0.99003039335768
+    },
+    {
+      "keys": 16,
+      "batch_size": 100,
+      "median_documents_per_second": {
+        "grouped": 14448.035485165277,
+        "legacy": 10070.742293122279
+      },
+      "throughput_ratio": 1.4346544737851579
+    },
+    {
+      "keys": 16,
+      "batch_size": 1024,
+      "median_documents_per_second": {
+        "grouped": 20640.67038397951,
+        "legacy": 19632.093983588547
+      },
+      "throughput_ratio": 1.0513738575841212
+    },
+    {
+      "keys": 1024,
+      "batch_size": 100,
+      "median_documents_per_second": {
+        "grouped": 4949.972318041159,
+        "legacy": 2500.132186249166
+      },
+      "throughput_ratio": 1.9798842418277798
+    },
+    {
+      "keys": 1024,
+      "batch_size": 1024,
+      "median_documents_per_second": {
+        "grouped": 4860.156057617587,
+        "legacy": 2425.6948363032425
+      },
+      "throughput_ratio": 2.003613968616292
+    }
+  ],
+  "samples": [
+    {
+      "batch_size": 100,
+      "documents_per_second": 17864.801459271654,
+      "keys": 1,
+      "repeat": 0,
+      "seconds": 0.229277667,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 20261.88085262153,
+      "keys": 1,
+      "repeat": 0,
+      "seconds": 0.202153,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 21675.618098956955,
+      "keys": 1,
+      "repeat": 1,
+      "seconds": 0.188968083,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 22157.937515806327,
+      "keys": 1,
+      "repeat": 1,
+      "seconds": 0.18485475,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 22171.920879630252,
+      "keys": 1,
+      "repeat": 2,
+      "seconds": 0.184738166,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 22077.51020361237,
+      "keys": 1,
+      "repeat": 2,
+      "seconds": 0.185528167,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 21796.968243935236,
+      "keys": 1,
+      "repeat": 3,
+      "seconds": 0.187916042,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 21917.505281912763,
+      "keys": 1,
+      "repeat": 3,
+      "seconds": 0.186882583,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 22042.87677494803,
+      "keys": 1,
+      "repeat": 4,
+      "seconds": 0.185819666,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 22045.941524625625,
+      "keys": 1,
+      "repeat": 4,
+      "seconds": 0.185793834,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 22037.119979119827,
+      "keys": 1,
+      "repeat": 0,
+      "seconds": 0.185868208,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 22026.53334705833,
+      "keys": 1,
+      "repeat": 0,
+      "seconds": 0.185957542,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 22193.304702597634,
+      "keys": 1,
+      "repeat": 1,
+      "seconds": 0.184560166,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 22016.228110139447,
+      "keys": 1,
+      "repeat": 1,
+      "seconds": 0.186044584,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 21821.707697799182,
+      "keys": 1,
+      "repeat": 2,
+      "seconds": 0.187703,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 22340.914390281483,
+      "keys": 1,
+      "repeat": 2,
+      "seconds": 0.18334075,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 22111.272983935454,
+      "keys": 1,
+      "repeat": 3,
+      "seconds": 0.185244875,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 21830.77948034644,
+      "keys": 1,
+      "repeat": 3,
+      "seconds": 0.187625,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 21890.83228992466,
+      "keys": 1,
+      "repeat": 4,
+      "seconds": 0.187110291,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 21953.922350959787,
+      "keys": 1,
+      "repeat": 4,
+      "seconds": 0.186572583,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 14404.069447828262,
+      "keys": 16,
+      "repeat": 0,
+      "seconds": 0.284364083,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 10086.194982327304,
+      "keys": 16,
+      "repeat": 0,
+      "seconds": 0.406099625,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 10060.413248225152,
+      "keys": 16,
+      "repeat": 1,
+      "seconds": 0.407140333,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 14799.96918455635,
+      "keys": 16,
+      "repeat": 1,
+      "seconds": 0.276757333,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 14251.368249649455,
+      "keys": 16,
+      "repeat": 2,
+      "seconds": 0.287411,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 10029.348159680847,
+      "keys": 16,
+      "repeat": 2,
+      "seconds": 0.408401417,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 10070.742293122279,
+      "keys": 16,
+      "repeat": 3,
+      "seconds": 0.40672275,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 14448.035485165277,
+      "keys": 16,
+      "repeat": 3,
+      "seconds": 0.28349875,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 14571.966261330135,
+      "keys": 16,
+      "repeat": 4,
+      "seconds": 0.281087667,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 10183.18209538627,
+      "keys": 16,
+      "repeat": 4,
+      "seconds": 0.402231833,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 20707.318942225258,
+      "keys": 16,
+      "repeat": 0,
+      "seconds": 0.197804458,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 19712.664050657542,
+      "keys": 16,
+      "repeat": 0,
+      "seconds": 0.207785208,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 19635.058469762236,
+      "keys": 16,
+      "repeat": 1,
+      "seconds": 0.208606458,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 20640.67038397951,
+      "keys": 16,
+      "repeat": 1,
+      "seconds": 0.198443167,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 20848.41314257904,
+      "keys": 16,
+      "repeat": 2,
+      "seconds": 0.196465792,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 19187.033762340296,
+      "keys": 16,
+      "repeat": 2,
+      "seconds": 0.2134775,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 19568.694039584574,
+      "keys": 16,
+      "repeat": 3,
+      "seconds": 0.209313917,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 20282.67914463426,
+      "keys": 16,
+      "repeat": 3,
+      "seconds": 0.201945708,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 20513.608162228466,
+      "keys": 16,
+      "repeat": 4,
+      "seconds": 0.199672333,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 19632.093983588547,
+      "keys": 16,
+      "repeat": 4,
+      "seconds": 0.208637958,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 4928.678211843489,
+      "keys": 1024,
+      "repeat": 0,
+      "seconds": 0.831054458,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 2464.8617291402197,
+      "keys": 1024,
+      "repeat": 0,
+      "seconds": 1.6617565,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 2504.2501744505853,
+      "keys": 1024,
+      "repeat": 1,
+      "seconds": 1.635619333,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 4951.089951992123,
+      "keys": 1024,
+      "repeat": 1,
+      "seconds": 0.827292584,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 4939.9893625964405,
+      "keys": 1024,
+      "repeat": 2,
+      "seconds": 0.829151583,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 2487.5221552533267,
+      "keys": 1024,
+      "repeat": 2,
+      "seconds": 1.6466185,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 2512.3908482181314,
+      "keys": 1024,
+      "repeat": 3,
+      "seconds": 1.630319583,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 4959.592819366871,
+      "keys": 1024,
+      "repeat": 3,
+      "seconds": 0.82587425,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 4949.972318041159,
+      "keys": 1024,
+      "repeat": 4,
+      "seconds": 0.827479375,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 100,
+      "documents_per_second": 2500.132186249166,
+      "keys": 1024,
+      "repeat": 4,
+      "seconds": 1.638313375,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 4984.188392430736,
+      "keys": 1024,
+      "repeat": 0,
+      "seconds": 0.821798792,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 2436.7658343860835,
+      "keys": 1024,
+      "repeat": 0,
+      "seconds": 1.6809165419999998,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 2425.6316295315,
+      "keys": 1024,
+      "repeat": 1,
+      "seconds": 1.688632334,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 4794.659853941972,
+      "keys": 1024,
+      "repeat": 1,
+      "seconds": 0.85428375,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 4860.156057617587,
+      "keys": 1024,
+      "repeat": 2,
+      "seconds": 0.842771292,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 2425.6948363032425,
+      "keys": 1024,
+      "repeat": 2,
+      "seconds": 1.688588333,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 2431.981687785886,
+      "keys": 1024,
+      "repeat": 3,
+      "seconds": 1.6842232080000001,
+      "variant": "legacy"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 4798.667713641613,
+      "keys": 1024,
+      "repeat": 3,
+      "seconds": 0.85357025,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 4873.398668539891,
+      "keys": 1024,
+      "repeat": 4,
+      "seconds": 0.840481208,
+      "variant": "grouped"
+    },
+    {
+      "batch_size": 1024,
+      "documents_per_second": 2403.088285259956,
+      "keys": 1024,
+      "repeat": 4,
+      "seconds": 1.704473375,
+      "variant": "legacy"
+    }
+  ],
+  "git_revision": "f5220acee1cef84b0ea5b0b097aa26e62d6bc746",
+  "fixture": {
+    "emissions_per_document": 1,
+    "storage": ":memory:",
+    "maximum_groups_per_request": 32,
+    "payload": "metric=str(position % keys), value=position % 1000"
+  }
+}

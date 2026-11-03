@@ -637,3 +637,62 @@ def test_browser_rows_snapshots_mutable_selectors_before_awaiting_pages(portable
     assert actual["prefixKeys"] == expected
     assert actual["rangeKeys"] == expected
     assert actual["typed"]
+
+
+def test_batched_group_chunks_match_native_sequences_and_fail_atomically(portable_page):
+    batches = [
+        [{"id": str(i), "payload": {"metric": f"k{i % 70:03}", "value": [1e16, 1, -1e16][i // 70]}}
+         for i in range(210)],
+        [{"id": str(i + 210), "payload": {"metric": f"k{i:03}", "value": i}} for i in range(70)],
+    ]
+    with PortableDatabase(":memory:") as native:
+        assert native.stats()["descriptor"]["reduce_groups"] is True
+        for batch in batches:
+            native._call({"op": "ingest", "documents": batch})
+        expected = native._call({"op": "query", "limit": 1024})["rows"]
+        sequence = native.stats()["sequence"]
+    actual = portable_page.evaluate("""async batches => {
+      const {BrowserDatabase} = await import('./portable/client.js');
+      const db = await BrowserDatabase.connect();
+      try {
+        for (const batch of batches) await db.ingest(batch);
+        const rows = await db.rows(), sequence = (await db.stats()).sequence;
+        await db.add({metric:'z',value:1e308},{id:'large'});
+        const before = await db.stats(), retained = await db.export();
+        let error;
+        try {await db.ingest([{id:'tentative',payload:{metric:'a',value:1}},
+          {id:'overflow',payload:{metric:'z',value:1e308}}]);}
+        catch(failure) {error=failure.message;}
+        return {rows,sequence,error,before,after:await db.stats(),retained,afterDocuments:await db.export(),replay:await db.replay()};
+      } finally {db.close();}
+    }""", batches)
+    assert actual["rows"] == expected
+    assert actual["sequence"] == sequence
+    assert "overflow" in actual["error"]
+    assert actual["before"] == actual["after"]
+    assert actual["retained"] == actual["afterDocuments"]
+    assert actual["replay"]["equivalent"] is True
+
+
+def test_browser_group_transport_preserves_null_and_per_datum_depth(portable_page):
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    fixture = {"bytes": list((fixtures / "group_contract.wasm").read_bytes()),
+               "spec": json.loads((fixtures / "group_contract.json").read_text())}
+    result = portable_page.evaluate("""async fixture => {
+      const {ViewModule} = await import('./portable/host.js');
+      const view = await ViewModule.fromBytes(Uint8Array.from(fixture.bytes),fixture.spec);
+      const absent = view.reduceGroups([{state:null,values:[]}]);
+      const depths=[];
+      for (const depth of [63,64]) {
+        let nested=null;for(let i=0;i<depth;i++)nested=[nested];
+        const input=view.reduceGroups([{state:null,values:[nested]}]);
+        let accepted;
+        try {view.reduceGroups([{state:nested,values:[]}]);accepted=true;}
+        catch(error) {accepted=false;}
+        depths.push({input,accepted});
+      }
+      return {absent,depths};
+    }""", fixture)
+    assert result["absent"] == [{"state": None, "result": None}]
+    assert result["depths"] == [{"input": [{"state": None, "result": None}], "accepted": True},
+                                {"input": [{"state": None, "result": None}], "accepted": False}]
