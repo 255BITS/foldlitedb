@@ -2,10 +2,20 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.3.1. Each version links its GitHub release;
+before moving existing databases to 0.3.2. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
+
+## [0.3.2](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.2) — 2026-11-03
+
+### Native execution
+
+- Upgrade the native Wasm interpreter from Wasmi 0.47.2 to 2.0.0 and use direct instantiation for import-free modules. Keep fresh instances for portable operations, guest validation, memory bounds, and deterministic fuel interruption.
+- Retain the Python API, ABI v1, bundled module bytes, document log and cache formats, and compatible 0.3.1 cursors. No migration is required from 0.3.1.
+- Wasmi 2.0 meters fuel by input Wasm operations. Applications supplying custom numeric reducer fuel budgets should recalibrate them; exhausted reducer instances remain unusable.
+- Calibrate the bounded portable operation budget to 500 million Wasmi 2.0 units for near-capacity requests. The previous 100 million-unit budget rejected the new 249,882-byte fixture on both interpreter versions; accepting it broadens the measured workload envelope. Bundled numeric reducers keep their configurable 50 million-unit default.
+- Add regression coverage for fuel exhaustion, fresh guest state, memory growth limits, and supported maximum-sized workloads, and refresh native dependency notices.
 
 ## [0.3.1](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.1) — 2026-11-03
 

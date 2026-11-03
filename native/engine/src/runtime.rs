@@ -1,10 +1,14 @@
 //! Import-free ABI-v1 Wasm execution with bounded memory, input, output and fuel.
 use serde_json::{json, Value};
-use wasmi::{Config, Engine, ExternType, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmi::{Config, Engine, ExternType, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 pub const BUFFER_SIZE: usize = 262_144;
 const MAX_MEMORY: usize = 16 * 1024 * 1024;
-const CALL_FUEL: u64 = 100_000_000;
+// Wasmi 2 meters input Wasm operations, rather than interpreter bytecode. The
+// 249,882-byte/1,024-document metrics map fixture consumes 423,077,088 units;
+// 500M leaves bounded headroom for requests near the 256 KiB ABI capacity.
+// Fuel is an execution limit, so arbitrary views may still exhaust this budget.
+const CALL_FUEL: u64 = 500_000_000;
 
 pub struct Runtime {
     engine: Engine,
@@ -86,9 +90,7 @@ impl Runtime {
         let mut store: Store<StoreLimits> = Store::new(&self.engine, limits);
         store.limiter(|limits| limits);
         store.set_fuel(CALL_FUEL).map_err(|e| e.to_string())?;
-        let instance = Linker::<StoreLimits>::new(&self.engine)
-            .instantiate(&mut store, &self.module)
-            .and_then(|pre| pre.start(&mut store))
+        let instance = Instance::new(&mut store, &self.module, &[])
             .map_err(|e| format!("Wasm startup failed: {e}"))?;
         let version = instance
             .get_typed_func::<(), i32>(&store, "abi_version")

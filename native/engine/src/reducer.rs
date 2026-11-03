@@ -1,7 +1,7 @@
 //! Embedded wasmi-backed execution of ABI-v1 reducer kernels.
 use sha2::{Digest, Sha256};
 use wasmi::{
-    Config, Engine, ExternType, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
+    Config, Engine, ExternType, Instance, Module, Store, StoreLimits, StoreLimitsBuilder,
 };
 
 pub struct ReducerInstance {
@@ -48,9 +48,7 @@ impl ReducerInstance {
         store.limiter(|limits| limits);
         store.set_fuel(50_000_000).map_err(|e| e.to_string())?;
 
-        let instance = Linker::<StoreLimits>::new(&engine)
-            .instantiate(&mut store, &module)
-            .and_then(|pre| pre.start(&mut store))
+        let instance = Instance::new(&mut store, &module, &[])
             .map_err(|e| format!("Wasm startup failed: {e}"))?;
 
         let version = instance
