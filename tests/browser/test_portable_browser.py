@@ -348,3 +348,53 @@ def test_playground_import_add_replay_export_and_mobile_layout(portable_page):
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     expect(page.locator("#measurement-form button")).to_be_visible()
     page.set_viewport_size({"width": 1280, "height": 900})
+
+
+def test_shared_conformance_sources_depth_and_relocated_output(portable_page):
+    fixture = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "portable_conformance.json").read_text())
+    result = portable_page.evaluate("""async fixture => {
+      const {BrowserDatabase} = await import('./portable/client.js');
+      const {ViewModule,sha256Hex} = await import('./portable/host.js');
+      const sources = [], depths = [], modules = [];
+      for (const test of fixture.source_cases) {
+        const db = await BrowserDatabase.connect();
+        try {
+          const record = {id:'one',source:test.source,payload:{metric:'x',value:2}};
+          const accepted = await db.ingest([record]);
+          const rows = await db.rows();
+          const replay = await db.ingest([record]);
+          sources.push({inserted:accepted.inserted,replayed:replay.replayed,
+            rows,source:(await db.export())[0].source,equivalent:(await db.replay()).equivalent});
+        } finally {db.close();}
+      }
+      for (const test of fixture.payload_depth_cases) {
+        const db = await BrowserDatabase.connect();
+        let payload = null;
+        for (let i=0; i<test.depth; i++) payload=[payload];
+        try {
+          try {await db.add(payload);depths.push({accepted:true,documents:(await db.stats()).documents});}
+          catch(error) {depths.push({accepted:false,documents:(await db.stats()).documents,error:error.message});}
+        } finally {db.close();}
+      }
+      for (const test of fixture.output_modules) {
+        const bytes = Uint8Array.from(test.hex.match(/../g), pair=>parseInt(pair,16));
+        const spec = {abi:1,module:'moving.wasm',sha256:sha256Hex(bytes),descriptor:fixture.descriptor};
+        try {await ViewModule.fromBytes(bytes,spec);modules.push({accepted:true});}
+        catch(error) {modules.push({accepted:false,error:error.message});}
+      }
+      return {sources,depths,modules};
+    }""", fixture)
+    for case, actual in zip(fixture["source_cases"], result["sources"]):
+        assert actual["inserted"] == actual["replayed"] == 1
+        assert len(actual["rows"]) == int(case["mapped"])
+        assert actual["source"] == case["source"] and actual["equivalent"]
+        with PortableDatabase(":memory:") as native:
+            native.add({"metric": "x", "value": 2}, id="one", source=case["source"])
+            assert native._call({"op": "query"})["rows"] == actual["rows"]
+    for case, actual in zip(fixture["payload_depth_cases"], result["depths"]):
+        assert actual["accepted"] == case["accepted"], (case, actual)
+        assert actual["documents"] == int(case["accepted"])
+    for case, actual in zip(fixture["output_modules"], result["modules"]):
+        assert actual["accepted"] == case["accepted"], (case["output_pointer"], actual)
+        if not actual["accepted"]:
+            assert "output buffer" in actual["error"]
