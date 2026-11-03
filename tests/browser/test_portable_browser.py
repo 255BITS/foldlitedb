@@ -398,3 +398,242 @@ def test_shared_conformance_sources_depth_and_relocated_output(portable_page):
         assert actual["accepted"] == case["accepted"], (case["output_pointer"], actual)
         if not actual["accepted"]:
             assert "output buffer" in actual["error"]
+
+
+def _query_keys_fixture():
+    return json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "query_keys.json").read_text())
+
+
+def test_semantic_key_order_and_range_prefix_pages_match_native(portable_page):
+    fixture = _query_keys_fixture()
+    selections = [
+        {},
+        {"start_key": -20, "end_key": 10},
+        {"start_key": -20, "end_key": 10, "inclusive_start": False, "inclusive_end": False},
+        {"start_key": 2, "end_key": 2},
+        {"start_key": 2, "end_key": 2, "inclusive_end": False},
+        {"start_key": 10, "end_key": 2},
+        {"start_key": None, "end_key": False},
+        {"end_key": None},
+        {"start_key": "\ue000", "end_key": "\U0001f680"},
+        {"start_key": ["sales", "alice", 2], "end_key": ["sales", "alice", 10]},
+        {"prefix": "al"},
+        {"prefix": ""},
+        {"prefix": ["sales"]},
+        {"prefix": ["sales", "alice"]},
+        {"prefix": []},
+        {"prefix": [None]},
+        {"prefix": ["absent"]},
+        {"key": {"b": 2, "a": 1}},
+        {"key": False},
+        {"key": None},
+        {"prefix": [False]},
+        {"prefix": [0]},
+        {"prefix": [[0]]},
+        {"key": {"a": 10, "b": 0}},
+    ]
+    expected = []
+    with PortableDatabase(":memory:", PortableView(bytes.fromhex(fixture["hex"]))) as native:
+        native.add({})
+        all_keys = [row.key for row in native.rows()]
+        assert all_keys == fixture["keys"]
+        for selection in selections:
+            rows = []
+            page = native.query(**selection, limit=1)
+            rows.extend(page.rows)
+            while not page.complete:
+                page = native.query(**selection, limit=3, cursor=page.cursor, after=page.after)
+                rows.extend(page.rows)
+            expected.append([{"key": r.key, "state": r.state, "result": r.result, "sequence": r.sequence} for r in rows])
+
+    actual = portable_page.evaluate("""async ({fixture,selections}) => {
+      const {BrowserDatabase} = await import('./portable/client.js');
+      const {sha256Hex,compareKeys} = await import('./portable/host.js');
+      const bytes = Uint8Array.from(fixture.hex.match(/../g), pair=>parseInt(pair,16));
+      const spec = {abi:1,module:'query-keys.wasm',sha256:sha256Hex(bytes),descriptor:fixture.descriptor};
+      const db = await BrowserDatabase.connect({bytes,spec});
+      try {
+        await db.add({});
+        const selectionsRows=[];
+        for (const selection of selections) {
+          let page=await db.query({...selection,limit:1}), rows=[...page.rows];
+          while(!page.complete) {
+            page=await db.query({...selection,limit:3,cursor:page.cursor,after:page.after});
+            rows.push(...page.rows);
+          }
+          const convenience=await db.rows({...selection,limit:2});
+          if(JSON.stringify(rows)!==JSON.stringify(convenience)) throw new Error('rows() differs from page iteration');
+          selectionsRows.push(rows);
+        }
+        return {selectionsRows,sorted:[...fixture.keys].reverse().sort(compareKeys),replay:await db.replay()};
+      } finally {db.close();}
+    }""", {"fixture": fixture, "selections": selections})
+    assert actual["sorted"] == fixture["keys"]
+    assert actual["selectionsRows"] == expected
+    assert actual["replay"]["equivalent"]
+    assert [r["key"] for r in actual["selectionsRows"][11]] == [k for k in fixture["keys"] if isinstance(k, str)]
+    assert [r["key"] for r in actual["selectionsRows"][14]] == [k for k in fixture["keys"] if isinstance(k, list)]
+
+
+def test_browser_ranges_validate_selectors_and_bind_query_continuations(portable_page):
+    fixture = _query_keys_fixture()
+    invalid = [
+        {"key": 2, "start_key": 1},
+        {"key": 2, "prefix": []},
+        {"prefix": [], "end_key": []},
+        {"prefix": None}, {"prefix": 2}, {"prefix": {}},
+        {"inclusive_start": 0}, {"inclusive_start": None},
+        {"inclusive_end": "false"}, {"inclusive_end": 1},
+    ]
+    result = portable_page.evaluate("""async ({fixture,invalid}) => {
+      const {BrowserDatabase,DatabaseError} = await import('./portable/client.js');
+      const {canonical,sha256Hex} = await import('./portable/host.js');
+      const bytes=Uint8Array.from(fixture.hex.match(/../g), pair=>parseInt(pair,16));
+      const spec={abi:1,module:'query-keys.wasm',sha256:sha256Hex(bytes),descriptor:fixture.descriptor};
+      const db=await BrowserDatabase.connect({bytes,spec}), other=await BrowserDatabase.connect({bytes,spec});
+      const errors=[];
+      async function rejected(selection) {
+        try {await db.query(selection);return false;}
+        catch(error) {errors.push({message:error.message,typed:error instanceof DatabaseError});return true;}
+      }
+      try {
+        await db.add({});
+        const before=await db.stats();
+        const first=await db.query({prefix:'',limit:1});
+        const token=JSON.parse(first.after);
+        const attempts=[...invalid,
+          {prefix:'al',cursor:first.cursor,after:first.after},
+          {prefix:'',inclusive_end:false,cursor:first.cursor,after:first.after},
+          {prefix:'',cursor:(await other.stats()).cursor,after:first.after},
+          {prefix:'',cursor:first.cursor,after:JSON.stringify([first.cursor,token[3]])},
+          {prefix:'',cursor:first.cursor,after:'not-json'},
+          {prefix:'',cursor:first.cursor,after:JSON.stringify({})},
+          {prefix:'',cursor:first.cursor,after:JSON.stringify([token[0],token[1],token[2],'null'])},
+          {prefix:'',cursor:first.cursor,after:JSON.stringify([token[0],token[1],token[2],'"\\\\u0061"'])},
+          {prefix:'',cursor:first.cursor,after:JSON.stringify([token[0],token[1],token[2],canonical(['wrong-type'])])},
+        ];
+        const rejectedAttempts=[];
+        for(const attempt of attempts) rejectedAttempts.push(await rejected(attempt));
+        const second=await db.query({prefix:'',limit:3,cursor:first.cursor,after:first.after});
+        const docs=await db.request({op:'documents',limit:1});
+        return {rejectedAttempts,errors,before,after:await db.stats(),first,second,docs};
+      } finally {db.close();other.close();}
+    }""", {"fixture": fixture, "invalid": invalid})
+    assert all(result["rejectedAttempts"]), result
+    assert all(error["typed"] for error in result["errors"])
+    assert result["before"] == result["after"]
+    assert result["first"]["rows"][0]["key"] != result["second"]["rows"][0]["key"]
+    assert len(result["docs"]["documents"]) == 1
+    assert result["docs"]["complete"]
+
+
+def test_browser_filtered_snapshot_pages_keep_original_states_during_ingestion(portable_page):
+    initial = [{"metric": "alpha", "value": 1}, {"metric": "alpine", "value": 2}, {"metric": "beta", "value": 3}]
+    suffix = [{"metric": "alpha", "value": 100}, {"metric": "amber", "value": 5}, {"metric": "alpine", "value": 20}]
+    selections = [{"prefix": "a"}, {"start_key": "a", "end_key": "az"}]
+    expected = []
+    for selection in selections:
+        with PortableDatabase(":memory:") as native:
+            native.add_many(initial)
+            page = native.query(**selection, limit=1)
+            rows = list(page.rows)
+            native.add_many(suffix)
+            while not page.complete:
+                page = native.query(**selection, limit=1, cursor=page.cursor, after=page.after)
+                rows.extend(page.rows)
+            expected.append([{"key": r.key, "state": r.state, "result": r.result, "sequence": r.sequence} for r in rows])
+
+    actual = portable_page.evaluate("""async ({initial,suffix,selections}) => {
+      const {BrowserDatabase}=await import('./portable/client.js');
+      const results=[];
+      for(const selection of selections) {
+        const db=await BrowserDatabase.connect();
+        try {
+          await db.addMany(initial);
+          let page=await db.query({...selection,limit:1}), rows=[...page.rows];
+          let documents=await db.request({op:'documents',limit:1}), retained=[...documents.documents];
+          await db.addMany(suffix);
+          while(!page.complete) {
+            page=await db.query({...selection,limit:1,cursor:page.cursor,after:page.after});
+            rows.push(...page.rows);
+          }
+          while(!documents.complete) {
+            documents=await db.request({op:'documents',limit:2,cursor:documents.cursor,after:documents.after});
+            retained.push(...documents.documents);
+          }
+          results.push({rows,current:await db.rows(selection),documents:retained});
+        } finally {db.close();}
+      }
+      return results;
+    }""", {"initial": initial, "suffix": suffix, "selections": selections})
+    assert [item["rows"] for item in actual] == expected
+    for item in actual:
+        assert [r["key"] for r in item["rows"]] == ["alpha", "alpine"]
+        assert [r["result"]["sum"] for r in item["rows"]] == [1, 2]
+        assert [r["key"] for r in item["current"]] == ["alpha", "alpine", "amber"]
+        assert [r["result"]["sum"] for r in item["current"]] == [101, 22, 5]
+        assert [document["payload"] for document in item["documents"]] == initial
+
+
+def test_browser_selector_depth_budget_is_per_key_and_matches_native(portable_page):
+    fixture = _query_keys_fixture()
+    fields = ["key", "start_key", "end_key", "prefix"]
+    expected = []
+    value = None
+    for _ in range(64):
+        value = [value]
+    with PortableDatabase(":memory:", PortableView(bytes.fromhex(fixture["hex"]))) as native:
+        native.add({})
+        for field in fields:
+            expected.append([row.key for row in native.query(**{field: value}, limit=100).rows])
+    actual = portable_page.evaluate("""async ({fixture,fields}) => {
+      const {BrowserDatabase,DatabaseError}=await import('./portable/client.js');
+      const {sha256Hex}=await import('./portable/host.js');
+      const bytes=Uint8Array.from(fixture.hex.match(/../g),pair=>parseInt(pair,16));
+      const spec={abi:1,module:'query-keys.wasm',sha256:sha256Hex(bytes),descriptor:fixture.descriptor};
+      const db=await BrowserDatabase.connect({bytes,spec});
+      try {
+        await db.add({});
+        let key=null;for(let i=0;i<64;i++) key=[key];
+        const rows=[],errors=[];
+        for(const field of fields) {
+          rows.push((await db.query({[field]:key})).rows.map(row=>row.key));
+          try {await db.query({[field]:[key]});errors.push(false);}
+          catch(error) {errors.push(error instanceof DatabaseError && /nesting/.test(error.message));}
+        }
+        return {rows,errors};
+      } finally {db.close();}
+    }""", {"fixture": fixture, "fields": fields})
+    assert actual["rows"] == expected
+    assert all(actual["errors"])
+
+
+def test_browser_rows_snapshots_mutable_selectors_before_awaiting_pages(portable_page):
+    fixture = _query_keys_fixture()
+    actual = portable_page.evaluate("""async fixture => {
+      const {BrowserDatabase,DatabaseError}=await import('./portable/client.js');
+      const {sha256Hex}=await import('./portable/host.js');
+      const bytes=Uint8Array.from(fixture.hex.match(/../g),pair=>parseInt(pair,16));
+      const spec={abi:1,module:'query-keys.wasm',sha256:sha256Hex(bytes),descriptor:fixture.descriptor};
+      const db=await BrowserDatabase.connect({bytes,spec});
+      try {
+        await db.add({});
+        const prefix=['sales','alice'], options={prefix,limit:1};
+        const pending=db.rows(options);
+        prefix[1]='bob';options.prefix=['missing'];options.limit=0;
+        const prefixKeys=(await pending).map(row=>row.key);
+        const start=['sales','alice'],end=['sales','alice',10];
+        const bounds={start_key:start,end_key:end,limit:1};
+        const bounded=db.rows(bounds);
+        start[1]='bob';end[2]=0;bounds.inclusive_end=false;
+        const rangeKeys=(await bounded).map(row=>row.key);
+        let typed=false;
+        try {await db.rows({prefix:[()=>{}]});}
+        catch(error) {typed=error instanceof DatabaseError;}
+        return {prefixKeys,rangeKeys,typed};
+      } finally {db.close();}
+    }""", fixture)
+    expected = [["sales", "alice"], ["sales", "alice", 2], ["sales", "alice", 10]]
+    assert actual["prefixKeys"] == expected
+    assert actual["rangeKeys"] == expected
+    assert actual["typed"]

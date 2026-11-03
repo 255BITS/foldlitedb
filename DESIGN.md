@@ -165,6 +165,32 @@ pages return complete resulting key states after a cursor, coalesced per key
 within each batch. Zero-emission documents still advance progress. Sequence is
 not a document count: inserted documents and changed group states allocate it.
 
+Queries select one exact key, a bounded or open-ended ascending range, or a
+string/array prefix. Bounds are inclusive by default. Explicit null is a key or
+bound; omission means unbounded. Prefixes match strings by leading characters
+and arrays by complete leading elements, including exact-length arrays. Empty
+prefixes match all keys of their own container type. Selectors are mutually
+exclusive. Reversed ranges are empty. Queries return already-maintained per-key
+state and results, with no query-time reduction or grouping across keys.
+
+Query collation is `null < false < true < numbers < strings < arrays < objects`.
+Numbers compare numerically, strings by Unicode scalar/codepoint order, and
+arrays recursively and lexicographically, with a shorter equal prefix first.
+Objects compare their members in codepoint-sorted name order, comparing each
+name then its value, with a shorter equal member sequence first. This is a
+binary string ordering, not CouchDB's ICU collation. Canonical JSON remains the
+equality/group identity; ingestion group order and sequence allocation remain
+unchanged. A separate derived native ordered index supports seeking ranges and
+prefixes without sorting the complete key set on every query. Browser and
+Python callback queries apply the same collation to their in-memory groups.
+
+Versioned query continuation tokens bind the snapshot, canonical selector,
+inclusive flags, and last key. Changing selectors or using a pre-0.3.0 query
+token fails explicitly; page size can change. Document continuation tokens are
+unchanged. Existing 0.2.0 caches reconstruct the derived query index on load,
+preserving snapshot/change cursors and computation sequence allocation. A fresh
+query is required for an old paused query traversal; no log migration is needed.
+
 `rows()` and `documents()` pin their prefix on first iteration and release the
 engine between pages. No lock spans a yield into application code. The persistent
 file's ownership lock is retained for the database lifetime. Cursors are local

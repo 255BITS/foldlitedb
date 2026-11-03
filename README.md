@@ -17,14 +17,14 @@ the [view authoring guide](docs/portable.html).
 
 Read the [changelog](CHANGELOG.md) for the consolidated release history and the
 [upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html) before moving
-an existing database to 0.2.0.
+an existing database to 0.3.0.
 
 ## Install
 
-Use Python 3.11+ to install the 0.2.0 release:
+Use Python 3.11+ to install the 0.3.0 release:
 
 ```sh
-python -m pip install foldlitedb==0.2.0
+python -m pip install foldlitedb==0.3.0
 ```
 
 Native wheels are provided for Linux x86-64 and ARM64, macOS Intel and Apple
@@ -51,7 +51,7 @@ a wheel, run `python -m pip wheel . --no-deps --wheel-dir dist`. Install that
 wheel on a matching platform with `python -m pip install /path/to/the-built.whl`;
 installing a built wheel needs neither Rust nor Node. See the
 [release guide](docs/releasing.html) for PyPI Trusted Publisher setup and the
-0.2.0 publication workflow.
+0.3.0 publication workflow.
 
 ## Append documents, read a live view
 
@@ -98,6 +98,36 @@ map request must fit 256 KiB, so larger payloads need smaller batches.
 `changes(since=...)` expose continuation cursors. See the
 [Python API](docs/api.html#database) for signatures and limits.
 
+## Query ranges and prefixes
+
+Select an exact `key`, an ascending range with `start_key`/`end_key`, or a string
+or array `prefix`. Bounds are inclusive unless `inclusive_start=False` or
+`inclusive_end=False`. The selectors work in portable Wasm and Python callback
+views, and the browser uses the same option names and ordering.
+
+```python
+with Database(":memory:") as db:
+    db.add_many([
+        {"metric": "temperature.c", "value": 21},
+        {"metric": "temperature.f", "value": 70},
+        {"metric": "voltage", "value": 12},
+    ])
+    assert [row.key for row in db.rows(prefix="temperature.")] == [
+        "temperature.c", "temperature.f",
+    ]
+    assert [row.key for row in db.rows(
+        start_key="temperature.c", end_key="voltage", inclusive_end=False,
+    )] == ["temperature.c", "temperature.f"]
+```
+
+Keys sort by JSON type, with numbers in numeric order and compound keys compared
+element by element. Strings use Unicode codepoint order, rather than CouchDB's
+locale-sensitive ordering. An array prefix such as `["sales", "alice"]` selects
+all keys beginning with those complete elements. These queries return existing
+per-key results; they do not combine a selected range into a new reduction.
+Continue explicit pages with the same selector and both returned `cursor` and
+`after`; page size may change. See the [range query reference](docs/api.html#ranges).
+
 ## A log you keep; a cache you can discard
 
 For a persistent database, `metrics.fold` contains the immutable document log.
@@ -118,7 +148,7 @@ reproduce its previous results. Close the database before backing up the log and
 view artifacts; Windows locks prevent other handles from reading an active log.
 The cache is replaceable; the only copy of a document log is not.
 
-Version 0.2.0 creates `FOLDLOG2` logs with persisted predecessor hashes. Existing
+Version 0.3.0 creates `FOLDLOG2` logs with persisted predecessor hashes. Existing
 `FOLDLOG1` logs open for reading and export; migrate into a new filename before
 appending:
 
