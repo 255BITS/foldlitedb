@@ -1,0 +1,26 @@
+{
+  "schema": "foldlitedb-wasmi2-fuel-calibration/v1",
+  "date": "2026-11-03",
+  "package_version": "0.3.2",
+  "view_sha256": "e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93",
+  "fixture": {
+    "documents": 1024,
+    "payload": {
+      "metric": "large",
+      "value": 1.2345678901234567e-100,
+      "padding": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "encoded_map_request_bytes": 249882,
+    "encoded_map_response_bytes": 51208
+  },
+  "fuel": {
+    "wasmi_0_47_2": 238899353,
+    "wasmi_2_0_0": 423077088,
+    "old_portable_budget": 100000000,
+    "new_portable_budget": 500000000,
+    "numeric_reducer_default_budget": 50000000
+  },
+  "method": "A release-built standalone probe instantiates the unchanged bundled metrics module with a1B fuel allowance, writes the exact JSON map request, invokes execute, and reads remaining fuel. Versions use their matching direct Instance::new (2.0.0) or Linker instantiate/start (0.47.2) APIs. Counts include startup and input_ptr export. Production adds ABI/export checks within the same bounded allowance. The fixture previously exceeded100M on both versions; it is a newly accepted workload, not evidence that old accepted data regressed. Fuel is not a wall-time measure.",
+  "probe_source": "use serde_json::json;\nuse wasmi::{Config,Engine,Module,Instance,Store};\nfn main() {\n let mut config=Config::default();config.consume_fuel(true);\n let engine=Engine::new(&config);\n let module=Module::new(&engine,include_bytes!(\"../../../src/foldlitedb/portable_assets/metrics.wasm\")).unwrap();\n let mut store=Store::new(&engine,()); store.set_fuel(1_000_000_000).unwrap();\n let instance=Instance::new(&mut store,&module,&[]).unwrap();\n let memory=instance.get_memory(&store,\"memory\").unwrap();\n let ptr=instance.get_typed_func::<(),i32>(&store,\"input_ptr\").unwrap().call(&mut store,()).unwrap();\n let payload=json!({\"metric\":\"large\",\"value\":1.2345678901234567e-100,\"padding\":\"x\".repeat(180)});\n let request=serde_json::to_vec(&json!({\"op\":\"map\",\"documents\":vec![payload;1024]})).unwrap();\n memory.write(&mut store,ptr as usize,&request).unwrap();\n let execute=instance.get_typed_func::<i32,i32>(&store,\"execute\").unwrap();\n let len=execute.call(&mut store,request.len() as i32).unwrap();\n println!(\"request_bytes={} response_bytes={} fuel_used={}\",request.len(),len,1_000_000_000-store.get_fuel().unwrap());\n}\n",
+  "regression_test": "native/engine/tests/runtime_limits.rs: default_view_fuel_accepts_a_near_capacity_maximum_document_batch"
+}
