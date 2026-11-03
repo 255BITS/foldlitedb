@@ -11,14 +11,21 @@ struct Engine {
 #[pymethods]
 impl Engine {
     #[new]
-    fn new(py: Python<'_>, path: String, module_bytes: Vec<u8>) -> PyResult<Self> {
+    #[pyo3(signature = (path, module_bytes, reset = false))]
+    fn new(py: Python<'_>, path: String, module_bytes: Vec<u8>, reset: bool) -> PyResult<Self> {
         let inner = py
-            .detach(move || NativeEngine::open(&path, &module_bytes))
+            .detach(move || NativeEngine::open_with_options(&path, &module_bytes, reset))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
     }
+    #[staticmethod]
+    fn migrate_log(py: Python<'_>, source: String, destination: String) -> PyResult<()> {
+        py.detach(move || NativeEngine::migrate_log(&source, &destination))
+            .map_err(PyValueError::new_err)
+    }
+
     fn execute_json(&self, py: Python<'_>, request: String) -> PyResult<String> {
         py.detach(|| {
             if request.len() > 8 * 1024 * 1024 {

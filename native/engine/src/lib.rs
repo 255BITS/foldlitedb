@@ -230,9 +230,15 @@ pub struct Engine {
 
 impl Engine {
     pub fn open(path: &str, module_bytes: &[u8]) -> Result<Self> {
+        Self::open_with_options(path, module_bytes, false)
+    }
+
+    /// Open or explicitly reset a log while holding its stable ownership locks.
+    /// The module is validated before any destructive reset operation.
+    pub fn open_with_options(path: &str, module_bytes: &[u8], reset: bool) -> Result<Self> {
         let runtime = Runtime::new(module_bytes)?;
         let module_sha256 = format!("{:x}", Sha256::digest(module_bytes));
-        let mut storage = Storage::open(path)?;
+        let mut storage = Storage::open_with_options(path, reset, false)?;
         let (candidate, mut cache_status, cache_bytes) = storage.load_checkpoint();
         let initial_prefix = storage.initial_prefix();
         let scan = storage.scan()?;
@@ -291,6 +297,12 @@ impl Engine {
         }
         engine.checkpoint_on_drop = true;
         Ok(engine)
+    }
+
+    /// Copy a verified log into a new v2 log, preserving original batch order.
+    /// The source remains unchanged; an existing destination is never replaced.
+    pub fn migrate_log(source: &str, destination: &str) -> Result<()> {
+        Storage::migrate(source, destination)
     }
 
     /// Payloads and keys have JavaScript/IEEE-754 numeric semantics. Source
@@ -357,9 +369,10 @@ impl Engine {
     }
 
     /// Whether the engine is open and its writer can accept ingestion: not
-    /// closed and not poisoned. See [`Engine::writer_poisoned`] for recovery.
+    /// closed, not a legacy read-only log, and not poisoned. See
+    /// [`Engine::writer_poisoned`] for uncertain-write recovery.
     pub fn is_writable(&self) -> bool {
-        self.storage.is_some() && !self.writer_poisoned()
+        self.storage.as_ref().is_some_and(|s| !s.legacy_read_only()) && !self.writer_poisoned()
     }
 
     fn cursor(&self, sequence: u64) -> String {
@@ -642,7 +655,8 @@ impl Engine {
             "replay":{"batches":self.replay_batches,"documents":self.replay_documents},
             "replay_batches":self.replay_batches,"replay_documents":self.replay_documents,
             "log":{"bytes":bytes,"batches":batches,"recovered_tail_bytes":self.recovered_tail_bytes,
-                "writer_poisoned":self.writer_poisoned()}}),
+                "writer_poisoned":self.writer_poisoned(),"read_only":self.storage.as_ref().unwrap().legacy_read_only(),
+                "format":if self.storage.as_ref().unwrap().legacy_read_only() {1} else {2}}}),
         )
     }
 }
