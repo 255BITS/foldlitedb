@@ -173,7 +173,7 @@ there is no compaction or reader-retention policy yet.
 `PortableView` are exact aliases. The package has one native storage and
 computation path. `native/python` provides PyO3 bindings, and maturin builds the
 extension into wheels. Source builds need Python 3.11+, Rust/Cargo 1.90+, and a C
-toolchain. Bundled modules need no Node; authoring uses Node 20+.
+toolchain. Bundled modules need no Node; authoring uses Node.js matching `^22.23.4 || ^24.22.1 || >=26.12.1`.
 
 The browser worker runs the same module bytes, with JavaScript owning grouping
 and in-memory storage. It does not run the Rust log engine and has no persistent
@@ -192,7 +192,7 @@ reopen and fails explicitly after a new generation. Native and actual browser
 execution must agree for the same module and supported numerical inputs.
 
 Installation checks exercise built wheels without local compilers, and source
-distributions with build prerequisites. PyPI publication remains pending. Future
+distributions with build prerequisites. Release publication runs after package verification. Future
 performance evidence must record workload, fixture, batch size, documents,
 emissions, key cardinality, host/runtime, durability, log/cache bytes, peak memory,
 rebuild time, reopen validation time, and document-to-query latency. Run `python scripts/benchmark_database.py --documents 10000 --keys 16

@@ -16,10 +16,10 @@ the [view authoring guide](docs/portable.html).
 
 ## Install
 
-Use Python 3.11+ to install the 0.1.0 release:
+Use Python 3.11+ to install the 0.1.4 release:
 
 ```sh
-python -m pip install foldlitedb==0.1.0
+python -m pip install foldlitedb==0.1.4
 ```
 
 Native wheels are provided for Linux x86-64 and ARM64, macOS Intel and Apple
@@ -46,7 +46,7 @@ a wheel, run `python -m pip wheel . --no-deps --wheel-dir dist`. Install that
 wheel on a matching platform with `python -m pip install /path/to/the-built.whl`;
 installing a built wheel needs neither Rust nor Node. See the
 [release guide](docs/releasing.html) for PyPI Trusted Publisher setup and the
-0.1.0 publication workflow.
+0.1.4 publication workflow.
 
 ## Append documents, read a live view
 
@@ -147,7 +147,7 @@ states that can be combined correctly. Inputs and state are explicit, and views
 must be deterministic. An ordered fold must give equivalent state when the same
 contributions are split across successive batches.
 
-Rebuild the two bundled examples with Node.js 20+:
+Rebuild the two bundled examples with a Node.js runtime matching `^22.23.4 || ^24.22.1 || >=26.12.1`:
 
 ```sh
 npm ci --prefix views

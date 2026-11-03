@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import math
 import subprocess
 import sys
 import tempfile
@@ -28,9 +29,13 @@ def records(start, stop, keys):
                        position, "benchmark")
 
 
-def ingest(database, start, stop, keys, batch_size):
+def ingest(database, start, stop, keys, batch_size, latencies=None):
     for position in range(start, stop, batch_size):
+        started = time.perf_counter()
         database.ingest(records(position, min(position + batch_size, stop), keys))
+        if latencies is not None:
+            database.query(limit=1)
+            latencies.append(time.perf_counter() - started)
 
 
 def rows(database):
@@ -43,10 +48,28 @@ def measure(function):
     return value, time.perf_counter() - started
 
 
+def latency_distribution(samples):
+    ordered = sorted(samples)
+    return {"samples": len(ordered), "unit": "seconds",
+            **{f"p{int(q * 100)}": ordered[max(0, math.ceil(q * len(ordered)) - 1)]
+               for q in (0.5, 0.95, 0.99)}, "max": ordered[-1]}
+
+
+def peak_rss():
+    try:
+        import resource
+    except ImportError:
+        return {"bytes": None, "method": "unavailable on this platform"}
+    high_water = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return {"bytes": int(high_water if sys.platform == "darwin" else high_water * 1024),
+            "method": "getrusage(RUSAGE_SELF).ru_maxrss; whole benchmark process, excludes child writer"}
+
+
 def run(directory, *, count, keys, batch_size, live_count):
     path = directory / "metrics.fold"
     database = Database(path)
-    _, ingest_seconds = measure(lambda: ingest(database, 0, count, keys, batch_size))
+    latencies = []
+    _, ingest_seconds = measure(lambda: ingest(database, 0, count, keys, batch_size, latencies))
     expected = rows(database)
     assert len(expected) == min(count, keys)
     _, checkpoint_seconds = measure(database.checkpoint)
@@ -102,6 +125,8 @@ os._exit(0)
                     "missing_cache_rebuild": cold_seconds, "explicit_rebuild": rebuild_seconds},
         "documents_per_second": {"durable_ingest": count / ingest_seconds,
                                  "missing_cache_rebuild": (count + live_count) / cold_seconds},
+        "durable_batch_to_query_latency": latency_distribution(latencies),
+        "process_peak_rss": peak_rss(),
         "cached_reopen_stats": warm_stats, "suffix_reopen_stats": suffix_stats,
         "missing_cache_stats": cold_stats, "verified_rows": len(expected),
         "immutable_log_sha256": log_hash,
@@ -130,7 +155,7 @@ def main():
         except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
             mount = None
         report = {
-            "schema": "foldlitedb-native-cache-benchmark/v1",
+            "schema": "foldlitedb-native-cache-benchmark/v2",
             "runtime": {"python": platform.python_version(), "platform": platform.platform(),
                         "machine": platform.machine(), "storage_path": str(directory), "mount": mount},
             "settings": {"documents": options.documents, "keys": options.keys,
@@ -140,7 +165,7 @@ def main():
                               for name in ("native/engine/src/lib.rs", "native/engine/src/storage.rs",
                                            "native/engine/src/runtime.rs", "native/Cargo.lock",
                                            "src/foldlitedb/database.py", "scripts/benchmark_database.py")},
-            "method": "Single run with filesystem cache retained. Warm open verifies all log bytes but executes only uncached Wasm batches. Timings include Python/native transport. No timing threshold or cross-engine claim.",
+            "method": "Single run with filesystem cache retained. Warm open verifies all log bytes but executes only uncached Wasm batches. Timings include Python/native transport. Durable ingestion includes one limit=1 snapshot query after each committed batch; latency percentiles describe complete batches, not individual documents. Peak RSS is the process high-water mark across all phases, excluding the child suffix writer. No timing threshold or cross-engine claim.",
             "results": run(directory, count=options.documents, keys=options.keys,
                            batch_size=options.batch_size, live_count=options.live_documents),
         }
