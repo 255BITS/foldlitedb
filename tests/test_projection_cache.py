@@ -9,17 +9,18 @@ from foldlitedb.projection import materialize_jsonl_view
 from foldlitedb.reducers import Reducer
 
 
-def ordered_fold_view():
+def ordered_fold_view(version="1", factor=1, references=None):
     return View(
         "totals",
-        version="1",
+        version=version,
         map=lambda document: [
             (
                 document.payload["document"]["key"],
-                document.payload["document"]["value"],
+                factor * document.payload["document"]["value"],
             )
         ],
-        reducer=OrderedFold(0, lambda state, value: state + value, version="1"),
+        reducer=OrderedFold(0, lambda state, value: state + value, version=version),
+        references=references,
     )
 
 
@@ -33,6 +34,7 @@ def materialize(
     invalid=False,
     timeout=180,
     target_pos=None,
+    view=None,
 ):
     target = len(documents) if target_pos is None else target_pos
 
@@ -46,7 +48,7 @@ def materialize(
     return materialize_jsonl_view(
         path,
         generation=generation,
-        view=ordered_fold_view(),
+        view=view or ordered_fold_view(),
         read_page=read_page,
         target_cursor=str(target),
         target_position=target,
@@ -139,6 +141,41 @@ def test_timeout_budget_enforcement(tmp_path):
     documents = [{"n": n, "key": "total", "value": n} for n in range(1, 4)]
     with pytest.raises(ValueError, match="Historical reduction exceeded its time budget"):
         asyncio.run(materialize(path, documents, [], timeout=-1))
+
+
+@pytest.mark.parametrize("change", ["version", "reducer", "references"])
+def test_descriptor_change_reconstructs_progress_and_prefix_together(tmp_path, change):
+    path = tmp_path / "descriptor.fold"
+    documents = [{"n": 1, "key": "total", "value": 3}]
+    assert asyncio.run(materialize(path, documents, []))[0].state == 3
+    view = ordered_fold_view(version="2" if change == "version" else "1", factor=2,
+                             references={"factor": 2} if change == "references" else None)
+    if change == "reducer":
+        view.reducer = OrderedFold(0, lambda state, value: state + value, version="2")
+    reads = []
+    assert asyncio.run(materialize(path, documents, reads, view=view))[0].state == 6
+    assert None in reads  # the changed descriptor rereads the consumed prefix
+    documents.append({"n": 2, "key": "total", "value": 4})
+    assert asyncio.run(materialize(path, documents, [], view=view))[0].state == 14
+
+
+def test_empty_projection_records_descriptor_even_without_groups(tmp_path):
+    path = tmp_path / "empty.fold"
+    documents = [{"n": 1, "key": "total", "value": 3}]
+    empty = ordered_fold_view()
+    empty.map = lambda doc: []
+    assert asyncio.run(materialize(path, documents, [], view=empty)) == ()
+    assert asyncio.run(materialize(path, documents, [], view=ordered_fold_view(version="2")))[0].state == 3
+
+
+def test_projection_default_group_budget_uses_bounded_snapshot_pages(tmp_path):
+    path = tmp_path / "paged.fold"
+    documents = [{"n": n, "key": str(n), "value": 1} for n in range(1, 1101)]
+    rows = asyncio.run(materialize(path, documents, [], max_groups=2048))
+    assert len(rows) == 1100
+    assert len(asyncio.run(materialize(path, documents, [], max_groups=2048))) == 1100
+    with pytest.raises(ValueError, match="exceeds 1050 groups"):
+        asyncio.run(materialize(path, documents, [], max_groups=1050))
 
 
 def test_rust_reducer_adapter_batching_and_byte_caps():

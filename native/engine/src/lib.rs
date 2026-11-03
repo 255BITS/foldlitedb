@@ -75,11 +75,22 @@ struct Version {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BatchBoundary {
+    documents: usize,
+    sequence: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct State {
     generation: String,
     sequence: u64,
     documents: Vec<Document>,
     history: Vec<Version>,
+    #[serde(default)]
+    batches: Vec<BatchBoundary>,
+    #[serde(default)]
+    callback_checkpoints: BTreeMap<String, Value>,
     #[serde(skip)]
     identities: BTreeMap<(String, String), usize>,
     #[serde(skip)]
@@ -97,6 +108,8 @@ impl State {
             sequence: 0,
             documents: Vec::new(),
             history: Vec::new(),
+            batches: Vec::new(),
+            callback_checkpoints: BTreeMap::new(),
             identities: BTreeMap::new(),
             positions: BTreeMap::new(),
             checkpoints: BTreeMap::new(),
@@ -173,10 +186,30 @@ impl State {
         if documents.next().is_some() || versions.next().is_some() {
             return Err("Cached history has duplicate sequences".into());
         }
+        let mut documents = 0;
+        let mut sequence = 0;
+        for batch in &self.batches {
+            if batch.documents <= documents
+                || batch.documents > self.documents.len()
+                || batch.documents - documents > MAX_BATCH_DOCUMENTS
+                || batch.sequence <= sequence
+                || batch.sequence > self.sequence
+                || self.documents[batch.documents - 1].sequence > batch.sequence
+            {
+                return Err("Invalid cached document batch boundaries".into());
+            }
+            documents = batch.documents;
+            sequence = batch.sequence;
+        }
+        if documents != self.documents.len() || sequence != self.sequence {
+            return Err("Cached document batches do not cover the log".into());
+        }
+        validate_callback_checkpoints(&self.callback_checkpoints, self.sequence)?;
         Ok(())
     }
 
     fn publish(&mut self, stage: Stage) {
+        let appended = !stage.documents.is_empty();
         for document in stage.documents {
             let record = &document.record;
             let index = self.documents.len();
@@ -196,6 +229,12 @@ impl State {
             self.history.push(version);
         }
         self.sequence = stage.sequence;
+        if appended {
+            self.batches.push(BatchBoundary {
+                documents: self.documents.len(),
+                sequence: self.sequence,
+            });
+        }
     }
 }
 
@@ -205,6 +244,11 @@ struct Stage {
     sequence: u64,
     resolved: Vec<Value>,
     replayed: usize,
+}
+
+struct Prepared {
+    token: String,
+    stage: Stage,
 }
 
 /// One open document log (or `:memory:` database) with its Wasm view.
@@ -226,6 +270,7 @@ pub struct Engine {
     replay_documents: u64,
     recovered_tail_bytes: u64,
     checkpoint_on_drop: bool,
+    prepared: Option<Prepared>,
 }
 
 impl Engine {
@@ -282,6 +327,7 @@ impl Engine {
             replay_documents: 0,
             recovered_tail_bytes: scan.recovered,
             checkpoint_on_drop: false,
+            prepared: None,
         };
         for verified in scan.batches.into_iter().skip(skip) {
             let count = verified.batch.documents.len() as u64;
@@ -317,7 +363,27 @@ impl Engine {
             .ok_or("Request requires an op string")?
         {
             "ingest" => self.ingest(&request),
+            "prepare_ingest" => self.prepare_ingest(&request),
+            "commit_prepared" => self.commit_prepared(&request),
+            "cancel_prepared" => {
+                self.prepared = None;
+                Ok(json!({"cancelled":true}))
+            }
+            "document_batches" => self.document_batches(&request),
+            "callback_checkpoints" => Ok(json!(self.state.callback_checkpoints)),
+            "set_callback_checkpoints" => {
+                self.prepared = None;
+                let checkpoints = callback_checkpoints(&request, self.state.sequence)?;
+                self.state.callback_checkpoints.extend(checkpoints);
+                Ok(json!({"updated":true}))
+            }
             "preview" => self.preview(&request),
+            "canonical_key" => {
+                let key = request.get("key").ok_or("canonical_key requires a key")?;
+                validate_json(key, 0)?;
+                validate_exact_integers(key)?;
+                Ok(json!(canonical_json(key)?))
+            }
             "query" => self.query(&request),
             "changes" => self.changes(&request),
             "documents" => self.documents(&request),
@@ -325,6 +391,7 @@ impl Engine {
             "stats" => self.stats(),
             "descriptor" => Ok(self.runtime.descriptor.clone()),
             "checkpoint" => {
+                self.prepared = None;
                 self.checkpoint()?;
                 let mut stats = self.stats()?;
                 stats["checkpointed"] = json!(true);
@@ -332,6 +399,7 @@ impl Engine {
             }
             "rebuild" => self.rebuild(),
             "close" => {
+                self.prepared = None;
                 // A failed final checkpoint is reported, but the handle and its
                 // ownership lock are released either way so the log can be reopened.
                 let checkpointed = self.checkpoint();
@@ -403,6 +471,7 @@ impl Engine {
     }
 
     fn ingest(&mut self, request: &Value) -> Result<Value> {
+        self.prepared = None;
         let documents = request
             .get("documents")
             .and_then(Value::as_array)
@@ -419,6 +488,55 @@ impl Engine {
             self.state.publish(stage);
         }
         Ok(response)
+    }
+
+    fn prepare_ingest(&mut self, request: &Value) -> Result<Value> {
+        self.prepared = None;
+        let documents = request.get("documents").and_then(Value::as_array)
+            .ok_or("prepare_ingest requires a documents array")?;
+        let stage = stage(&mut self.runtime, &self.state, documents)?;
+        let token = Uuid::new_v4().to_string();
+        let response = json!({"token":token,"documents":stage.resolved,
+            "new_documents":stage.documents.iter().map(document_value).collect::<Vec<_>>(),
+            "inserted":stage.documents.len(),"replayed":stage.replayed,
+            "sequence":stage.sequence,"cursor":self.cursor(stage.sequence)});
+        self.prepared = Some(Prepared { token, stage });
+        Ok(response)
+    }
+
+    fn commit_prepared(&mut self, request: &Value) -> Result<Value> {
+        let prepared = self.prepared.take().ok_or("No prepared ingestion; prepare the batch again")?;
+        if request.get("token").and_then(Value::as_str) != Some(prepared.token.as_str()) {
+            return Err("Prepared ingestion token is stale; prepare the batch again".into());
+        }
+        let stage = prepared.stage;
+        let checkpoints = callback_checkpoints(request, stage.sequence)?;
+        let response = json!({"documents":stage.resolved,"inserted":stage.documents.len(),
+            "replayed":stage.replayed,"sequence":stage.sequence,"cursor":self.cursor(stage.sequence)});
+        if !stage.documents.is_empty() {
+            self.storage.as_mut().unwrap().append(Batch {
+                documents: stage.documents.iter().map(|doc| doc.record.clone()).collect(),
+            })?;
+            self.state.publish(stage);
+        }
+        self.state.callback_checkpoints.extend(checkpoints);
+        Ok(response)
+    }
+
+    fn document_batches(&self, request: &Value) -> Result<Value> {
+        let since = request.get("since").map(|v| safe_integer(v, "batch coverage"))
+            .transpose()?.unwrap_or(0);
+        let snapshot = self.parse_cursor(request.get("cursor"), self.state.sequence, false)?;
+        if since > snapshot || (since != 0 && !self.state.batches.iter().any(|b| b.sequence == since)) {
+            return Err("Callback coverage must identify a committed batch boundary".into());
+        }
+        let index = self.state.batches.partition_point(|batch| batch.sequence <= since);
+        let Some(batch) = self.state.batches.get(index).filter(|batch| batch.sequence <= snapshot) else {
+            return Ok(json!({"documents":[],"sequence":since,"complete":true}));
+        };
+        let start = index.checked_sub(1).map(|i| self.state.batches[i].documents).unwrap_or(0);
+        Ok(json!({"documents":self.state.documents[start..batch.documents].iter().map(document_value).collect::<Vec<_>>(),
+            "sequence":batch.sequence,"complete":self.state.batches.get(index+1).is_none_or(|next| next.sequence > snapshot)}))
     }
 
     fn replay_batch(&mut self, batch: Batch) -> Result<()> {
@@ -448,6 +566,7 @@ impl Engine {
     }
 
     fn rebuild(&mut self) -> Result<Value> {
+        self.prepared = None;
         let scan = self.storage.as_mut().unwrap().scan()?;
         let mut rebuilt = State::empty();
         let mut document_count = 0;
@@ -859,8 +978,16 @@ fn map_documents(runtime: &Runtime, payloads: Vec<Value>) -> Result<Vec<Vec<Valu
 }
 
 fn checkpoint_matches_log(state: &State, batches: &[storage::VerifiedBatch]) -> bool {
+    if state.batches.len() != batches.len() {
+        return false;
+    }
     let mut documents = state.documents.iter();
-    for batch in batches {
+    let mut document_count = 0;
+    for (batch, boundary) in batches.iter().zip(&state.batches) {
+        document_count += batch.batch.documents.len();
+        if boundary.documents != document_count {
+            return false;
+        }
         let mut previous = None;
         for record in &batch.batch.documents {
             let Some(document) = documents.next() else {
@@ -875,6 +1002,41 @@ fn checkpoint_matches_log(state: &State, batches: &[storage::VerifiedBatch]) -> 
         }
     }
     documents.next().is_none()
+}
+
+fn callback_checkpoints(request: &Value, sequence: u64) -> Result<BTreeMap<String, Value>> {
+    let checkpoints = match request.get("checkpoints") {
+        None => BTreeMap::new(),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|_| "Callback checkpoints must be an object")?,
+    };
+    validate_callback_checkpoints(&checkpoints, sequence)?;
+    Ok(checkpoints)
+}
+
+fn validate_callback_checkpoints(checkpoints: &BTreeMap<String, Value>, sequence: u64) -> Result<()> {
+    for (name, checkpoint) in checkpoints {
+        if name.is_empty() || name.len() > 4096 || checkpoint.get("format").and_then(Value::as_u64) != Some(1) {
+            return Err("Invalid callback checkpoint name or format".into());
+        }
+        let coverage = safe_integer(checkpoint.get("sequence").ok_or("Callback checkpoint requires coverage")?, "callback coverage")?;
+        if coverage > sequence {
+            return Err("Callback checkpoint is ahead of the committed log".into());
+        }
+        validate_json(checkpoint.get("descriptor").ok_or("Callback checkpoint requires descriptor")?, 0)?;
+        for group in checkpoint.get("groups").and_then(Value::as_array).ok_or("Callback checkpoint requires groups")? {
+            for field in ["key", "state", "result"] {
+                let value = group.get(field).ok_or("Callback group requires key, state and result")?;
+                validate_json(value, 0)?;
+                validate_exact_integers(value)?;
+            }
+            let group_sequence = safe_integer(group.get("sequence").ok_or("Callback group requires sequence")?, "callback group sequence")?;
+            if group_sequence > coverage {
+                return Err("Callback group is ahead of its checkpoint".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn document_value(document: &Document) -> Value {

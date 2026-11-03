@@ -20,7 +20,7 @@ const noticeFiles = [
 let notices = `Third-party licenses and notices for the bundled portable Wasm views
 ===================================================================
 
-The compiled metrics.wasm and catalogue.wasm modules contain AssemblyScript
+The compiled metrics.wasm, catalogue.wasm and documents.wasm modules contain AssemblyScript
 runtime/standard-library code, json-as JSON code, and xjb-as float-formatting
 code. Their upstream license and notice texts follow, with line endings
 normalized to LF. Upstream npm source files have not been modified.
@@ -41,7 +41,7 @@ if (check) {
   if (await readFile(noticePath, 'utf8') !== notices) throw new Error('Stale third-party license notices. Run npm run build --prefix views.');
 } else await writeFile(noticePath, notices);
 
-for (const name of ['metrics', 'catalogue']) {
+for (const name of ['metrics', 'catalogue', 'documents']) {
   const { bytes, manifest } = await compileView(resolve(root, `assembly/examples/${name}.ts`));
   for (const [suffix, contents] of [['wasm', bytes], ['json', manifest]]) {
     const path = resolve(destination, `${name}.${suffix}`);
