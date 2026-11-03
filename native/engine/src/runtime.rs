@@ -170,7 +170,7 @@ impl Runtime {
             .call(&mut store, input.len() as i32)
             .map_err(|e| {
                 let message = format!("Wasm execution failed: {e}");
-                if e.as_trap_code() == Some(wasmi::core::TrapCode::OutOfFuel) {
+                if e.as_trap_code() == Some(wasmi::TrapCode::OutOfFuel) {
                     CallError::Capacity(message)
                 } else {
                     CallError::Failure(message)

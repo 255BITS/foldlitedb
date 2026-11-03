@@ -184,6 +184,12 @@ identity, state, and result are validated as individual legacy responses at
 depth one beneath the response envelope. All chunk work finishes before the
 document batch commits.
 
+Compare grouped and separate operations on the same SDK and native runtime with
+`python scripts/benchmark_groups.py --documents 4096 --repeats 5 --output groups-benchmark.json`
+from the repository root, after installing the view compiler dependencies. It
+checks identical states, results, and sequences while timing in-memory ingestion;
+use `scripts/benchmark_database.py` for Python transport and durable storage.
+
 The manifest binds each compiled artifact to its descriptor:
 
 ```json

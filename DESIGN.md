@@ -141,9 +141,10 @@ responses retain the serialized identity for host validation. Host chunks obey
 the existing byte, data-depth, memory, and fuel bounds; exact capacity signals or
 native fuel exhaustion can split a chunk, and singleton capacity falls back to
 ordinary operations. Other failures reject the staged batch. Legacy descriptors
-retain separate fresh-instance identity/add/finalize calls. Group publication
-and sequence allocation still follow the original canonical group order, after
-every group has validated and before the single durable append.
+retain separate fresh-instance identity/add/finalize calls. Group staging
+and sequence allocation still follow the original canonical group order. All
+groups validate before the single durable append; publication follows its
+successful sync.
 
 The exact module SHA-256 binds cached state to computation, state schema, compiler,
 and SDK runtime. Human-readable view and state versions explain changes but do

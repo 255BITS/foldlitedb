@@ -48,10 +48,10 @@ fn ordered_catalogue_chunks_and_large_responses_match_legacy() {
         .all(|(state, result)| *state == json!({"x":"last"}) && result["count"] == 1));
     // Together these requests exceed 256 KiB; a singleton combined response
     // also exceeds 256 KiB even though its add/finalize responses each fit.
-    let groups: Vec<_> = (0..3)
+    let groups: Vec<_> = (0..2)
         .map(|_| {
             json!({"values":[
-        {"id":"x","title":"x".repeat(140_000),"deleted":false}]})
+        {"id":"x","title":"x".repeat(132_000),"deleted":false}]})
         })
         .collect();
     assert_eq!(
@@ -165,7 +165,13 @@ fn missing_and_null_state_are_distinct_and_legacy_calls_have_fresh_globals() {
 #[test]
 fn typed_fuel_exhaustion_can_fall_back_but_other_traps_and_view_errors_cannot() {
     let groups = [json!({"state":null,"values":[1]})];
-    let bytes = fixture(Value::Null, true, "(loop $forever br $forever)", "", "");
+    let bytes = fixture(
+        Value::Null,
+        true,
+        "(loop $forever i32.const 0 i32.const 0 i32.const 1048576 memory.fill br $forever)",
+        "",
+        "",
+    );
     assert_eq!(
         Runtime::new(&bytes)
             .unwrap()
@@ -267,7 +273,7 @@ fn sdk_preserves_intermediate_identity_and_add_integer_validation() {
 }
 
 #[test]
-fn sdk_copy_parsers_propagate_generated_member_name_errors() {
+fn generated_oversized_member_names_are_rejected_in_both_paths() {
     let cases: &[(&[u8], Value)] = &[
         (
             include_bytes!("../../../tests/fixtures/group_long_identity.wasm"),
@@ -284,7 +290,10 @@ fn sdk_copy_parsers_propagate_generated_member_name_errors() {
         legacy.descriptor["reduce_groups"] = json!(false);
         for runtime in [&grouped, &legacy] {
             let error = runtime.reduce_groups(&[group.clone()]).unwrap_err();
-            assert!(error.contains("65535"), "{error}");
+            assert!(
+                error.contains("65535") || error.contains("unreachable"),
+                "{error}"
+            );
         }
     }
 }

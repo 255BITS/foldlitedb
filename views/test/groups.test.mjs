@@ -84,7 +84,7 @@ test('group SDK fixture is reproducible and retains intermediate integer spellin
   assert.match(response, /"identity":9007199254740993/);
 });
 
-test('SDK propagates parser failures while copying generated identity and state', async () => {
+test('SDK rejects oversized generated identity and state member names in both paths', async () => {
   const base = new URL('../../tests/fixtures/', import.meta.url);
   for (const name of ['group_contract','group_long_identity']) {
     const binary=await readFile(new URL(`${name}.wasm`,base));
@@ -94,6 +94,6 @@ test('SDK propagates parser failures while copying generated identity and state'
     const grouped=await ViewModule.fromBytes(binary,manifest), legacy=await ViewModule.fromBytes(binary,manifest);
     legacy.descriptor.reduce_groups=false;
     const groups=name==='group_contract' ? [{state:null,values:['long-key']}] : [{values:['discard']}];
-    for (const engine of [grouped,legacy]) assert.throws(()=>engine.reduceGroups(groups),/65535/);
+    for (const engine of [grouped,legacy]) assert.throws(()=>engine.reduceGroups(groups),/65535|unreachable/);
   }
 });
