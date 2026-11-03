@@ -653,3 +653,72 @@ fn internal_sources_starting_with_underscore_are_stored_without_wasm_mapping() {
     assert_eq!(reopened_stats["cache"]["status"], "loaded");
 }
 
+
+#[test]
+fn shared_host_conformance_corpus_covers_sources_depth_and_output_buffers() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/portable_conformance.json"
+    ))
+    .unwrap();
+    for case in fixture["source_cases"].as_array().unwrap() {
+        let mut engine = Engine::open(":memory:", METRICS).unwrap();
+        let record = json!({"id":"one","source":case["source"],"payload":{"metric":"x","value":2}});
+        let accepted = execute(&mut engine, json!({"op":"ingest","documents":[record]}));
+        assert_eq!(accepted["inserted"], 1);
+        let rows = execute(&mut engine, json!({"op":"query"}));
+        assert_eq!(
+            rows["rows"].as_array().unwrap().len(),
+            usize::from(case["mapped"].as_bool().unwrap())
+        );
+        assert_eq!(
+            execute(&mut engine, json!({"op":"documents"}))["documents"][0]["source"],
+            case["source"]
+        );
+        let replay = execute(&mut engine, json!({"op":"ingest","documents":[record]}));
+        assert_eq!(replay["replayed"], 1);
+        execute(&mut engine, json!({"op":"rebuild"}));
+        assert_eq!(
+            execute(&mut engine, json!({"op":"query"}))["rows"],
+            rows["rows"]
+        );
+    }
+    for case in fixture["payload_depth_cases"].as_array().unwrap() {
+        let mut engine = Engine::open(":memory:", METRICS).unwrap();
+        let mut payload = Value::Null;
+        for _ in 0..case["depth"].as_u64().unwrap() {
+            payload = json!([payload]);
+        }
+        let accepted = engine.execute(json!({"op":"ingest","documents":[{"payload":payload}]}));
+        assert_eq!(
+            accepted.is_ok(),
+            case["accepted"].as_bool().unwrap(),
+            "depth {}: {accepted:?}",
+            case["depth"]
+        );
+    }
+    for case in fixture["output_modules"].as_array().unwrap() {
+        let bytes = wat::parse_str(case["wat"].as_str().unwrap()).unwrap();
+        let hex = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            hex,
+            case["hex"].as_str().unwrap(),
+            "Fixture binary must match its reviewable WAT source"
+        );
+        let accepted = Engine::open(":memory:", &bytes);
+        assert_eq!(
+            accepted.is_ok(),
+            case["accepted"].as_bool().unwrap(),
+            "pointer {}",
+            case["output_pointer"]
+        );
+        if let Err(error) = accepted {
+            assert!(
+                error.contains("output buffer must be in bounds and disjoint"),
+                "{error}"
+            );
+        }
+    }
+}

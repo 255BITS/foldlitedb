@@ -137,13 +137,28 @@ async def materialize_jsonl_view(
     started = time.monotonic()
     known = set()
 
+    async def read_groups(database):
+        """Collect a bounded projection using ordinary snapshot continuations."""
+        rows = []
+        cursor = after = None
+        while True:
+            page = await asyncio.to_thread(database.query, view.name,
+                                           limit=min(1024, max_groups + 1 - len(rows)),
+                                           cursor=cursor, after=after)
+            rows.extend(page.rows)
+            if len(rows) > max_groups:
+                raise ValueError(f"View exceeds {max_groups} groups; narrow the view")
+            if page.complete:
+                return tuple(rows)
+            cursor, after = page.cursor, page.after
+
     def bounded_map(document):
         if time.monotonic() - started > timeout:
             raise ValueError(
                 "Historical reduction exceeded its time budget; retry with a larger explicit history budget or prepare a smaller projection"
             )
         for key, contribution in view.map(document):
-            encoded_key = json_bytes(key)
+            encoded_key = database._canonical_key(key)[0]
             if encoded_key not in known:
                 if len(known) >= max_groups:
                     raise ValueError(f"View exceeds {max_groups} groups; narrow the view")
@@ -164,11 +179,16 @@ async def materialize_jsonl_view(
             reducer=view.reducer,
             references=view.references,
         )
-        await asyncio.to_thread(database.register, view_with_map)
-        snapshot = await asyncio.to_thread(database.query, view.name, limit=max_groups + 1)
-        if not snapshot.complete or len(snapshot.rows) > max_groups:
-            raise ValueError(f"View exceeds {max_groups} groups; narrow the view")
-        known.update(json_bytes(row.key) for row in snapshot.rows)
+        await asyncio.to_thread(database.register, view_with_map, _external=True)
+        # Progress and aggregate state have one descriptor. An external source
+        # remains authoritative, so a changed descriptor must reread its prefix.
+        if (database.checkpoint("projection") is not None
+                and not database._external_descriptor_matches[view.name]):
+            await asyncio.to_thread(database.close)
+            database = await asyncio.to_thread(Database, path, generation=generation, reset=True)
+            await asyncio.to_thread(database.register, view_with_map, _external=True)
+        rows = await read_groups(database)
+        known.update(database._canonical_key(row.key)[0] for row in rows)
         checkpoint = await asyncio.to_thread(database.checkpoint, "projection")
         replay = None
         if checkpoint is not None:
@@ -208,7 +228,7 @@ async def materialize_jsonl_view(
                 for ordinal, (key, val) in enumerate(bounded_map(doc)):
                     if getattr(view.reducer, "positioned", True) is False and hasattr(view.reducer, "prepare"):
                         val = view.reducer.prepare(val, doc, ordinal)
-                    canon_key = json.dumps(key, sort_keys=True)
+                    canon_key, key = database._canonical_key(key)
                     entry = pending_emissions.get(canon_key)
                     if entry is None:
                         vals = [val]
@@ -244,9 +264,6 @@ async def materialize_jsonl_view(
                 checkpoint,
                 replay,
             )
-        snapshot = await asyncio.to_thread(database.query, view.name, limit=max_groups + 1)
-        if not snapshot.complete or len(snapshot.rows) > max_groups:
-            raise ValueError(f"View exceeds {max_groups} groups; narrow the view")
-        return snapshot.rows
+        return await read_groups(database)
     finally:
         await asyncio.to_thread(database.close)

@@ -2,7 +2,7 @@
 <h1>Write a view once.<br>Run it in either environment.</h1>
 <p class="lead">A portable view contains both its map and its reducer. AssemblyScript compiles them into one WebAssembly module, executed by the Rust engine or a browser worker.</p>
 <div class="hero-actions"><a class="button" href="playground.html">Try the browser playground</a><a class="button secondary" href="#authoring">Write a custom view</a></div>
-<div class="note preview"><p><strong>Foldlite DB 0.1.0.</strong> Install with <code>python -m pip install foldlitedb==0.1.0</code>. Each native document log has one derived view; the browser host keeps its documents and view in memory.</p></div>
+<div class="note preview"><p><strong>Foldlite DB 0.2.0.</strong> Install with <code>python -m pip install foldlitedb==0.2.0</code>. Each native document log has one derived view; the browser host keeps its documents and view in memory.</p></div>
 
 <h2 id="python">A native database from Python</h2>
 <p>Build prerequisites are Python 3.11+, Rust/Cargo 1.90+, and a platform C compiler and linker. From the repository root:</p>
@@ -33,7 +33,7 @@ with Database("metrics.fold", view) as db:
 <p><strong>Catalogue</strong> accepts <code>{category:string,id:string,title:string,deleted?:boolean}</code>. Each category folds item IDs to their latest titles. An event with <code>{category,id,deleted:true}</code> removes that item. Finalization returns <code>{count,items:{id:title}}</code>. Event order matters, so this view does not support merge. Malformed documents emit nothing; item IDs are limited to 65,535 UTF-16 code units.</p>
 
 <h2 id="authoring">Author a complete view</h2>
-<p>Use Node.js 20+ and install the pinned SDK dependencies from the repository root:</p>
+<p>Use a Node.js runtime matching <code>^22.23.4 || ^24.22.1 || >=26.12.1</code> and install the pinned SDK dependencies from the repository root:</p>
 
 <pre><code>npm ci --prefix views</code></pre>
 
@@ -181,6 +181,8 @@ try {
   }
 }</code></pre>
 
+<p>Source names beginning with <code>_</code> are reserved for metadata. They are retained, exported and replayed, and advance source progress, but do not contribute to views in either host.</p>
+
 <h2 id="contract">The computation contract and limits</h2>
 <div class="table-wrap"><table><thead><tr><th>Operation</th><th>Input</th><th>Output</th></tr></thead><tbody>
 <tr><td><code>descriptor</code></td><td>Module request</td><td>Name, view version, state version, ABI, merge capability</td></tr>
@@ -190,7 +192,7 @@ try {
 <tr><td><code>finalize</code></td><td>State</td><td>Public JSON result</td></tr>
 <tr><td><code>merge</code></td><td>Two compatible states</td><td>Combined state, when supported</td></tr>
 </tbody></table></div>
-<p>The v1 ABI uses UTF-8 JSON with a 256 KiB request limit and a separate 256 KiB response limit, both including envelopes. Modules have no host imports and at most 16 MiB of linear memory. The native host imposes a fuel budget. The browser client runs a dedicated worker with a 15-second default deadline, configurable through <code>timeoutMs</code> from 1 through 60,000 milliseconds. Expiry terminates the worker and loses its in-memory state.</p>
+<p>Payload nesting is measured from each payload root, independently of transport wrappers, with a 64-level limit. ABI response depth retains its separate 64-level envelope limit. The v1 ABI uses UTF-8 JSON with a 256 KiB request limit and a separate 256 KiB response limit, both including envelopes. Modules have no host imports and at most 16 MiB of linear memory. The native host imposes a fuel budget. The browser client runs a dedicated worker with a 15-second default deadline, configurable through <code>timeoutMs</code> from 1 through 60,000 milliseconds. Expiry terminates the worker and loses its in-memory state.</p>
 <p>Both hosts limit an ingestion batch to 1024 documents and 4096 emissions, and snapshot pages to 1024 entries. Encoded map and per-group add requests can reach the ABI byte limit earlier. The browser additionally caps retained documents at 20,000 and 16 MiB of encoded records, distinct groups at 4096, and history at 100,000 entries and 32 MiB of encoded rows. Its public request envelope is capped at 4 MiB. These are component limits, not a bound on the whole browser process. A failing batch does not commit a prefix.</p>
 <p>Portable JSON numbers use IEEE-754 double precision, as in JavaScript. Python and the native engine reject integer inputs that cannot be represented exactly as doubles; use strings for exact large identifiers. A view's response may spell a large double the way <code>JSON.stringify</code> does, but an inexact integer, such as one from 64-bit integer arithmetic, is rejected. Positions and cursor sequences are nonnegative JavaScript-safe integers. Floating-point sums preserve ordered inputs; arbitrary merge trees can change rounding. See <a href="concepts.html#numerical-contract">numerical reproducibility</a>.</p>
 

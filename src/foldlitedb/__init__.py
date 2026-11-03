@@ -17,7 +17,7 @@ from .database import Database, OrderedFold, RustReducer, View, portable_assets
 PortableDatabase = Database
 PortableView = View
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 
 __all__ = [
     "ChangePage", "CursorExpired", "Database", "DatabaseError", "Document",
