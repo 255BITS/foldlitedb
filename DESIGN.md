@@ -146,6 +146,16 @@ Rust crate exports them (`ABI_BUFFER_BYTES`, `MAX_BATCH_DOCUMENTS`,
 `MAX_SAFE_INTEGER`) so embedding applications can pre-validate, and a limit error
 names the operation, the size, and the limit rather than a host-specific API.
 
+Native execution uses Wasmi 2.0 stable fuel accounting. Each portable operation,
+including module startup, receives 500 million fuel units; bundled numeric
+reducers retain their configurable 50 million-unit default per request and
+50 million-unit startup budget. These units count input Wasm operations and
+cannot be compared directly with budgets from Wasmi 0.47.2. A 249,882-byte map
+request containing 1024 metrics with padding consumed 423,077,088 units in the
+calibration fixture. The bounded portable budget admits that fixture; arbitrary
+views and inputs can still exhaust fuel before reaching other limits. Numeric
+reducer instances remain poisoned after exhaustion and must be replaced.
+
 JSON numbers follow finite IEEE-754 double semantics in both hosts. The native
 engine, like Python before it, rejects integers that cannot be represented
 exactly as doubles (`int(float(n)) == n`) instead of rounding them. It checks

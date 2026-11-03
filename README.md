@@ -17,14 +17,14 @@ the [view authoring guide](docs/portable.html).
 
 Read the [changelog](CHANGELOG.md) for the consolidated release history and the
 [upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html) before moving
-an existing database to 0.3.1.
+an existing database to 0.3.2.
 
 ## Install
 
-Use Python 3.11+ to install the 0.3.1 release:
+Use Python 3.11+ to install the 0.3.2 release:
 
 ```sh
-python -m pip install foldlitedb==0.3.1
+python -m pip install foldlitedb==0.3.2
 ```
 
 Native wheels are provided for Linux x86-64 and ARM64, macOS Intel and Apple
@@ -51,7 +51,7 @@ a wheel, run `python -m pip wheel . --no-deps --wheel-dir dist`. Install that
 wheel on a matching platform with `python -m pip install /path/to/the-built.whl`;
 installing a built wheel needs neither Rust nor Node. See the
 [release guide](docs/releasing.html) for PyPI Trusted Publisher setup and the
-0.3.1 publication workflow.
+0.3.2 publication workflow.
 
 ## Append documents, read a live view
 
@@ -148,7 +148,7 @@ reproduce its previous results. Close the database before backing up the log and
 view artifacts; Windows locks prevent other handles from reading an active log.
 The cache is replaceable; the only copy of a document log is not.
 
-Version 0.3.1 creates `FOLDLOG2` logs with persisted predecessor hashes. Existing
+Version 0.3.2 creates `FOLDLOG2` logs with persisted predecessor hashes. Existing
 `FOLDLOG1` logs open for reading and export; migrate into a new filename before
 appending:
 

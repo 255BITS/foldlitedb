@@ -1,6 +1,6 @@
 [package]
 name = "foldlitedb-portable-engine"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.90"
 description = "Rust-native durable documents with portable WebAssembly map/reduce views"
@@ -13,7 +13,7 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
 sha2 = "=0.10.9"
 uuid = { version = "=1.18.1", features = ["v4"] }
-wasmi = { version = "=0.47.2", default-features = false, features = ["std"] }
+wasmi = { version = "=2.0.0", default-features = false, features = ["std", "stable", "validate", "auto-dispatch"] }
 ryu-js = "=1.0.2"
 
 [dev-dependencies]
