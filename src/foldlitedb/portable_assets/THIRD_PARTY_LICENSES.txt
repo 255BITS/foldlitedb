@@ -1,7 +1,7 @@
 Third-party licenses and notices for the bundled portable Wasm views
 ===================================================================
 
-The compiled metrics.wasm and catalogue.wasm modules contain AssemblyScript
+The compiled metrics.wasm, catalogue.wasm and documents.wasm modules contain AssemblyScript
 runtime/standard-library code, json-as JSON code, and xjb-as float-formatting
 code. Their upstream license and notice texts follow, with line endings
 normalized to LF. Upstream npm source files have not been modified.
