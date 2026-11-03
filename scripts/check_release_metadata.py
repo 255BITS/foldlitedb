@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import argparse
 import json
 from pathlib import Path
 import re
@@ -11,8 +12,10 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def check(root=ROOT):
+def check(root=ROOT, *, tag=None):
     version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    if tag is not None and tag != f"v{version}":
+        raise ValueError(f"Expected release tag v{version}, got {tag!r}")
     for name in ("native/engine/Cargo.toml", "native/python/Cargo.toml"):
         declared = tomllib.loads((root / name).read_text())["package"]["version"]
         if declared != version:
@@ -37,4 +40,6 @@ def check(root=ROOT):
 
 
 if __name__ == "__main__":
-    check()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag", help="Require a release tag matching the package version")
+    check(tag=parser.parse_args().tag)

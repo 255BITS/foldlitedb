@@ -31,31 +31,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python - <<'PY'
-          import ast
-          import os
-          import tomllib
-          from pathlib import Path
-
-          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
-          version = project["version"]
-          expected = f"v{version}"
-          tag = os.environ["RELEASE_TAG"]
-          if project["name"] != "foldlitedb" or tag != expected:
-              raise SystemExit(f"Expected foldlitedb release {expected}, got {tag!r}")
-          for path in ("native/python/Cargo.toml", "native/engine/Cargo.toml"):
-              native = tomllib.loads(Path(path).read_text())["package"]["version"]
-              if native != version:
-                  raise SystemExit(f"{path} version {native!r} differs from {version!r}")
-          module = ast.parse(Path("src/foldlitedb/__init__.py").read_text())
-          versions = [ast.literal_eval(node.value) for node in module.body
-                      if isinstance(node, ast.Assign)
-                      and any(isinstance(target, ast.Name) and target.id == "__version__"
-                              for target in node.targets)]
-          if versions != [version]:
-              raise SystemExit(f"Python __version__ {versions!r} differs from {version!r}")
-          print(f"Validated {project['name']} {version}")
-          PY
+          python scripts/check_release_metadata.py --tag "$RELEASE_TAG"
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   checks:
