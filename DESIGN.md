@@ -34,8 +34,13 @@ is a log file; `.cache` and `.lock` siblings hold an optional cache checkpoint a
 an operating-system lock. One active owner may open a persistent log. `:memory:`
 uses the same computation without persistent files or durable acknowledgements.
 
-The log has an identity and checksummed, hash-linked frames containing accepted
-document batches. The source format does not contain a view-module dependency.
+New logs use FOLDLOG2 with an identity, payload checksums, and a persisted
+predecessor digest in every batch frame. Omitted, reordered, and cross-log
+spliced unchanged frames fail verification. Complete final-suffix removal needs
+an independently trusted end boundary and cannot be proved by a predecessor
+chain alone. FOLDLOG1 logs open read-only; Database.migrate(source, destination)
+verifies and copies their original batches to a new FOLDLOG2 log without changing
+the source or replacing an existing destination. The source format does not contain a view-module dependency.
 An ingestion operation validates identities, source order, limits, mapping, and
 reduction before writing. The engine appends the complete frame and syncs it
 before acknowledging the batch, then exposes its already-computed derived state.
@@ -171,7 +176,7 @@ there is no compaction or reader-retention policy yet.
 
 `Database` and `View` are the primary Python types; `PortableDatabase` and
 `PortableView` are exact aliases. The package has one native storage and
-computation path. `native/python` provides PyO3 bindings, and maturin builds the
+acceptance/commit path. `native/python` provides PyO3 bindings, and maturin builds the
 extension into wheels. Source builds need Python 3.11+, Rust/Cargo 1.90+, and a C
 toolchain. Bundled modules need no Node; authoring uses Node.js matching `^22.23.4 || ^24.22.1 || >=26.12.1`.
 
@@ -180,6 +185,41 @@ and in-memory storage. It does not run the Rust log engine and has no persistent
 browser storage yet. Export and replay resolved documents to preserve work.
 Worker deadlines, retained-byte limits, and document/group/history caps bound
 this preview's requests and retained data. A timeout discards its memory.
+
+## Python callbacks and external projections
+
+Python callback views use native preparation for document identity, deduplication,
+positions, and Wasm validation. Under one Python operation lock, maps, reducer
+updates, finalizers, and finite-JSON validation stage on copied state before a
+prepared native batch is durably appended. A native token prevents stale
+preparations from committing after another mutation. Only a successful append
+publishes the staged callbacks and native state. Callbacks must be deterministic,
+must not mutate the database, and run as trusted Python without Wasm isolation.
+
+Ordinary callback state is a descriptor-bound disposable native cache. Cached
+coverage is an original batch boundary. Reopen recovers any missing suffix in
+original order and batch boundaries; cache loss or a changed descriptor replays
+retained documents. A primary callback view supplies query/rows; additional
+registered views are selected by name. Snapshot cursors bind native generation,
+module, and callback descriptor; historical pages reconstruct from batches.
+Callback change feeds and preview are explicitly unsupported. Portable Wasm
+views continue to support both.
+
+External JSONL projections are different only in source ownership: the external
+stream is authoritative, and the compact projection log stores descriptor-bound
+progress and grouped state together. It cannot reconstruct external documents
+from its own cache. A source generation or view/reducer/reference change rereads
+the external source. This contract is explicit rather than treating consumed
+progress as valid independently of its derived state.
+
+Sources beginning with _ are reserved metadata, retained/exported/replayed and
+advancing source progress while excluded from view computation in both hosts.
+Primary filenames ending .cache/.lock or containing .cache. are reserved
+case-insensitively. Native reset retains stable coordination and actual-log locks;
+view validation precedes destructive reset. A reset I/O failure is reported and
+its outcome may be uncertain. Unknown auxiliary cache bytes are preserved under
+a unique .cache.unrecognized.* filename; authoritative logs and symlink sidecars
+are rejected.
 
 ## Acceptance and evidence
 

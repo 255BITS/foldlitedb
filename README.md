@@ -6,8 +6,9 @@ Foldlite DB is a CouchDB-inspired map/reduce engine built around a simple rule:
 keep immutable documents, derive everything else. The Rust engine appends accepted
 document batches to a durable log. Indexes, source checkpoints, group states, and
 change history form a disposable cache that can be reconstructed from that log.
-There is one native implementation, exposed to Python; storage needs no database
-server or external database library.
+One native engine owns document acceptance, source order, commits, and replay,
+and is exposed to Python. Storage needs no database server or external database
+library. Python callbacks can derive local views through that same commit path.
 
 Write a view in AssemblyScript and compile it to WebAssembly. The same module
 maps and reduces documents in Rust or entirely in a browser worker. Try the
@@ -113,6 +114,23 @@ reproduce its previous results. Close the database before backing up the log and
 view artifacts; Windows locks prevent other handles from reading an active log.
 The cache is replaceable; the only copy of a document log is not.
 
+Version 0.2.0 creates `FOLDLOG2` logs with persisted predecessor hashes. Existing
+`FOLDLOG1` logs open for reading and export; migrate into a new filename before
+appending:
+
+```python
+Database.migrate("old.fold", "migrated.fold")
+```
+
+Close the source first. Migration verifies and preserves its original batch
+boundaries, leaves the source unchanged, and refuses an existing destination.
+Keep the source backup until the migrated log and its view have been verified.
+Filenames ending in `.cache` or `.lock`, or containing `.cache.`, are reserved
+for native sidecars. `reset=True` explicitly discards a database only after
+obtaining its ownership locks; it refuses a live owner and validates the module
+before changing data. An I/O failure during reset is reported and may leave its
+outcome uncertain.
+
 Rebuild uses the original batch order. It scans the log linearly and runs each
 uncached batch through the same map/reduce path as live ingestion. A valid cache
 avoids repeated Wasm work, but reopening still verifies the complete log. Current
@@ -141,6 +159,20 @@ batch boundaries too if you need identical engine sequence values.
 
 ## Author a view, run it on a website
 
+For Python-only computation, `View(name, version=..., map=..., reducer=...)` and
+`OrderedFold` use the same native document acceptance and durable commit model.
+Callbacks receive resolved `Document` values; identical retries never map twice.
+All maps, reducer updates, and finalizers finish before the batch commits. Their
+descriptor-bound caches are disposable and recover by replaying original source
+batches after reopen or cache loss. Changes to callback code or reference inputs
+require a new view/reducer version or references. Callback code is trusted Python
+and does not have Wasm's fuel or memory isolation. See the
+[callback API](docs/api.html#callbacks) for snapshots and supported operations.
+
+Source names beginning with `_` are reserved for metadata. They are retained,
+exported and replayed, and advance source progress, but do not contribute to
+views in either host.
+
 The [AssemblyScript SDK](views/README.md) provides JSON helpers and the Wasm ABI.
 Implement `map`, `identity`, `add`, and `finalize`; implement `merge` only for
 states that can be combined correctly. Inputs and state are explicit, and views
@@ -158,7 +190,7 @@ npm run check --prefix views
 
 The build writes modules and SHA-256 manifests into
 `src/foldlitedb/portable_assets/`. It builds the named `metrics` and `catalogue`
-examples. Compile a custom view and generate its manifest with:
+examples plus an internal document-only module used by callback views. Compile a custom view and generate its manifest with:
 
 ```sh
 npm run build:view --prefix views -- assembly/examples/my-view.ts --out-dir .build
