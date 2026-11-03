@@ -14,6 +14,10 @@ maps and reduces documents in Rust or entirely in a browser worker. Try the
 [browser playground](https://255bits.github.io/foldlitedb/playground.html) or read
 the [view authoring guide](docs/portable.html).
 
+[Watch the engineering walkthrough](videos/streaming-ux/README.md): a narrated
+map/reduce refresher, streaming web UX demo, and a look at cursors, replay, and
+portable Wasm views. The video includes editable source and a runnable SSE demo.
+
 ## Install
 
 Use Python 3.11+ to install the 0.1.0 release:

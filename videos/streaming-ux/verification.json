@@ -1,0 +1,98 @@
+{
+  "native_browser_parity": true,
+  "named_retry_noop": true,
+  "cache_reconstruction": true,
+  "expired_cursor_rejected": true,
+  "log_unchanged": true,
+  "native_change_pages": 3,
+  "rows": [
+    {
+      "key": "checkout",
+      "result": {
+        "count": 4,
+        "max": 120,
+        "mean": 75,
+        "min": 40,
+        "sum": 300
+      },
+      "state": {
+        "count": 4,
+        "max": 120,
+        "min": 40,
+        "sum": 300
+      }
+    },
+    {
+      "key": "latency",
+      "result": {
+        "count": 6,
+        "max": 42,
+        "mean": 16,
+        "min": 6,
+        "sum": 96
+      },
+      "state": {
+        "count": 6,
+        "max": 42,
+        "min": 6,
+        "sum": 96
+      }
+    },
+    {
+      "key": "worker",
+      "result": {
+        "count": 3,
+        "max": 80,
+        "mean": 60,
+        "min": 40,
+        "sum": 180
+      },
+      "state": {
+        "count": 3,
+        "max": 80,
+        "min": 40,
+        "sum": 180
+      }
+    }
+  ],
+  "browser_replay_equivalent": true,
+  "page_errors": [],
+  "stages": [
+    {
+      "file": "demo-00.png",
+      "label": "Bootstrap: a consistent prefix of 7 observations",
+      "cursor": 7
+    },
+    {
+      "file": "demo-01.png",
+      "label": "Latency changes to 19.5 ms; checkout stays at 100 ms",
+      "cursor": 8
+    },
+    {
+      "file": "demo-02.png",
+      "label": "A checkout observation updates only its keyed row",
+      "cursor": 9
+    },
+    {
+      "file": "demo-03.png",
+      "label": "Connection paused; the page retains its current state",
+      "cursor": 9
+    },
+    {
+      "file": "demo-04.png",
+      "label": "Three more facts arrive while the browser is disconnected",
+      "cursor": 9
+    },
+    {
+      "file": "demo-05.png",
+      "label": "Reconnect after cursor 9 and apply the missing observations",
+      "cursor": 12
+    },
+    {
+      "file": "demo-06.png",
+      "label": "Back on the live tail; no page reload",
+      "cursor": 13
+    }
+  ],
+  "module_sha256": "6b67fe346de7144e981e4f10d6efa394db4f5757635dc5e2d29e722011ad6aa0"
+}
