@@ -31,8 +31,9 @@ export class Parser {
   }
 
   value(depth: i32 = 0): JSON.Value {
-    if (depth > 64) {
-      this.error = "Request exceeds 64 nesting levels";
+    // Two transport levels (request and batch array) surround a 64-level datum.
+    if (depth > 66) {
+      this.error = "Request exceeds 66 transport nesting levels";
       return JSON.Value.empty();
     }
     this.whitespace();

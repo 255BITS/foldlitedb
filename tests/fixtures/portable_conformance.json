@@ -1,0 +1,74 @@
+{
+  "schema": "foldlitedb-portable-conformance/v1",
+  "source_cases": [
+    {
+      "source": "default",
+      "mapped": true
+    },
+    {
+      "source": "events",
+      "mapped": true
+    },
+    {
+      "source": "_external",
+      "mapped": false
+    },
+    {
+      "source": "_meta",
+      "mapped": false
+    },
+    {
+      "source": "_view:totals",
+      "mapped": false
+    }
+  ],
+  "payload_depth_cases": [
+    {
+      "depth": 61,
+      "accepted": true
+    },
+    {
+      "depth": 62,
+      "accepted": true
+    },
+    {
+      "depth": 63,
+      "accepted": true
+    },
+    {
+      "depth": 64,
+      "accepted": true
+    },
+    {
+      "depth": 65,
+      "accepted": false
+    }
+  ],
+  "descriptor": {
+    "abi": 1,
+    "name": "moving",
+    "version": "1",
+    "state_version": "1",
+    "mergeable": false
+  },
+  "output_modules": [
+    {
+      "output_pointer": 600000,
+      "accepted": true,
+      "wat": "(module\n  (memory (export \"memory\") 16 256)\n  (global $output (mut i32) (i32.const 300000))\n  (data (i32.const 600000) \"\\7b\\22\\6f\\6b\\22\\3a\\7b\\22\\61\\62\\69\\22\\3a\\31\\2c\\22\\6e\\61\\6d\\65\\22\\3a\\22\\6d\\6f\\76\\69\\6e\\67\\22\\2c\\22\\76\\65\\72\\73\\69\\6f\\6e\\22\\3a\\22\\31\\22\\2c\\22\\73\\74\\61\\74\\65\\5f\\76\\65\\72\\73\\69\\6f\\6e\\22\\3a\\22\\31\\22\\2c\\22\\6d\\65\\72\\67\\65\\61\\62\\6c\\65\\22\\3a\\66\\61\\6c\\73\\65\\7d\\7d\")\n  (func (export \"abi_version\") (result i32) i32.const 1)\n  (func (export \"input_ptr\") (result i32) i32.const 0)\n  (func (export \"input_capacity\") (result i32) i32.const 262144)\n  (func (export \"output_ptr\") (result i32) global.get $output)\n  (func (export \"execute\") (param i32) (result i32)\n    i32.const 600000 i32.const 600000 i32.const 84 memory.copy\n    i32.const 600000 global.set $output i32.const 84))",
+      "hex": "0061736d01000000010a026000017f60017f017f0306050000000001050501011080020608017f0141e0a7120b074c06066d656d6f727902000b6162695f76657273696f6e000009696e7075745f70747200010e696e7075745f636170616369747900020a6f75747075745f7074720003076578656375746500040a3205040041010b040041000b0600418080100b040023000b1a0041c0cf2441c0cf2441d400fc0a000041c0cf24240041d4000b0b5c010041c0cf240b547b226f6b223a7b22616269223a312c226e616d65223a226d6f76696e67222c2276657273696f6e223a2231222c2273746174655f76657273696f6e223a2231222c226d6572676561626c65223a66616c73657d7d0010046e616d6507090100066f7574707574"
+    },
+    {
+      "output_pointer": 100,
+      "accepted": false,
+      "wat": "(module\n  (memory (export \"memory\") 16 256)\n  (global $output (mut i32) (i32.const 300000))\n  (data (i32.const 600000) \"\\7b\\22\\6f\\6b\\22\\3a\\7b\\22\\61\\62\\69\\22\\3a\\31\\2c\\22\\6e\\61\\6d\\65\\22\\3a\\22\\6d\\6f\\76\\69\\6e\\67\\22\\2c\\22\\76\\65\\72\\73\\69\\6f\\6e\\22\\3a\\22\\31\\22\\2c\\22\\73\\74\\61\\74\\65\\5f\\76\\65\\72\\73\\69\\6f\\6e\\22\\3a\\22\\31\\22\\2c\\22\\6d\\65\\72\\67\\65\\61\\62\\6c\\65\\22\\3a\\66\\61\\6c\\73\\65\\7d\\7d\")\n  (func (export \"abi_version\") (result i32) i32.const 1)\n  (func (export \"input_ptr\") (result i32) i32.const 0)\n  (func (export \"input_capacity\") (result i32) i32.const 262144)\n  (func (export \"output_ptr\") (result i32) global.get $output)\n  (func (export \"execute\") (param i32) (result i32)\n    i32.const 100 i32.const 600000 i32.const 84 memory.copy\n    i32.const 100 global.set $output i32.const 84))",
+      "hex": "0061736d01000000010a026000017f60017f017f0306050000000001050501011080020608017f0141e0a7120b074c06066d656d6f727902000b6162695f76657273696f6e000009696e7075745f70747200010e696e7075745f636170616369747900020a6f75747075745f7074720003076578656375746500040a3005040041010b040041000b0600418080100b040023000b180041e40041c0cf2441d400fc0a000041e400240041d4000b0b5c010041c0cf240b547b226f6b223a7b22616269223a312c226e616d65223a226d6f76696e67222c2276657273696f6e223a2231222c2273746174655f76657273696f6e223a2231222c226d6572676561626c65223a66616c73657d7d0010046e616d6507090100066f7574707574"
+    },
+    {
+      "output_pointer": 1048300,
+      "accepted": false,
+      "wat": "(module\n  (memory (export \"memory\") 16 256)\n  (global $output (mut i32) (i32.const 300000))\n  (data (i32.const 600000) \"\\7b\\22\\6f\\6b\\22\\3a\\7b\\22\\61\\62\\69\\22\\3a\\31\\2c\\22\\6e\\61\\6d\\65\\22\\3a\\22\\6d\\6f\\76\\69\\6e\\67\\22\\2c\\22\\76\\65\\72\\73\\69\\6f\\6e\\22\\3a\\22\\31\\22\\2c\\22\\73\\74\\61\\74\\65\\5f\\76\\65\\72\\73\\69\\6f\\6e\\22\\3a\\22\\31\\22\\2c\\22\\6d\\65\\72\\67\\65\\61\\62\\6c\\65\\22\\3a\\66\\61\\6c\\73\\65\\7d\\7d\")\n  (func (export \"abi_version\") (result i32) i32.const 1)\n  (func (export \"input_ptr\") (result i32) i32.const 0)\n  (func (export \"input_capacity\") (result i32) i32.const 262144)\n  (func (export \"output_ptr\") (result i32) global.get $output)\n  (func (export \"execute\") (param i32) (result i32)\n    i32.const 1048300 i32.const 600000 i32.const 84 memory.copy\n    i32.const 1048300 global.set $output i32.const 84))",
+      "hex": "0061736d01000000010a026000017f60017f017f0306050000000001050501011080020608017f0141e0a7120b074c06066d656d6f727902000b6162695f76657273696f6e000009696e7075745f70747200010e696e7075745f636170616369747900020a6f75747075745f7074720003076578656375746500040a3205040041010b040041000b0600418080100b040023000b1a0041ecfd3f41c0cf2441d400fc0a000041ecfd3f240041d4000b0b5c010041c0cf240b547b226f6b223a7b22616269223a312c226e616d65223a226d6f76696e67222c2276657273696f6e223a2231222c2273746174655f76657273696f6e223a2231222c226d6572676561626c65223a66616c73657d7d0010046e616d6507090100066f7574707574"
+    }
+  ]
+}
