@@ -190,6 +190,25 @@ from the repository root, after installing the view compiler dependencies. It
 checks identical states, results, and sequences while timing in-memory ingestion;
 use `scripts/benchmark_database.py` for Python transport and durable storage.
 
+On an Apple M2 Ultra with Wasmi 2.0, 4,096 small metric documents and five
+alternating repetitions produced these median ingestion rates. Every state,
+result, and sequence matched the separate-operation path. These are in-memory
+fixture results; durable ingestion and other views need their own measurements.
+
+| Keys | Documents per batch | Legacy documents per second | Grouped documents per second | Throughput ratio |
+| --- | --- | --- | --- | --- |
+| 1 | 100 | 21,797 | 22,043 | 1.01× |
+| 1 | 1,024 | 22,111 | 21,891 | 0.99× |
+| 16 | 100 | 10,071 | 14,448 | 1.43× |
+| 16 | 1,024 | 19,632 | 20,641 | 1.05× |
+| 1,024 | 100 | 2,500 | 4,950 | 1.98× |
+| 1,024 | 1,024 | 2,426 | 4,860 | 2.00× |
+
+The [raw benchmark](../reports/grouped-reduction-2026-11-03.json) records every
+sample, module and source hashes, runtime, and method. Single-key cases were
+approximately unchanged; this optimization helps most when a batch touches many
+independent groups.
+
 The manifest binds each compiled artifact to its descriptor:
 
 ```json
