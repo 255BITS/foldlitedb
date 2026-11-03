@@ -1,0 +1,12 @@
+{
+  "abi": 1,
+  "module": "documents.wasm",
+  "sha256": "7e4152fec2dc23e43de3ec57ad5b68c302e38fc09af6f4590c3e3e87b7e47986",
+  "descriptor": {
+    "abi": 1,
+    "name": "documents",
+    "version": "1",
+    "state_version": "1",
+    "mergeable": false
+  }
+}
