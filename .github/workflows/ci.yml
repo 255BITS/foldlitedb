@@ -24,6 +24,9 @@ jobs:
       matrix:
         os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","macos-latest","windows-latest"]' || '["ubuntu-latest"]') }}
         python: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["3.11","3.12","3.13","3.14","3.x"]' || '["3.11","3.x"]') }}
+        include:
+          - os: windows-latest
+            python: "3.11"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

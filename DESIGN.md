@@ -185,7 +185,7 @@ prefixes without sorting the complete key set on every query. Browser and
 Python callback queries apply the same collation to their in-memory groups.
 
 Versioned query continuation tokens bind the snapshot, canonical selector,
-inclusive flags, and last key. Changing selectors or using a pre-0.3.0 query
+inclusive flags, and last key. Changing selectors or using a 0.2.x query
 token fails explicitly; page size can change. Document continuation tokens are
 unchanged. Existing 0.2.0 caches reconstruct the derived query index on load,
 preserving snapshot/change cursors and computation sequence allocation. A fresh
