@@ -1,7 +1,7 @@
 //! An immutable native document log with disposable portable Wasm view caches.
+pub mod reducer;
 mod runtime;
 mod storage;
-pub mod reducer;
 
 pub use reducer::ReducerInstance;
 use runtime::Runtime;
@@ -505,7 +505,9 @@ impl Engine {
 
     fn prepare_ingest(&mut self, request: &Value) -> Result<Value> {
         self.prepared = None;
-        let documents = request.get("documents").and_then(Value::as_array)
+        let documents = request
+            .get("documents")
+            .and_then(Value::as_array)
             .ok_or("prepare_ingest requires a documents array")?;
         let stage = stage(&mut self.runtime, &self.state, documents)?;
         let token = Uuid::new_v4().to_string();
@@ -518,7 +520,10 @@ impl Engine {
     }
 
     fn commit_prepared(&mut self, request: &Value) -> Result<Value> {
-        let prepared = self.prepared.take().ok_or("No prepared ingestion; prepare the batch again")?;
+        let prepared = self
+            .prepared
+            .take()
+            .ok_or("No prepared ingestion; prepare the batch again")?;
         if request.get("token").and_then(Value::as_str) != Some(prepared.token.as_str()) {
             return Err("Prepared ingestion token is stale; prepare the batch again".into());
         }
@@ -528,7 +533,11 @@ impl Engine {
             "replayed":stage.replayed,"sequence":stage.sequence,"cursor":self.cursor(stage.sequence)});
         if !stage.documents.is_empty() {
             self.storage.as_mut().unwrap().append(Batch {
-                documents: stage.documents.iter().map(|doc| doc.record.clone()).collect(),
+                documents: stage
+                    .documents
+                    .iter()
+                    .map(|doc| doc.record.clone())
+                    .collect(),
             })?;
             self.state.publish(stage);
         }
@@ -537,19 +546,46 @@ impl Engine {
     }
 
     fn document_batches(&self, request: &Value) -> Result<Value> {
-        let since = request.get("since").map(|v| safe_integer(v, "batch coverage"))
-            .transpose()?.unwrap_or(0);
+        let since = request
+            .get("since")
+            .map(|v| safe_integer(v, "batch coverage"))
+            .transpose()?
+            .unwrap_or(0);
         let snapshot = self.parse_cursor(request.get("cursor"), self.state.sequence, false)?;
-        if since > snapshot || (since != 0 && !self.state.batches.iter().any(|b| b.sequence == since)) {
+        if snapshot != 0
+            && !self
+                .state
+                .batches
+                .iter()
+                .any(|batch| batch.sequence == snapshot)
+        {
+            return Err("Callback snapshot must identify a committed batch boundary".into());
+        }
+        if since > snapshot
+            || (since != 0 && !self.state.batches.iter().any(|b| b.sequence == since))
+        {
             return Err("Callback coverage must identify a committed batch boundary".into());
         }
-        let index = self.state.batches.partition_point(|batch| batch.sequence <= since);
-        let Some(batch) = self.state.batches.get(index).filter(|batch| batch.sequence <= snapshot) else {
+        let index = self
+            .state
+            .batches
+            .partition_point(|batch| batch.sequence <= since);
+        let Some(batch) = self
+            .state
+            .batches
+            .get(index)
+            .filter(|batch| batch.sequence <= snapshot)
+        else {
             return Ok(json!({"documents":[],"sequence":since,"complete":true}));
         };
-        let start = index.checked_sub(1).map(|i| self.state.batches[i].documents).unwrap_or(0);
-        Ok(json!({"documents":self.state.documents[start..batch.documents].iter().map(document_value).collect::<Vec<_>>(),
-            "sequence":batch.sequence,"complete":self.state.batches.get(index+1).is_none_or(|next| next.sequence > snapshot)}))
+        let start = index
+            .checked_sub(1)
+            .map(|i| self.state.batches[i].documents)
+            .unwrap_or(0);
+        Ok(
+            json!({"documents":self.state.documents[start..batch.documents].iter().map(document_value).collect::<Vec<_>>(),
+            "sequence":batch.sequence,"complete":self.state.batches.get(index+1).is_none_or(|next| next.sequence > snapshot)}),
+        )
     }
 
     fn replay_batch(&mut self, batch: Batch) -> Result<()> {
@@ -1028,23 +1064,50 @@ fn callback_checkpoints(request: &Value, sequence: u64) -> Result<BTreeMap<Strin
     Ok(checkpoints)
 }
 
-fn validate_callback_checkpoints(checkpoints: &BTreeMap<String, Value>, sequence: u64) -> Result<()> {
+fn validate_callback_checkpoints(
+    checkpoints: &BTreeMap<String, Value>,
+    sequence: u64,
+) -> Result<()> {
     for (name, checkpoint) in checkpoints {
-        if name.is_empty() || name.len() > 4096 || checkpoint.get("format").and_then(Value::as_u64) != Some(1) {
+        if name.is_empty()
+            || name.len() > 4096
+            || checkpoint.get("format").and_then(Value::as_u64) != Some(1)
+        {
             return Err("Invalid callback checkpoint name or format".into());
         }
-        let coverage = safe_integer(checkpoint.get("sequence").ok_or("Callback checkpoint requires coverage")?, "callback coverage")?;
+        let coverage = safe_integer(
+            checkpoint
+                .get("sequence")
+                .ok_or("Callback checkpoint requires coverage")?,
+            "callback coverage",
+        )?;
         if coverage > sequence {
             return Err("Callback checkpoint is ahead of the committed log".into());
         }
-        validate_json(checkpoint.get("descriptor").ok_or("Callback checkpoint requires descriptor")?, 0)?;
-        for group in checkpoint.get("groups").and_then(Value::as_array).ok_or("Callback checkpoint requires groups")? {
+        validate_json(
+            checkpoint
+                .get("descriptor")
+                .ok_or("Callback checkpoint requires descriptor")?,
+            0,
+        )?;
+        for group in checkpoint
+            .get("groups")
+            .and_then(Value::as_array)
+            .ok_or("Callback checkpoint requires groups")?
+        {
             for field in ["key", "state", "result"] {
-                let value = group.get(field).ok_or("Callback group requires key, state and result")?;
+                let value = group
+                    .get(field)
+                    .ok_or("Callback group requires key, state and result")?;
                 validate_json(value, 0)?;
                 validate_exact_integers(value)?;
             }
-            let group_sequence = safe_integer(group.get("sequence").ok_or("Callback group requires sequence")?, "callback group sequence")?;
+            let group_sequence = safe_integer(
+                group
+                    .get("sequence")
+                    .ok_or("Callback group requires sequence")?,
+                "callback group sequence",
+            )?;
             if group_sequence > coverage {
                 return Err("Callback group is ahead of its checkpoint".into());
             }

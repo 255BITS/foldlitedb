@@ -178,6 +178,17 @@ def test_projection_default_group_budget_uses_bounded_snapshot_pages(tmp_path):
         asyncio.run(materialize(path, documents, [], max_groups=1050))
 
 
+def test_projection_uses_native_key_equality_without_reordering_contributions(tmp_path):
+    path = tmp_path / "canonical.fold"
+    documents = [{"n": n, "key": 1 if n % 2 else 1.0, "value": n} for n in range(1, 4)]
+    view = ordered_fold_view()
+    view.reducer = OrderedFold([], lambda state, value: state + [value], version="1")
+    rows = asyncio.run(materialize(path, documents, [], view=view, max_groups=1))
+    assert len(rows) == 1
+    assert rows[0].state == [1, 2, 3]
+    assert asyncio.run(materialize(path, documents, [], view=view, max_groups=1)) == rows
+
+
 def test_rust_reducer_adapter_batching_and_byte_caps():
     reducer = Reducer()
     rust_reducer = RustReducer("envelope/v1", runtime=reducer, positioned=True)
