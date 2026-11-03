@@ -13,7 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def check(root=ROOT, *, tag=None):
-    version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    if project["name"] != "foldlitedb":
+        raise ValueError("Release metadata must identify the foldlitedb project")
+    version = project["version"]
     if tag is not None and tag != f"v{version}":
         raise ValueError(f"Expected release tag v{version}, got {tag!r}")
     for name in ("native/engine/Cargo.toml", "native/python/Cargo.toml"):
