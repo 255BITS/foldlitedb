@@ -63,6 +63,47 @@ export function canonical(value) {
     : JSON.stringify(v);
   return encode(value);
 }
+
+// Query order is distinct from canonical JSON identity. Keep strings in Unicode
+// scalar order in both hosts; JavaScript's default string order uses UTF-16.
+function scalarCompare(left, right) {
+  const a = left[Symbol.iterator](), b = right[Symbol.iterator]();
+  while (true) {
+    const x = a.next(), y = b.next();
+    if (x.done || y.done) return x.done ? (y.done ? 0 : -1) : 1;
+    const difference = x.value.codePointAt(0) - y.value.codePointAt(0);
+    if (difference) return difference;
+  }
+}
+function keyType(value) {
+  if (value === null) return 0;
+  if (typeof value === 'boolean') return 1;
+  if (typeof value === 'number') return 2;
+  if (typeof value === 'string') return 3;
+  return Array.isArray(value) ? 4 : 5;
+}
+// Callers validate finite JSON before comparing. Objects compare their members
+// in scalar-sorted name order, independently of insertion/property enumeration.
+export function compareKeys(left, right) {
+  const kind = keyType(left), other = keyType(right);
+  if (kind !== other) return kind - other;
+  if (kind === 0) return 0;
+  if (kind === 1 || kind === 2) return left < right ? -1 : left > right ? 1 : 0;
+  if (kind === 3) return scalarCompare(left, right);
+  if (kind === 4) {
+    for (let i = 0; i < Math.min(left.length, right.length); i++) {
+      const difference = compareKeys(left[i], right[i]);
+      if (difference) return difference;
+    }
+    return left.length - right.length;
+  }
+  const a = Object.keys(left).sort(scalarCompare), b = Object.keys(right).sort(scalarCompare);
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const difference = scalarCompare(a[i], b[i]) || compareKeys(left[a[i]], right[b[i]]);
+    if (difference) return difference;
+  }
+  return a.length - b.length;
+}
 const SHA256_K = Uint32Array.of(
   0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
   0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,

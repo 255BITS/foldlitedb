@@ -2,14 +2,38 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.2.0. Each version links its GitHub release;
+before moving existing databases to 0.3.0. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
 
+## [0.3.0](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.0) — 2026-11-03
+
+### Queries
+
+- Add ascending range queries with `start_key`/`end_key` and inclusive or
+  exclusive endpoints, plus string and structural array `prefix` selection.
+- Expose the same selectors in Python `query()`/`rows()`, named callback views,
+  and the browser worker. Ranges return existing per-key results; query-time
+  reduction across selected keys is not implemented.
+- Order keys by JSON type, numbers numerically, strings by Unicode codepoint,
+  and compound keys recursively. This replaces serialized-JSON row ordering;
+  string collation is binary rather than CouchDB's ICU ordering.
+- Bind versioned query continuations to the complete selector and snapshot.
+  Preserve stable pages during ingestion and allow page-size changes. Reject
+  changed selectors and legacy query tokens explicitly.
+- Maintain a derived ordered native query index without changing canonical
+  group identity, ingestion order, or sequence allocation. Existing 0.2.0 logs
+  and compatible caches require no migration; snapshot/change cursors and
+  document pagination remain compatible. Start a fresh query traversal after
+  upgrading from 0.2.0.
+
+### Documentation
+
 - Add this consolidated history and a dedicated upgrade guide with backup,
   migration, verification, cutover, rollback, and compatibility steps.
-- Include the changelog in future source distributions.
+- Document range/prefix semantics, executable examples, and the 0.2.0-to-0.3.0
+  query compatibility steps. Include the changelog in source distributions.
 
 ## [0.2.0](https://github.com/255BITS/foldlitedb/releases/tag/v0.2.0) — 2026-11-03
 

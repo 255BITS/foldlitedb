@@ -14,6 +14,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
+from ._query import QUERY_FORMAT, key_order, matches_selector
 from .types import (
     ChangePage, CursorExpired, DatabaseError, Document, DocumentConflict,
     GenerationMismatch, IngestResult, Row, Snapshot, SourceOrderError, _json,
@@ -465,7 +466,8 @@ class Database:
 
     def _canonical_key(self, key):
         key = _copy(key)
-        return self._call({"op": "canonical_key", "key": key}), key
+        # Validate from the key itself, independently of the transport envelope.
+        return self._call_json(_json({"op": "canonical_key", "key": key})), key
 
     def _callback_checkpoint(self, name, state_map, sequence):
         groups = [{"key": _copy(key), "state": _copy(state), "result": _copy(result),
@@ -692,29 +694,62 @@ class Database:
         return _document(result) if result else None
 
     @_synchronized
-    def query(self, name_or_key=_MISSING, *, key=_MISSING, limit=100, cursor=None, after=None) -> Snapshot:
+    def query(self, name_or_key=_MISSING, *, key=_MISSING, start_key=_MISSING,
+              end_key=_MISSING, prefix=_MISSING, inclusive_start=True,
+              inclusive_end=True, limit=100, cursor=None, after=None) -> Snapshot:
+        """Read exact keys, an ascending key range, or a string/array prefix.
+
+        Bounds are inclusive by default. Supply the same selector and both
+        continuation tokens on subsequent pages; page size may change.
+        """
         name = name_or_key if isinstance(name_or_key, str) and name_or_key in self._views else None
         if name is None and self.view.is_callback:
             name = self.view.name
             if name_or_key is not _MISSING:
                 key = name_or_key if key is _MISSING else key
         if name is not None:
-            return self._query_callback(name, key=key, limit=limit, cursor=cursor, after=after)
+            return self._query_callback(
+                name, key=key, start_key=start_key, end_key=end_key, prefix=prefix,
+                inclusive_start=inclusive_start, inclusive_end=inclusive_end,
+                limit=limit, cursor=cursor, after=after,
+            )
 
-        request = {"op": "query", "limit": limit}
+        request = {"op": "query", "limit": limit,
+                   "inclusive_start": inclusive_start, "inclusive_end": inclusive_end}
         actual_key = key if key is not _MISSING else (name_or_key if name_or_key is not _MISSING else _MISSING)
         if actual_key is not _MISSING:
-            request["key"] = actual_key
+            request["key"] = _copy(actual_key)
+        for option, value in (("start_key", start_key), ("end_key", end_key), ("prefix", prefix)):
+            if value is not _MISSING:
+                request[option] = _copy(value)
         if cursor is not None:
             request["cursor"] = cursor
         if after is not None:
             request["after"] = after
-        result = self._call(request)
+        # Keys have their own JSON depth budget, without counting this envelope.
+        result = self._call_json(_json(request))
         return Snapshot(_rows(result["rows"]), result["cursor"], result.get("after"), result["complete"])
 
-    def _query_callback(self, name, *, key, limit, cursor, after):
+    def _query_callback(self, name, *, key, start_key, end_key, prefix,
+                        inclusive_start, inclusive_end, limit, cursor, after):
         if type(limit) is not int or not 1 <= limit <= 1024:
             raise DatabaseError("limit must be between 1 and 1024")
+        if type(inclusive_start) is not bool or type(inclusive_end) is not bool:
+            raise DatabaseError("inclusive_start and inclusive_end must be booleans")
+        has_range = start_key is not _MISSING or end_key is not _MISSING
+        if sum((key is not _MISSING, has_range, prefix is not _MISSING)) > 1:
+            raise DatabaseError("key, range bounds, and prefix selectors are mutually exclusive")
+        selector = {"inclusive_start": inclusive_start, "inclusive_end": inclusive_end}
+        canonical = {"inclusive_start": _json(inclusive_start), "inclusive_end": _json(inclusive_end)}
+        for option, value in (("key", key), ("start_key", start_key), ("end_key", end_key), ("prefix", prefix)):
+            if value is not _MISSING:
+                canonical[option], selector[option] = self._canonical_key(value)
+        if "prefix" in selector and not isinstance(selector["prefix"], (str, list)):
+            raise DatabaseError("prefix must be a string or array")
+        # Compose canonical children directly: the selector envelope does not
+        # consume any of the supported key nesting depth.
+        selected = "{" + ",".join(_json(option) + ":" + canonical[option]
+                                   for option in sorted(canonical)) + "}"
         signature = hashlib.sha256(_json([name, self._view_descriptors[name]]).encode()).hexdigest()
         current = self.stats()["cursor"]
         if cursor is None:
@@ -730,35 +765,53 @@ class Database:
             if self._view_modes[name] != "documents":
                 raise CursorExpired("Historical external projection snapshots are unavailable; obtain a fresh query snapshot")
             state_map = self._replay_callbacks([name], cursor=native_cursor, initial={name: {}})[name]
-        selected = None if key is _MISSING else self._canonical_key(key)[0]
-        after_key = None
+        after_order = None
         if after is not None:
             try:
-                saved_cursor, after_key, saved_key = json.loads(after)
-                if saved_cursor != cursor or saved_key != selected or not isinstance(after_key, str):
+                if not isinstance(after, str):
+                    raise ValueError("format")
+                token = json.loads(after)
+                if not isinstance(token, list) or len(token) != 4:
+                    raise ValueError("format")
+                format_version, saved_cursor, saved_selector, after_key = token
+                if (format_version != QUERY_FORMAT or saved_cursor != cursor
+                        or saved_selector != selected or not isinstance(after_key, str)):
                     raise ValueError("snapshot")
-            except (TypeError, ValueError):
-                raise DatabaseError("After token belongs to a different callback snapshot or key") from None
-        entries = sorted((encoded, value) for encoded, value in state_map.items()
-                         if (selected is None or encoded == selected) and (after_key is None or encoded > after_key))
+                # Tokens contain JavaScript's shortest double spelling, which
+                # can look like an inexact integer above the safe integer range.
+                canonical_after, value = self._canonical_key(json.loads(after_key, parse_int=float))
+                if canonical_after != after_key or not matches_selector(value, selector):
+                    raise ValueError("key")
+                after_order = key_order(value)
+            except (TypeError, ValueError, RecursionError):
+                raise DatabaseError("After token belongs to a different callback snapshot, selector, or query format; obtain a fresh query snapshot") from None
+        entries = sorted(
+            ((encoded, value) for encoded, value in state_map.items()
+             if matches_selector(value[0], selector)
+             and (after_order is None or key_order(value[0]) > after_order)),
+            key=lambda entry: key_order(entry[1][0]),
+        )
         complete = len(entries) <= limit
         rows = []
         for encoded, (orig_key, state, fin, sequence) in entries[:limit]:
             if fin is _MISSING:
                 orig_key, state, fin, sequence = self._finalize_view_group(name, encoded)
             rows.append(Row(_copy(orig_key), _copy(fin), _copy(state), sequence))
-        continuation = None if complete else _json([cursor, entries[limit - 1][0], selected])
+        continuation = None if complete else _json([QUERY_FORMAT, cursor, selected, entries[limit - 1][0]])
         return Snapshot(tuple(rows), cursor=cursor, after=continuation, complete=complete)
 
-    def rows(self, *, key=_MISSING, limit=100) -> Iterator[Row]:
-        if key is not _MISSING:
-            key = json.loads(_encode(key))
-        page = self.query(key=key, limit=limit)
+    def rows(self, *, key=_MISSING, start_key=_MISSING, end_key=_MISSING,
+             prefix=_MISSING, inclusive_start=True, inclusive_end=True, limit=100) -> Iterator[Row]:
+        options = {"inclusive_start": inclusive_start, "inclusive_end": inclusive_end}
+        for option, value in (("key", key), ("start_key", start_key), ("end_key", end_key), ("prefix", prefix)):
+            if value is not _MISSING:
+                options[option] = _copy(value)
+        page = self.query(limit=limit, **options)
         while True:
             yield from page.rows
             if page.complete:
                 return
-            page = self.query(key=key, limit=limit, cursor=page.cursor, after=page.after)
+            page = self.query(limit=limit, cursor=page.cursor, after=page.after, **options)
 
     def changes(self, *, since, limit=100) -> ChangePage:
         if self.view.is_callback:

@@ -1,6 +1,6 @@
 /* One view, one isolated worker. Retained documents and committed view state are
    in memory; reload the page to discard them, or export documents for replay. */
-import {ViewModule, ViewError, canonical, databaseRequestJSON} from './host.js';
+import {ViewModule, ViewError, canonical, compareKeys, databaseRequestJSON} from './host.js';
 import {DocumentConflict, SourceOrderError, CursorExpired, serializeError} from './errors.js';
 
 const utf8 = new TextEncoder();
@@ -41,6 +41,41 @@ function mapPayloads(view, documents) {
 }
 
 const cursorRecovery = ' Obtain a fresh snapshot with await db.query() and replace the previous results before resuming changes.';
+const QUERY_FORMAT = 'foldlite-query-v1';
+
+function querySelector(request) {
+  const selector = {};
+  for (const flag of ['inclusive_start', 'inclusive_end']) {
+    const value = Object.hasOwn(request, flag) ? request[flag] : true;
+    if (typeof value !== 'boolean') throw new ViewError(`${flag} must be a boolean`);
+    selector[flag] = value;
+  }
+  const exact = Object.hasOwn(request, 'key'), prefix = Object.hasOwn(request, 'prefix');
+  const range = Object.hasOwn(request, 'start_key') || Object.hasOwn(request, 'end_key');
+  if (Number(exact) + Number(prefix) + Number(range) > 1) throw new ViewError('key, range bounds, and prefix are mutually exclusive');
+  if (prefix && typeof request.prefix !== 'string' && !Array.isArray(request.prefix)) throw new ViewError('prefix must be a string or array');
+  for (const name of ['key', 'start_key', 'end_key', 'prefix']) {
+    if (Object.hasOwn(request, name)) selector[name] = request[name];
+  }
+  return selector;
+}
+function queryMatches(key, selector) {
+  if (Object.hasOwn(selector, 'key')) return compareKeys(key, selector.key) === 0;
+  if (Object.hasOwn(selector, 'prefix')) {
+    const prefix = selector.prefix;
+    if (typeof prefix === 'string') return typeof key === 'string' && key.startsWith(prefix);
+    return Array.isArray(key) && key.length >= prefix.length && prefix.every((value, i) => compareKeys(value, key[i]) === 0);
+  }
+  if (Object.hasOwn(selector, 'start_key')) {
+    const order = compareKeys(key, selector.start_key);
+    if (order < 0 || (order === 0 && !selector.inclusive_start)) return false;
+  }
+  if (Object.hasOwn(selector, 'end_key')) {
+    const order = compareKeys(key, selector.end_key);
+    if (order > 0 || (order === 0 && !selector.inclusive_end)) return false;
+  }
+  return true;
+}
 
 class MemoryDatabase {
   constructor(view) {
@@ -128,29 +163,49 @@ class MemoryDatabase {
     return limit;
   }
   page(request, kind) {
-    let cursor = request.cursor ?? this.cursor(), last = kind === 'query' ? null : -1;
+    if (kind === 'query') return this.query(request);
+    let cursor = request.cursor ?? this.cursor(), last = -1;
     if (request.after !== undefined && request.after !== null) {
       let token;
       try { token = JSON.parse(request.after); } catch { throw new ViewError('Invalid page continuation'); }
       if (!Array.isArray(token) || token.length !== 2 || typeof token[0] !== 'string') throw new ViewError('Invalid page continuation');
       if (request.cursor !== undefined && request.cursor !== token[0]) throw new ViewError('Page cursor mismatch');
       cursor = token[0]; last = token[1];
-      if (kind === 'query' && typeof last !== 'string') throw new ViewError('Invalid query continuation');
-      if (kind !== 'query') nonnegative(last, 'Document continuation');
+      nonnegative(last, 'Document continuation');
     }
     if (typeof cursor !== 'string') throw new ViewError('Page cursor must be an opaque string');
     const snapshot = this.readCursor(cursor), limit = this.limit(request);
-    if (kind === 'documents') {
-      const remaining = this.documents.filter(d => d.sequence <= snapshot && d.sequence > last);
-      const documents = remaining.slice(0, limit), complete = remaining.length <= limit;
-      return {documents, cursor, after: complete ? null : JSON.stringify([cursor, documents.at(-1).sequence]), complete};
+    const remaining = this.documents.filter(d => d.sequence <= snapshot && d.sequence > last);
+    const documents = remaining.slice(0, limit), complete = remaining.length <= limit;
+    return {documents, cursor, after: complete ? null : JSON.stringify([cursor, documents.at(-1).sequence]), complete};
+  }
+  query(request) {
+    const cursor = request.cursor ?? this.cursor();
+    if (typeof cursor !== 'string') throw new ViewError('Page cursor must be an opaque string');
+    const snapshot = this.readCursor(cursor), limit = this.limit(request);
+    const selector = querySelector(request);
+    // Validate each key at its own depth budget, without charging the selector
+    // envelope as another JSON level (the request validator does the same).
+    const selection = '{' + Object.keys(selector).sort().map(name => JSON.stringify(name) + ':' + canonical(selector[name])).join(',') + '}';
+    let last;
+    if (request.after !== undefined && request.after !== null) {
+      let token;
+      try { token = JSON.parse(request.after); } catch { throw new ViewError('Invalid query continuation'); }
+      if (!Array.isArray(token) || token.length !== 4 || token[0] !== QUERY_FORMAT || typeof token[1] !== 'string'
+        || typeof token[2] !== 'string' || typeof token[3] !== 'string') throw new ViewError('Invalid or obsolete query continuation; obtain a fresh query page');
+      if (token[1] !== cursor || token[2] !== selection) throw new ViewError('Query continuation belongs to a different snapshot or selector');
+      try {
+        last = JSON.parse(token[3]);
+        if (canonical(last) !== token[3] || !queryMatches(last, selector)) throw new Error();
+      } catch { throw new ViewError('Invalid query continuation key'); }
     }
     const atSnapshot = new Map();
     for (const row of this.history) if (row.sequence <= snapshot) atSnapshot.set(canonical(row.key), row);
-    const key = Object.hasOwn(request, 'key') ? canonical(request.key) : undefined;
-    const remaining = [...atSnapshot.entries()].filter(([encoded]) => (last === null || keyCompare(encoded, last) > 0) && (key === undefined || encoded === key)).sort(([a], [b]) => keyCompare(a, b));
+    const remaining = [...atSnapshot.entries()].filter(([, row]) => (last === undefined || compareKeys(row.key, last) > 0)
+      && queryMatches(row.key, selector)).sort(([, a], [, b]) => compareKeys(a.key, b.key));
     const page = remaining.slice(0, limit), complete = remaining.length <= limit;
-    return {rows: page.map(([, row]) => row), cursor, after: complete ? null : JSON.stringify([cursor, page.at(-1)[0]]), complete};
+    return {rows: page.map(([, row]) => row), cursor,
+      after: complete ? null : JSON.stringify([QUERY_FORMAT, cursor, selection, page.at(-1)[0]]), complete};
   }
   changes(request) {
     const since = this.readCursor(request.since ?? 0), limit = this.limit(request);

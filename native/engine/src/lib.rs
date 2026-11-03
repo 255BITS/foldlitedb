@@ -1,8 +1,11 @@
 //! An immutable native document log with disposable portable Wasm view caches.
+mod query;
 pub mod reducer;
 mod runtime;
 mod storage;
 
+pub use query::compare_json_keys;
+use query::{QueryKey, Selector};
 pub use reducer::ReducerInstance;
 use runtime::Runtime;
 use serde::{Deserialize, Serialize};
@@ -99,6 +102,8 @@ pub(crate) struct State {
     checkpoints: BTreeMap<String, u64>,
     #[serde(skip)]
     versions: BTreeMap<String, Vec<usize>>,
+    #[serde(skip)]
+    query_keys: BTreeMap<QueryKey, String>,
 }
 
 impl State {
@@ -114,6 +119,7 @@ impl State {
             positions: BTreeMap::new(),
             checkpoints: BTreeMap::new(),
             versions: BTreeMap::new(),
+            query_keys: BTreeMap::new(),
         }
     }
 
@@ -170,6 +176,7 @@ impl State {
                 .entry(version.key.clone())
                 .or_default()
                 .push(index);
+            self.query_keys.insert(QueryKey(key), version.key.clone());
         }
         // The two sorted streams must partition the complete sequence domain.
         let mut documents = self.documents.iter().peekable();
@@ -210,6 +217,7 @@ impl State {
 
     fn publish(&mut self, stage: Stage) {
         let appended = !stage.documents.is_empty();
+        self.query_keys.extend(stage.query_keys);
         for document in stage.documents {
             let record = &document.record;
             let index = self.documents.len();
@@ -244,6 +252,7 @@ struct Stage {
     sequence: u64,
     resolved: Vec<Value>,
     replayed: usize,
+    query_keys: BTreeMap<QueryKey, String>,
 }
 
 struct Prepared {
@@ -660,45 +669,24 @@ impl Engine {
         let snapshot = self.parse_cursor(request.get("cursor"), self.state.sequence, false)?;
         let cursor = self.cursor(snapshot);
         let limit = page_limit(request)?;
-        let key = request
-            .get("key")
-            .map(|key| {
-                validate_json(key, 0)?;
-                validate_exact_integers(key)?;
-                canonical_json(key)
-            })
-            .transpose()?;
-        let after = parse_after(request, &cursor)?;
-        let after_key = after
-            .as_ref()
-            .map(|v| v.as_str().ok_or("Invalid query after token"))
-            .transpose()?;
+        let selector = Selector::parse(request)?;
+        let after = selector.after(request, &cursor)?;
         let mut rows = Vec::new();
-        use std::ops::Bound::{Excluded, Unbounded};
-        let selected: Box<dyn Iterator<Item = (&String, &Vec<usize>)> + '_> = match key.as_ref() {
-            Some(key) => Box::new(
-                self.state
-                    .versions
-                    .get_key_value(key)
-                    .into_iter()
-                    .filter(|(key, _)| after_key.is_none_or(|after| key.as_str() > after)),
-            ),
-            None => match after_key {
-                Some(after) => Box::new(
-                    self.state
-                        .versions
-                        .range::<str, _>((Excluded(after), Unbounded)),
-                ),
-                None => Box::new(self.state.versions.iter()),
-            },
-        };
-        for (_, indices) in selected {
-            let count =
-                indices.partition_point(|&index| self.state.history[index].sequence <= snapshot);
-            if count > 0 {
-                rows.push(version_value(&self.state.history[indices[count - 1]])?);
-                if rows.len() > limit {
+        if let Some(bounds) = selector.bounds(after) {
+            for (ordered_key, canonical_key) in self.state.query_keys.range(bounds) {
+                // Prefix matches form one contiguous interval after their lower
+                // bound. Stop at its first nonmatch rather than scanning other keys.
+                if !selector.matches(ordered_key) {
                     break;
+                }
+                let indices = &self.state.versions[canonical_key];
+                let count = indices
+                    .partition_point(|&index| self.state.history[index].sequence <= snapshot);
+                if count > 0 {
+                    rows.push(version_value(&self.state.history[indices[count - 1]])?);
+                    if rows.len() > limit {
+                        break;
+                    }
                 }
             }
         }
@@ -707,13 +695,7 @@ impl Engine {
         let after = if complete {
             None
         } else {
-            Some(
-                serde_json::to_string(&json!([
-                    cursor,
-                    canonical_json(&rows.last().unwrap()["key"])?
-                ]))
-                .unwrap(),
-            )
+            Some(selector.token(&cursor, &canonical_json(&rows.last().unwrap()["key"])?))
         };
         Ok(json!({"rows":rows,"cursor":cursor,"after":after,"complete":complete}))
     }
@@ -840,6 +822,7 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<St
         sequence: state.sequence,
         resolved: Vec::new(),
         replayed: 0,
+        query_keys: BTreeMap::new(),
     };
     // Only this batch's identities/checkpoints are staged; previously retained
     // documents, history, and indexes are never copied on the ingest path.
@@ -952,7 +935,13 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<St
                 .map(|&i| state.history[i].state.clone());
             let previous = match previous {
                 Some(value) => value,
-                None => runtime.call(json!({"op":"identity"}))?,
+                None => {
+                    staged.query_keys.insert(
+                        QueryKey(serde_json::from_str(&key).map_err(|_| "Invalid mapped key")?),
+                        key.clone(),
+                    );
+                    runtime.call(json!({"op":"identity"}))?
+                }
             };
             let mut new_state =
                 runtime.call(json!({"op":"add","state":previous,"values":values}))?;
