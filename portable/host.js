@@ -30,6 +30,32 @@ export function finiteJSON(value, depth = 0) {
   }
   throw new ViewError('Expected finite JSON values');
 }
+// Data budgets are measured from each payload/state/key, independent of the
+// transport's request, document-record, and batch-array wrappers.
+function jsonFields(value, visit) {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype) throw new ViewError('Expected a JSON request object');
+  for (const [key, child] of Object.entries(value)) { unicode(key); visit(key, child); }
+}
+function jsonElements(value, visit) {
+  if (!Array.isArray(value)) { finiteJSON(value); return; }
+  for (let i = 0; i < value.length; i++) {
+    if (!Object.hasOwn(value, i)) throw new ViewError('Sparse arrays are not finite JSON');
+    visit(value[i]);
+  }
+}
+export function abiRequestJSON(request) {
+  jsonFields(request, (key, value) => {
+    if (key === 'documents' || key === 'values') jsonElements(value, child => finiteJSON(child));
+    else finiteJSON(value);
+  });
+}
+export function databaseRequestJSON(request) {
+  jsonFields(request, (key, value) => {
+    if (key === 'documents') jsonElements(value, record => jsonFields(record, (_, child) => finiteJSON(child)));
+    else if (key === 'request' && request.op === 'view') abiRequestJSON(value);
+    else finiteJSON(value);
+  });
+}
 export function canonical(value) {
   finiteJSON(value);
   const encode = v => Array.isArray(v) ? '[' + v.map(encode).join(',') + ']'
@@ -168,7 +194,7 @@ export class ViewModule {
   }
   constructor(exports, spec, module) { this.exports = exports; this.spec = spec; this.module = module; }
   request(request) {
-    finiteJSON(request);
+    abiRequestJSON(request);
     const encoded = encoder.encode(JSON.stringify(request));
     if (encoded.length > MAX_REQUEST_BYTES) throw new ViewError('Request exceeds 262144 bytes');
     let envelope;
@@ -181,7 +207,8 @@ export class ViewModule {
       if (!Number.isInteger(pointer) || pointer < 0 || pointer + MAX_REQUEST_BYTES > this.exports.memory.buffer.byteLength || !Number.isInteger(outputPointer) || outputPointer < 0 || outputPointer + MAX_REQUEST_BYTES > this.exports.memory.buffer.byteLength || !(pointer + MAX_REQUEST_BYTES <= outputPointer || outputPointer + MAX_REQUEST_BYTES <= pointer)) throw new ViewError('View needs bounded, disjoint input and output buffers');
       new Uint8Array(this.exports.memory.buffer, pointer, encoded.length).set(encoded);
       const length = this.exports.execute(encoded.length), output = this.exports.output_ptr();
-      if (!Number.isInteger(length) || length < 1 || length > MAX_REQUEST_BYTES || output < 0 || output + length > this.exports.memory.buffer.byteLength) throw new ViewError('Invalid view response length');
+      if (!Number.isInteger(length) || length < 1 || length > MAX_REQUEST_BYTES) throw new ViewError('Invalid view response length');
+      if (!Number.isInteger(output) || output < 0 || output + MAX_REQUEST_BYTES > this.exports.memory.buffer.byteLength || !(pointer + MAX_REQUEST_BYTES <= output || output + MAX_REQUEST_BYTES <= pointer)) throw new ViewError('View output buffer must be bounded and disjoint from input');
       if (this.exports.memory.buffer.byteLength > MAX_MEMORY_BYTES) throw new ViewError('View memory exceeds 16 MiB');
       envelope = JSON.parse(decoder.decode(new Uint8Array(this.exports.memory.buffer, output, length)));
       finiteJSON(envelope);

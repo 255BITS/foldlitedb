@@ -17,7 +17,7 @@
    together. Query/document pages accept {limit, cursor, after}; changes accepts
    a prior cursor and {limit}. Cursors belong to one worker and one module.
    Storage is in memory: export before closing/reloading. */
-import {finiteJSON} from './host.js';
+import {databaseRequestJSON} from './host.js';
 import {DatabaseError, deserializeError} from './errors.js';
 export {DatabaseError, DocumentConflict, SourceOrderError, CursorExpired} from './errors.js';
 
@@ -63,7 +63,7 @@ export class BrowserDatabase {
   }
   request(request) {
     try {
-      finiteJSON(request);
+      databaseRequestJSON(request);
       if (new TextEncoder().encode(JSON.stringify(request)).length > 4 * 1024 * 1024) throw new DatabaseError('Browser request exceeds 4 MiB');
     } catch (error) { return Promise.reject(error instanceof DatabaseError ? error : new DatabaseError(error.message)); }
     return this._call(structuredClone(request));
