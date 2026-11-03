@@ -775,7 +775,7 @@ mod failure_tests {
         let Some(super::Storage::Disk(disk)) = engine.storage.as_ref() else {
             panic!("disk required")
         };
-        let mut file = disk.file.try_clone().unwrap();
+        let mut file = &disk.file;
         file.seek(SeekFrom::Start(0)).unwrap();
         let mut result = Vec::new();
         file.read_to_end(&mut result).unwrap();
