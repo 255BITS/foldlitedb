@@ -14,8 +14,13 @@
    addMany(payloads) and ingest(resolvedDocuments) return
    {documents, inserted, replayed, sequence, cursor}. Named ids are source-scoped;
    positions start at zero and advance within a source. All batch writes commit
-   together. Query/document pages accept {limit, cursor, after}; changes accepts
-   a prior cursor and {limit}. Cursors belong to one worker and one module.
+   together. Query pages accept {key} or {start_key,end_key,inclusive_start,
+   inclusive_end} or {prefix}, plus {limit,cursor,after}. Bounds are inclusive
+   by default; prefix is a string or leading array elements. Continue with the
+   same selection and returned cursor/after; page size may change. Keys sort by
+   JSON type and value, with numeric numbers and Unicode scalar string order.
+   Document pages accept {limit,cursor,after}; changes accepts a prior cursor
+   and {limit}. Cursors belong to one worker and one module.
    Storage is in memory: export before closing/reloading. */
 import {databaseRequestJSON} from './host.js';
 import {DatabaseError, deserializeError} from './errors.js';
@@ -79,6 +84,15 @@ export class BrowserDatabase {
   preview(payload) { return this.request({op: 'preview', payload}); }
   query(options = {}) { return this.request({...options, op: 'query'}); }
   async rows(options = {}) {
+    // The caller may mutate its selectors while the worker is answering. Pin
+    // their values once, alongside the first page's eventual snapshot cursor.
+    try {
+      options = {...options};
+      databaseRequestJSON({...options, op: 'query'});
+      options = structuredClone(options);
+    } catch (error) {
+      throw error instanceof DatabaseError ? error : new DatabaseError(error.message);
+    }
     let page = await this.query({...options, limit: options.limit ?? 1000}), rows = page.rows;
     while (!page.complete) {
       page = await this.query({...options, after: page.after, cursor: page.cursor, limit: options.limit ?? 1000}); rows.push(...page.rows);
