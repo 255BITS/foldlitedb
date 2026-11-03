@@ -15,6 +15,10 @@ maps and reduces documents in Rust or entirely in a browser worker. Try the
 [browser playground](https://255bits.github.io/foldlitedb/playground.html) or read
 the [view authoring guide](docs/portable.html).
 
+Read the [changelog](CHANGELOG.md) for the consolidated release history and the
+[upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html) before moving
+an existing database to 0.2.0.
+
 ## Install
 
 Use Python 3.11+ to install the 0.2.0 release:
@@ -125,6 +129,8 @@ Database.migrate("old.fold", "migrated.fold")
 Close the source first. Migration verifies and preserves its original batch
 boundaries, leaves the source unchanged, and refuses an existing destination.
 Keep the source backup until the migrated log and its view have been verified.
+The [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
+covers backup, verification, application cutover, and rollback.
 Filenames ending in `.cache` or `.lock`, or containing `.cache.`, are reserved
 for native sidecars. `reset=True` explicitly discards a database only after
 obtaining its ownership locks; it refuses a live owner and validates the module
