@@ -31,6 +31,7 @@ bindings = "pyo3"
 include = [
     { path = "README.md", format = "sdist" },
     { path = "DESIGN.md", format = "sdist" },
+    { path = "CHANGELOG.md", format = "sdist" },
     { path = "LICENSE", format = "sdist" },
     { path = "native/licenses/**/*", format = "sdist" },
     { path = "views/**/*", format = "sdist" },

@@ -13,6 +13,10 @@
 </tbody></table>
 <p>The repository's <code>pypi</code> environment permits tags matching <code>v*</code>. The publishing job alone receives <code>id-token: write</code>. No stored PyPI password or API token is needed. A pending publisher creates the project on its first successful upload; see the <a href="https://docs.pypi.org/trusted-publishers/adding-a-project/">PyPI instructions</a>.</p>
 
+<h2 id="release-notes">Maintain the changelog and upgrade guide</h2>
+<p>Record changes in the canonical <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">CHANGELOG.md</a>. Before tagging, move the unreleased changes into a version section with its release link; confirm its UTC publication date against the published release. Preserve historical entries, and distinguish unpublished version preparations from published releases.</p>
+<p>When storage or API behavior changes, update the <a href="upgrading.html">upgrade guide</a> with executable migration examples, compatibility changes, verification, and rollback expectations. Link that guide from the release notes. The same changelog is linked from the repository and website; do not maintain a separate copy of its history.</p>
+
 <h2 id="checks">Release checks</h2>
 <p><code>release.yml</code> runs when a GitHub release is published. It requires the tag to equal <code>v</code> plus the version in <code>pyproject.toml</code>, and checks that the Python module and both Rust crates declare that same version. Every build checks out the resolved source commit.</p>
 <p>The reusable <code>wheels.yml</code> workflow runs the Rust tests, AssemblyScript checks, Python and browser tests, replay smoke, and documentation examples. It builds and tests CPython 3.11+ stable ABI wheels for Linux x86-64 and ARM64, macOS Intel and Apple Silicon, and Windows x86-64. It also rebuilds a wheel from the source archive and tests that installed package outside the checkout.</p>

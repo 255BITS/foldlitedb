@@ -1,4 +1,4 @@
-include LICENSE README.md DESIGN.md
+include LICENSE README.md DESIGN.md CHANGELOG.md
 recursive-include native *.rs *.toml Cargo.lock *.txt
 recursive-include views *.ts *.json *.mjs *.md
 recursive-include scripts *.py
