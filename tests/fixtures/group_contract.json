@@ -1,0 +1,13 @@
+{
+  "abi": 1,
+  "module": "group_contract.wasm",
+  "sha256": "e83ae0bdb228f4a438e3d382357fe1f73f0743a25bfc369fa4375005adc945f9",
+  "descriptor": {
+    "abi": 1,
+    "name": "group-contract",
+    "version": "1",
+    "state_version": "1",
+    "mergeable": false,
+    "reduce_groups": true
+  }
+}

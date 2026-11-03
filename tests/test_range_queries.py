@@ -306,7 +306,8 @@ def test_real_020_cache_and_snapshot_cursor_upgrade_without_wasm_replay(tmp_path
     original_log = zlib.decompress(base64.b64decode(V020_LOG))
     path.write_bytes(original_log)
     path.with_suffix(".fold.cache").write_bytes(zlib.decompress(base64.b64decode(V020_CACHE)))
-    with Database(path) as database:
+    legacy_view = View(FIXTURE.parent / "metrics_abi_v1.wasm")
+    with Database(path, legacy_view) as database:
         assert database.stats()["cache"]["status"] == "loaded"
         assert database.stats()["replay"]["documents"] == 0
         assert_keys(database.query(cursor=V020_CURSOR).rows, ['"', "A", "B"])
@@ -315,8 +316,17 @@ def test_real_020_cache_and_snapshot_cursor_upgrade_without_wasm_replay(tmp_path
             database.query(cursor=V020_CURSOR, after=json.dumps([V020_CURSOR, '"A"']))
     # Windows ownership locks prevent other handles from reading an active log.
     assert path.read_bytes() == original_log
-    with Database(path) as database:
+    with Database(path, legacy_view) as database:
         database.add({"metric": "A", "value": 7})
         assert database.changes(since=V020_CURSOR).rows[0].result["sum"] == 9
         snapshot = database.query(cursor=V020_CURSOR)
         assert snapshot.rows[1].result["sum"] == 2
+
+    # Rebuilt bundled modules carry new hashes. The log remains valid while its
+    # disposable state and cursors reconstruct under the newly selected module.
+    with Database(path) as database:
+        assert database.stats()["cache"]["status"] == "module-mismatch"
+        assert database.stats()["replay"]["documents"] == 4
+        assert database.query(key="A").rows[0].result["sum"] == 9
+        with pytest.raises(DatabaseError, match="[Cc]ursor"):
+            database.query(cursor=V020_CURSOR)

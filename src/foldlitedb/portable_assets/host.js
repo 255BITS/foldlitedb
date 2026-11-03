@@ -2,6 +2,7 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', {fatal: true});
 export class ViewError extends Error {}
+class ViewCapacityError extends ViewError {}
 export const MAX_REQUEST_BYTES = 262144;
 export const MAX_MEMORY_BYTES = 16 * 1024 * 1024;
 function unicode(value) {
@@ -45,7 +46,11 @@ function jsonElements(value, visit) {
 }
 export function abiRequestJSON(request) {
   jsonFields(request, (key, value) => {
-    if (key === 'documents' || key === 'values') jsonElements(value, child => finiteJSON(child));
+    if (key === 'groups' && request.op === 'reduce_groups') jsonElements(value, group => jsonFields(group, (field, child) => {
+      if (field === 'values') jsonElements(child, value => finiteJSON(value));
+      else finiteJSON(child);
+    }));
+    else if (key === 'documents' || key === 'values') jsonElements(value, child => finiteJSON(child));
     else finiteJSON(value);
   });
 }
@@ -228,7 +233,7 @@ export class ViewModule {
     if (!(exports.memory instanceof WebAssembly.Memory) || exports.abi_version() !== 1 || exports.input_capacity() !== MAX_REQUEST_BYTES) throw new ViewError('Unsupported view ABI');
     const view = new ViewModule(exports, JSON.parse(JSON.stringify(spec)), module);
     const descriptor = view.request({op: 'descriptor'});
-    if (!descriptor || descriptor.abi !== 1 || typeof descriptor.name !== 'string' || !descriptor.name || typeof descriptor.version !== 'string' || !descriptor.version || typeof descriptor.state_version !== 'string' || !descriptor.state_version || typeof descriptor.mergeable !== 'boolean') throw new ViewError('Invalid view descriptor');
+    if (!descriptor || descriptor.abi !== 1 || typeof descriptor.name !== 'string' || !descriptor.name || typeof descriptor.version !== 'string' || !descriptor.version || typeof descriptor.state_version !== 'string' || !descriptor.state_version || typeof descriptor.mergeable !== 'boolean' || (Object.hasOwn(descriptor, 'reduce_groups') && typeof descriptor.reduce_groups !== 'boolean')) throw new ViewError('Invalid view descriptor');
     if (canonical(descriptor) !== canonical(spec.descriptor)) throw new ViewError('View descriptor does not match manifest');
     view.descriptor = descriptor;
     return view;
@@ -237,7 +242,7 @@ export class ViewModule {
   request(request) {
     abiRequestJSON(request);
     const encoded = encoder.encode(JSON.stringify(request));
-    if (encoded.length > MAX_REQUEST_BYTES) throw new ViewError('Request exceeds 262144 bytes');
+    if (encoded.length > MAX_REQUEST_BYTES) throw new ViewCapacityError('Request exceeds 262144 bytes');
     let envelope;
     try {
       // State crosses only the explicit JSON ABI. A fresh instance prevents hidden
@@ -252,7 +257,13 @@ export class ViewModule {
       if (!Number.isInteger(output) || output < 0 || output + MAX_REQUEST_BYTES > this.exports.memory.buffer.byteLength || !(pointer + MAX_REQUEST_BYTES <= output || output + MAX_REQUEST_BYTES <= pointer)) throw new ViewError('View output buffer must be bounded and disjoint from input');
       if (this.exports.memory.buffer.byteLength > MAX_MEMORY_BYTES) throw new ViewError('View memory exceeds 16 MiB');
       envelope = JSON.parse(decoder.decode(new Uint8Array(this.exports.memory.buffer, output, length)));
-      finiteJSON(envelope);
+      if (request.op === 'reduce_groups' && Array.isArray(envelope?.ok?.groups)) {
+        for (const group of envelope.ok.groups) {
+          if (Object.hasOwn(group, 'identity')) finiteJSON(group.identity, 1);
+          finiteJSON(group?.state, 1); finiteJSON(group?.result, 1);
+        }
+        finiteJSON({...envelope, ok: {...envelope.ok, groups: []}});
+      } else finiteJSON(envelope);
     } catch (error) {
       throw new ViewError(`View execution failed: ${error.message || error}`);
     }
@@ -260,6 +271,35 @@ export class ViewModule {
     if (typeof envelope.error === 'string') throw new ViewError(envelope.error);
     if (!Object.hasOwn(envelope, 'ok')) throw new ViewError('Invalid view response envelope');
     return envelope.ok;
+  }
+  reduceGroups(groups) {
+    const legacy = group => {
+      const state = this.add(Object.hasOwn(group, 'state') ? group.state : this.identity(), group.values);
+      return {state, result: this.finalize(state)};
+    };
+    if (this.descriptor.reduce_groups !== true) return groups.map(legacy);
+    const output = [];
+    const split = chunk => {
+      if (chunk.length === 1) output.push(legacy(chunk[0]));
+      else { const middle = Math.floor(chunk.length / 2); reduce(chunk.slice(0, middle)); reduce(chunk.slice(middle)); }
+    };
+    const reduce = chunk => {
+      let response;
+      try { response = this.request({op: 'reduce_groups', groups: chunk}); }
+      catch (error) {
+        if (error instanceof ViewCapacityError) { split(chunk); return; }
+        throw error;
+      }
+      if (response && Object.keys(response).length === 1 && response.split === true) { split(chunk); return; }
+      if (!response || Object.getPrototypeOf(response) !== Object.prototype || Object.keys(response).length !== 1 || !Array.isArray(response.groups) || response.groups.length !== chunk.length) throw new ViewError('reduce_groups must return one state/result per group or an exact split signal');
+      for (let index = 0; index < response.groups.length; index++) {
+        const row = response.groups[index], newGroup = !Object.hasOwn(chunk[index], 'state');
+        if (!row || Object.getPrototypeOf(row) !== Object.prototype || Object.keys(row).length !== (newGroup ? 3 : 2) || Object.hasOwn(row, 'identity') !== newGroup || !Object.hasOwn(row, 'state') || !Object.hasOwn(row, 'result')) throw new ViewError('A reduced group must contain state/result and identity only for a new group');
+        output.push({state: row.state, result: row.result});
+      }
+    };
+    for (let index = 0; index < groups.length; index += 32) reduce(groups.slice(index, index + 32));
+    return output;
   }
   map(documents) { return this.request({op: 'map', documents}); }
   identity() { return this.request({op: 'identity'}); }

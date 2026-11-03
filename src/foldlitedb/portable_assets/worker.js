@@ -142,10 +142,14 @@ class MemoryDatabase {
           groups.get(key).values.push(contribution.value);
         }
       }
-      for (const [encoded, group] of [...groups.entries()].sort(([a], [b]) => keyCompare(a, b))) {
+      const ordered = [...groups.entries()].sort(([a], [b]) => keyCompare(a, b));
+      const reduced = this.view.reduceGroups(ordered.map(([encoded, group]) => {
         const previous = states.get(encoded);
-        const state = this.view.add(previous ? previous.state : this.view.identity(), group.values);
-        const row = {key: group.key, state, result: this.view.finalize(state), sequence: ++sequence};
+        return previous ? {state: previous.state, values: group.values} : {values: group.values};
+      }));
+      for (let index = 0; index < ordered.length; index++) {
+        const [encoded, group] = ordered[index], {state, result} = reduced[index];
+        const row = {key: group.key, state, result, sequence: ++sequence};
         states.set(encoded, row); events.push(row); historyBytes += bytes(row);
       }
       if (states.size > MAX_GROUPS || this.history.length + events.length > MAX_EVENTS || historyBytes > MAX_HISTORY_BYTES) throw new ViewError('In-memory view history limit reached; export your documents');

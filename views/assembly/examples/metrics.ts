@@ -11,7 +11,7 @@ function state(count: f64, sum: f64, minimum: JSON.Value, maximum: JSON.Value): 
 }
 
 class Metrics extends View {
-  constructor() { super("metrics", true); }
+  constructor() { super("metrics", true, "1", "1", true); }
 
   map(document: JSON.Value): Emission[] {
     const doc = object(document);

@@ -3,7 +3,7 @@ export { abi_version, input_ptr, input_capacity, output_ptr } from "../sdk";
 
 /** Ordered latest-event fold: {category,id,title,deleted?} updates a catalogue. */
 class Catalogue extends View {
-  constructor() { super("catalogue", false); }
+  constructor() { super("catalogue", false, "1", "1", true); }
 
   map(document: JSON.Value): Emission[] {
     const doc = object(document);

@@ -927,25 +927,29 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<St
                     .push(emission["value"].clone());
             }
         }
+        let mut keys = Vec::with_capacity(grouped.len());
+        let mut inputs = Vec::with_capacity(grouped.len());
         for (key, values) in grouped {
             let previous = state
                 .versions
                 .get(&key)
                 .and_then(|indices| indices.last())
-                .map(|&i| state.history[i].state.clone());
-            let previous = match previous {
-                Some(value) => value,
-                None => {
-                    staged.query_keys.insert(
-                        QueryKey(serde_json::from_str(&key).map_err(|_| "Invalid mapped key")?),
-                        key.clone(),
-                    );
-                    runtime.call(json!({"op":"identity"}))?
-                }
-            };
-            let mut new_state =
-                runtime.call(json!({"op":"add","state":previous,"values":values}))?;
-            let mut result = runtime.call(json!({"op":"finalize","state":new_state}))?;
+                .map(|&i| &state.history[i].state);
+            let mut input = json!({"values":values});
+            if let Some(previous) = previous {
+                input["state"] = previous.clone();
+            } else {
+                staged.query_keys.insert(
+                    QueryKey(serde_json::from_str(&key).map_err(|_| "Invalid mapped key")?),
+                    key.clone(),
+                );
+            }
+            keys.push(key);
+            inputs.push(input);
+        }
+        for (key, (mut new_state, mut result)) in
+            keys.into_iter().zip(runtime.reduce_groups(&inputs)?)
+        {
             normalize_json_numbers(&mut new_state);
             normalize_json_numbers(&mut result);
             staged.sequence = next_sequence(staged.sequence)?;
