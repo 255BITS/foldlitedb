@@ -1,6 +1,6 @@
 {
   "name": "@foldlitedb/portable-views",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Portable AssemblyScript map/reduce views for FoldliteDB",

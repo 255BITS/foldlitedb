@@ -1,6 +1,6 @@
 <p class="eyebrow">Reference · development API</p>
 <h1>The Python API</h1>
-<p class="lead"><code>Database</code> is the Rust-native engine for immutable document logs and rebuildable Wasm views. <code>View</code> identifies the complete compiled computation. There is one storage and computation path.</p>
+<p class="lead"><code>Database</code> uses one Rust engine for document acceptance, source order, durable commits, and replay. <code>View</code> identifies a portable Wasm computation or a versioned Python callback projection.</p>
 
 <h2 id="view">View and packaged assets</h2>
 <span id="portable-view"></span>
@@ -11,18 +11,51 @@ portable_assets() → importlib.resources Traversable</code></pre>
 <p><code>bundled</code> accepts <code>"metrics"</code> or <code>"catalogue"</code> and verifies the manifest digest. Metrics returns <code>{count,sum,min,max,mean}</code>; catalogue returns <code>{count,items}</code>. See <a href="portable.html#bundled">accepted payloads</a>. <code>portable_assets()</code> exposes modules, manifests, and browser hosts; copy files with each resource's <code>read_bytes()</code> method.</p>
 <p><code>PortableView</code> is an exact alias of <code>View</code>. It does not select another engine.</p>
 
+<h2 id="callbacks">Versioned Python callback views</h2>
+<pre class="signature"><code>View(name, *, version="1", map=..., reducer=..., references=None)
+OrderedFold(initial, step, *, version, finalize=None)
+RustReducer(name, *, runtime=None, positioned=False)
+db.register(view) → view version</code></pre>
+<p>Callbacks receive resolved <code>Document</code> objects, including the host-assigned ID and source position. A map yields ordered <code>(key, contribution)</code> pairs. The reducer provides <code>identity</code>, <code>add</code>, and <code>finalize</code>; <code>OrderedFold</code> applies a Python step in accepted ingestion order. A callback batch can emit at most 4096 contributions. Keys, contributions, state, and results must be finite portable JSON. Callback code runs as trusted Python, without Wasm's execution or memory isolation, and must be deterministic and free of database mutations.</p>
+<p>Every append API uses native acceptance and deduplication. Maps, reducers, and finalizers stage their complete batch before its source documents are durably committed. Conflicting input, a failing callback, or invalid output commits nothing. Identical retries do not map again. Python view operations are synchronized, and returned JSON is copied.</p>
+<pre data-run="python"><code>from foldlitedb import Database, Document, OrderedFold, View
+
+totals = View(
+    "totals", version="1",
+    map=lambda document: [("total", document.payload["value"])],
+    reducer=OrderedFold(0, lambda state, value: state + value, version="1"),
+)
+with Database("callbacks.fold", totals) as callback_db:
+    callback_db.add({"value": 2}, id="first")
+    observation = Document("second", {"value": 3})
+    assert callback_db.ingest([observation]).inserted == 1
+    assert callback_db.ingest([observation]).replayed == 1
+    assert next(callback_db.rows()).result == 5
+with Database("callbacks.fold", totals) as callback_db:
+    assert callback_db.query().rows[0].result == 5
+    callback_db.rebuild()
+    assert callback_db.query("totals").rows[0].result == 5</code></pre>
+<p>Callback cache coverage and descriptors live in the disposable native checkpoint. Reopen restores matching groups and replays any uncached original batches. Missing caches and changed descriptors reconstruct from retained documents; <code>rebuild()</code> also recomputes registered callback views. Callback code and captured reference changes require a new view/reducer version or changed <code>references</code>. Retain the Python computation and its inputs when preserving reproducibility.</p>
+<p>Passing a callback view to <code>Database</code> makes it the primary <code>query()</code>/<code>rows()</code> view. Additional callbacks registered with <code>register</code> are queried by name. Snapshot pages use descriptor-bound cursors; historical pages reconstruct from the accepted batches and can cost a replay. Primary callback views explicitly reject <code>changes()</code> and <code>preview()</code>; use a fresh query snapshot or call the mapper directly on a resolved document. Portable Wasm views retain their change feeds and preview operations.</p>
+<p><code>foldlitedb.projection.materialize_jsonl_view</code> is an external-source accelerator: the external stream remains authoritative. It commits its consumed cursor and derived state together, binding both to the source generation and view/reducer/reference descriptor. A descriptor change rereads the external source instead of reusing its previous consumed watermark. Historical external projection snapshots are unavailable; obtain a fresh snapshot. This helper does not retain the external document history in its compact cache.</p>
+
 <h2 id="document">Document: a named source observation</h2>
 <pre class="signature"><code>Document(id, payload, position=None, source="default")</code></pre>
 <p>Import <code>Document</code> from <code>foldlitedb</code> to construct records for <code>ingest</code> or <code>ingest_many</code>. Construction alone writes nothing. <code>id</code> is a stable, nonempty string naming one observation within its <code>source</code>; <code>payload</code> is its finite JSON value. The same ID in another source names a different observation.</p>
 <p>Supply <code>position</code> when the upstream source already has ordered offsets. New positions must advance that source, with gaps allowed. If the source has stable IDs but no offsets, omit <code>position</code>: ingestion assigns one automatically. An identical named retry with <code>position=None</code> reuses the original position, even after newer records arrive. Input objects are not mutated; use <code>documents()</code> to export their assigned positions. Records returned by <code>add</code>, <code>add_many</code>, or <code>documents</code> always have resolved integer positions.</p>
 <p>The fields are <code>id</code>, <code>payload</code>, <code>position</code>, and <code>source</code>. Returned payloads are independent copies; changing a copy cannot update a stored document. Reusing an ID or position with conflicting content raises <code>DocumentConflict</code>. Append a new named observation to express a change.</p>
+<p>Source names beginning with <code>_</code> are reserved for metadata. They are retained, exported and replayed, and advance source progress, but do not contribute to views in native or browser execution.</p>
 
 <h2 id="database">Database</h2>
 <span id="portable-database"></span>
-<pre class="signature"><code>Database(path, view=None)</code></pre>
-<p>A Rust-native database executing one complete Wasm view. <code>view</code> accepts a <code>View</code>, Wasm bytes, or a module path; omit it for bundled metrics. <code>path</code> accepts a filesystem path or <code>":memory:"</code>. Parent directories must already exist. A persistent path is an append-only document log, with <code>.cache</code> and <code>.lock</code> siblings. Exactly one active owner may open it.</p>
+<pre class="signature"><code>Database(path, view=None, *, generation=None, reset=False)
+Database.migrate(source, destination)</code></pre>
+<p>A Rust-native database executing one primary Wasm or Python callback view. <code>view</code> accepts a <code>View</code>, Wasm bytes, or a module path; omit it for bundled metrics. <code>path</code> accepts a filesystem path or <code>":memory:"</code>. Parent directories must already exist. A persistent path is an append-only document log, with <code>.cache</code> and <code>.lock</code> siblings. Exactly one active owner may open it.</p>
 <p>Use a context manager or <code>close()</code>. Clean close checkpoints persistent derived state and releases ownership. Closing is idempotent; later operations raise <code>DatabaseError</code>. <code>PortableDatabase</code> is an exact alias.</p>
 <p>Reopen validates the complete log and reuses a compatible cache, then replays any uncached suffix. A missing or invalid cache rebuilds. Different module bytes automatically rebuild the view from the same documents. Reconstruction creates a new cursor generation; a valid checkpoint preserves generation across reopen. Old external-database files are not this log format.</p>
+<p>New databases use <code>FOLDLOG2</code> frames with persisted predecessor hashes. Existing <code>FOLDLOG1</code> logs remain readable and exportable but reject new appends. Close their owner, then call <code>Database.migrate("old.fold", "new.fold")</code> to verify and copy their original batches into a new log. The source is unchanged; an existing destination is never replaced. Verify the new log with the intended view before retiring the source backup. Stats report <code>log.format</code> and <code>log.read_only</code>.</p>
+<p>Primary filenames ending in <code>.cache</code> or <code>.lock</code>, or containing <code>.cache.</code>, are reserved for sidecars. Conflicting source logs or symbolic links at auxiliary paths cause an error. Unrecognized cache bytes are preserved under a unique <code>.cache.unrecognized.*</code> filename when replaced by a valid checkpoint.</p>
+<p><code>reset=True</code> is explicitly destructive. Native ownership locks remain held throughout reset; an active owner prevents it. Invalid modules are rejected before reset changes data. Reset I/O errors are reported and may leave an uncertain outcome. <code>generation</code> is an optional identity for an external source generation; a mismatch raises <code>GenerationMismatch</code>.</p>
 <pre data-run="python"><code>from foldlitedb import Database, View
 
 with Database(":memory:", View.bundled("metrics")) as db:

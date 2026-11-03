@@ -56,6 +56,13 @@ def latency_distribution(samples):
 
 
 def peak_rss():
+    if sys.platform.startswith("linux"):
+        # ru_maxrss can include an ancestor's pre-exec high-water mark. VmHWM
+        # belongs to this executable's address space, excluding that history.
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return {"bytes": int(line.split()[1]) * 1024,
+                        "method": "/proc/self/status VmHWM; whole benchmark process, excludes child writer"}
     try:
         import resource
     except ImportError:
