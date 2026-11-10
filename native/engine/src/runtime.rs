@@ -45,18 +45,18 @@ impl Runtime {
         let descriptor = runtime.call(json!({"op":"descriptor"}))?;
         if !descriptor.is_object()
             || descriptor.get("abi").and_then(Value::as_u64) != Some(1)
-            || !descriptor
+            || descriptor
                 .get("name")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-            || !descriptor
+                .is_none_or(str::is_empty)
+            || descriptor
                 .get("version")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-            || !descriptor
+                .is_none_or(str::is_empty)
+            || descriptor
                 .get("state_version")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
+                .is_none_or(str::is_empty)
             || !descriptor.get("mergeable").is_some_and(Value::is_boolean)
         {
             return Err("Invalid ABI-v1 view descriptor".into());
@@ -193,9 +193,9 @@ impl Runtime {
 // arithmetic, cannot come from a double and would otherwise be silently rounded.
 fn guest_integer_is_double(number: &serde_json::Number) -> bool {
     crate::integer_is_exact_double(number)
-        || number.as_f64().is_some_and(|value| {
-            ryu_js::Buffer::new().format_finite(value) == number.to_string()
-        })
+        || number
+            .as_f64()
+            .is_some_and(|value| ryu_js::Buffer::new().format_finite(value) == number.to_string())
 }
 
 // Match the browser finiteJSON depth convention: the envelope starts at zero,

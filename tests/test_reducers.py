@@ -8,9 +8,6 @@ import pytest
 
 import foldlitedb
 from foldlitedb.reducers import (
-    MAX_BATCH_VALUES,
-    MAX_REQUEST_BYTES,
-    MAX_SAFE_INTEGER,
     Reducer,
     ReducerError,
     append_frame,
@@ -335,3 +332,18 @@ assert r.identity('mean/v1')['count'] == 0
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
+
+
+def test_reducer_request_strict_input_validation(reducer):
+    state = reducer.identity("mean/v1")
+    with pytest.raises(ReducerError, match="object"):
+        reducer.request(["not", "an", "object"])
+    with pytest.raises(ReducerError):
+        reducer.add(state, [{"value": 2**53 + 1, "position": [0, "a"]}])
+    with pytest.raises(ReducerError):
+        reducer.request({"op": "identity", "reducer": "\ud800"})
+    deep = None
+    for _ in range(66):
+        deep = [deep]
+    with pytest.raises(ReducerError):
+        reducer.request({"op": "identity", "reducer": "mean/v1", "extra": deep})

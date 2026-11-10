@@ -67,17 +67,24 @@ def repair_jsonl_tail(path):
         return
     with path.open('r+b') as handle:
         handle.seek(0, 2)
-        end = handle.tell()
+        original_end = end = handle.tell()
         while end:
             start = max(0, end - 65536)
             handle.seek(start)
             block = handle.read(end - start)
             last = block.rfind(b'\n')
             if last >= 0:
-                handle.truncate(start + last + 1)
+                target = start + last + 1
+                if target != original_end:
+                    handle.truncate(target)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 return
             end = start
-        handle.truncate(0)
+        if original_end:
+            handle.truncate(0)
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 class AppendJournal:
@@ -119,6 +126,8 @@ class AppendJournal:
         """Flush a committed append boundary and return its offset and digest."""
         if self.failed:
             raise OSError('Cannot commit an incomplete document write')
+        if self.offset == 0 and not self.path.exists():
+            return {'offset': 0, 'sha256': self.digest.hexdigest()}
         try:
             with self.path.open('r+b') as source:
                 if os.fstat(source.fileno()).st_size != self.offset:

@@ -98,6 +98,12 @@ def test_diagnostic_tail_keeps_complete_documents_within_byte_and_row_budgets(tm
     path.write_bytes(b''.join(rows) + b'{"partial":"\xe2')
     assert read_jsonl_tail(path, limit=1) == [{'n': 2, 'text': '☃'}]
     assert read_jsonl_tail(path, max_bytes=len(rows[-1]) + 20) == [{'n': 2, 'text': '☃'}]
+    # Exact newline boundary (start == len(rows[0]) > 0) preserves the complete first line in the window.
+    path.write_bytes(b''.join(rows))
+    assert read_jsonl_tail(path, max_bytes=len(rows[1]) + len(rows[2])) == [
+        {'n': 1, 'text': '☃'},
+        {'n': 2, 'text': '☃'},
+    ]
     path.write_bytes(b'{broken}\n')
     with pytest.raises(ValueError, match='Corrupt complete document'):
         read_jsonl_tail(path)

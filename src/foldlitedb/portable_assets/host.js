@@ -200,6 +200,53 @@ function memoryLimits(binary) {
   if (!found) throw new ViewError('View must declare a bounded memory');
 }
 
+const MIN_I64 = -9223372036854775808n;
+const MAX_U64 = 18446744073709551615n;
+function validateGuestIntegers(text) {
+  let at = 0;
+  while (at < text.length) {
+    const ch = text.charCodeAt(at);
+    if (ch === 0x22) {
+      at++;
+      while (at < text.length) {
+        const inner = text.charCodeAt(at++);
+        if (inner === 0x5c) at++;
+        else if (inner === 0x22) break;
+      }
+      continue;
+    }
+    if (ch === 0x2d || (ch >= 0x30 && ch <= 0x39)) {
+      const start = at;
+      if (ch === 0x2d) at++;
+      while (at < text.length && text.charCodeAt(at) >= 0x30 && text.charCodeAt(at) <= 0x39) at++;
+      let isFloat = false;
+      if (at < text.length && text.charCodeAt(at) === 0x2e) {
+        isFloat = true;
+        at++;
+        while (at < text.length && text.charCodeAt(at) >= 0x30 && text.charCodeAt(at) <= 0x39) at++;
+      }
+      if (at < text.length && (text.charCodeAt(at) === 0x65 || text.charCodeAt(at) === 0x45)) {
+        isFloat = true;
+        at++;
+        if (at < text.length && (text.charCodeAt(at) === 0x2b || text.charCodeAt(at) === 0x2d)) at++;
+        while (at < text.length && text.charCodeAt(at) >= 0x30 && text.charCodeAt(at) <= 0x39) at++;
+      }
+      if (!isFloat && at - start >= 16) {
+        const token = text.slice(start, at);
+        const exact = BigInt(token);
+        if (exact >= MIN_I64 && exact <= MAX_U64) {
+          const num = Number(token);
+          if (!Number.isFinite(num) || (BigInt(num) !== exact && String(num) !== token)) {
+            throw new ViewError(`Wasm response JSON integer ${token} is not exactly representable as an IEEE-754 double; views must emit double-valued numbers or strings`);
+          }
+        }
+      }
+      continue;
+    }
+    at++;
+  }
+}
+
 export class ViewModule {
   static async load(base = new URL('./', import.meta.url), name = 'metrics') {
     if (!/^[a-zA-Z0-9_.-]+$/.test(name)) throw new ViewError('Invalid module name');
@@ -251,7 +298,9 @@ export class ViewModule {
       if (!Number.isInteger(length) || length < 1 || length > MAX_REQUEST_BYTES) throw new ViewError('Invalid view response length');
       if (!Number.isInteger(output) || output < 0 || output + MAX_REQUEST_BYTES > this.exports.memory.buffer.byteLength || !(pointer + MAX_REQUEST_BYTES <= output || output + MAX_REQUEST_BYTES <= pointer)) throw new ViewError('View output buffer must be bounded and disjoint from input');
       if (this.exports.memory.buffer.byteLength > MAX_MEMORY_BYTES) throw new ViewError('View memory exceeds 16 MiB');
-      envelope = JSON.parse(decoder.decode(new Uint8Array(this.exports.memory.buffer, output, length)));
+      const rawResponse = decoder.decode(new Uint8Array(this.exports.memory.buffer, output, length));
+      envelope = JSON.parse(rawResponse);
+      validateGuestIntegers(rawResponse);
       finiteJSON(envelope);
     } catch (error) {
       throw new ViewError(`View execution failed: ${error.message || error}`);

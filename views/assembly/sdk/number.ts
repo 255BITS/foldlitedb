@@ -84,33 +84,48 @@ const POWERS10: usize = memory.data<f64>([
   1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
 ]);
 
+const MAX_SIGNIFICANT_DIGITS: i32 = 768;
+
 export function parseNumber(text: string): f64 {
   const negative = text.charCodeAt(0) == 45;
   let cursor = negative ? 1 : 0;
   const numerator = new Natural();
-  let fractionalDigits = 0, significantDigits = 0;
-  let pointed = false, started = false;
+  let fractionalDigits = 0, significantDigits = 0, droppedIntegerDigits = 0;
+  let pointed = false, started = false, stickyNonZero = false;
   for (; cursor < text.length; cursor++) {
     const code = text.charCodeAt(cursor);
     if (code == 46) { pointed = true; continue; }
     if (code == 101 || code == 69) break;
     const digit = code - 48;
-    if (pointed) fractionalDigits++;
-    if (!started && digit == 0) continue;
+    if (!started && digit == 0) {
+      if (pointed) fractionalDigits++;
+      continue;
+    }
     started = true;
-    significantDigits++;
-    numerator.multiply(10, digit);
+    if (significantDigits < MAX_SIGNIFICANT_DIGITS) {
+      if (pointed) fractionalDigits++;
+      significantDigits++;
+      numerator.multiply(10, digit);
+    } else {
+      if (!pointed) droppedIntegerDigits++;
+      if (digit != 0) stickyNonZero = true;
+    }
   }
   let exponent = 0;
   if (cursor < text.length) {
     cursor++;
     const exponentNegative = text.charCodeAt(cursor) == 45;
     if (exponentNegative || text.charCodeAt(cursor) == 43) cursor++;
-    for (; cursor < text.length; cursor++) exponent = min(1000000, exponent * 10 + text.charCodeAt(cursor) - 48);
+    for (; cursor < text.length; cursor++) exponent = min(10000000, exponent * 10 + text.charCodeAt(cursor) - 48);
     if (exponentNegative) exponent = -exponent;
   }
-  exponent -= fractionalDigits;
+  exponent += droppedIntegerDigits - fractionalDigits;
   if (!started) return negative ? -0.0 : 0.0;
+  if (stickyNonZero) {
+    numerator.multiply(10, 1);
+    significantDigits++;
+    exponent--;
+  }
   if (numerator.words.length <= 2) {
     const integer = <u64>numerator.words[0] | (numerator.words.length == 2 ? <u64>numerator.words[1] << 32 : 0);
     // Integer casts round once. Powers 10^0..10^22 and integers <=2^53 are

@@ -139,14 +139,14 @@ class RustReducer:
         for value in values:
             size = len(json.dumps(value, allow_nan=False, separators=(",", ":"), ensure_ascii=True).encode())
             if batch and (len(batch) >= MAX_BATCH_VALUES or used + size + 1 > MAX_REQUEST_BYTES):
-                state = self._invoke(lambda rt: rt.add(state, batch))
+                state = self._invoke(lambda rt, s=state, b=batch: rt.add(s, b))
                 batch = []
                 used = overhead(state)
             if used + size + bool(batch) > MAX_REQUEST_BYTES:
                 raise DatabaseError("One numeric contribution exceeds the reducer request byte budget")
             used += size + bool(batch)
             batch.append(value)
-        return self._invoke(lambda rt: rt.add(state, batch)) if batch else state
+        return self._invoke(lambda rt, s=state, b=batch: rt.add(s, b)) if batch else state
 
     def merge(self, left, right):
         return self._invoke(lambda rt: rt.merge(left, right))
@@ -236,7 +236,7 @@ class View:
         if self.is_callback:
             if self._bundled_module is None:
                 resources = portable_assets()
-                manifest = json.loads(resources.joinpath("documents.json").read_text())
+                manifest = json.loads(resources.joinpath("documents.json").read_text(encoding="utf-8"))
                 self._bundled_module = View(resources.joinpath("documents.wasm").read_bytes(),
                                             sha256=manifest["sha256"]).module
             return self._bundled_module
@@ -248,7 +248,7 @@ class View:
         if name not in ("metrics", "catalogue"):
             raise DatabaseError("Bundled view must be metrics or catalogue")
         resources = portable_assets()
-        manifest = json.loads(resources.joinpath(name + ".json").read_text())
+        manifest = json.loads(resources.joinpath(name + ".json").read_text(encoding="utf-8"))
         return cls(resources.joinpath(name + ".wasm").read_bytes(), sha256=manifest["sha256"])
 
 
@@ -274,6 +274,9 @@ class _RegisteredView:
     states: dict[str, tuple[Any, Any, Any, int]]
     mode: str = "documents"
     external_descriptor_matches: bool = False
+    dirty: bool = False
+    dirty_keys: set[str] | None = None
+    delta_count: int = 0
 
     def copy(self) -> _RegisteredView:
         return _RegisteredView(
@@ -282,7 +285,30 @@ class _RegisteredView:
             states=dict(self.states),
             mode=self.mode,
             external_descriptor_matches=self.external_descriptor_matches,
+            dirty=self.dirty,
+            dirty_keys=set(self.dirty_keys) if self.dirty_keys is not None else None,
+            delta_count=self.delta_count,
         )
+
+
+_ERROR_KINDS = {
+    "DatabaseError": DatabaseError,
+    "DocumentConflict": DocumentConflict,
+    "SourceOrderError": SourceOrderError,
+    "CursorExpired": CursorExpired,
+}
+
+
+def _native_error(error: BaseException) -> DatabaseError:
+    args = getattr(error, "args", ())
+    if (
+        len(args) == 2
+        and isinstance(args[0], str)
+        and isinstance(args[1], str)
+        and args[0] in _ERROR_KINDS
+    ):
+        return _ERROR_KINDS[args[0]](args[1])
+    return DatabaseError(str(error))
 
 
 def _document(value):
@@ -342,7 +368,7 @@ class Database:
             self._engine = (Engine(path_str, self.view.module, reset=True) if reset
                             else Engine(path_str, self.view.module))
         except (ValueError, TypeError, OverflowError) as error:
-            raise DatabaseError(str(error)) from error
+            raise _native_error(error) from error
 
         try:
             if generation is not None:
@@ -409,7 +435,7 @@ class Database:
         try:
             Engine.migrate_log(os.fspath(source), os.fspath(destination))
         except (ValueError, TypeError, OverflowError) as error:
-            raise DatabaseError(str(error)) from error
+            raise _native_error(error) from error
 
     def _assert_mutable(self):
         if self._callback_evaluating:
@@ -433,21 +459,7 @@ class Database:
         try:
             return json.loads(engine.execute_json(request))
         except (ValueError, TypeError, OverflowError) as error:
-            message = str(error)
-            kind = DatabaseError
-            if not message.startswith("View rejected operation:"):
-                lower = message.lower()
-                if "conflict" in lower:
-                    kind = DocumentConflict
-                elif (
-                    "to recover, run query() for a fresh snapshot" in lower
-                    or "cursor belongs to" in lower
-                    or "cursor is ahead" in lower
-                ):
-                    kind = CursorExpired
-                elif "source order" in lower or "source positions must advance" in lower:
-                    kind = SourceOrderError
-            raise kind(message) from error
+            raise _native_error(error) from error
 
     @_synchronized
     def _ingest_records(self, records, *, callbacks=True):
@@ -467,18 +479,20 @@ class Database:
                 return self._call_json('{"op":"ingest","documents":[' + ",".join(encoded) + "]}")
             prepared = self._call_json('{"op":"prepare_ingest","documents":[' + ",".join(encoded) + "]}")
             try:
-                states = self._stage_callbacks(
+                if not prepared["new_documents"]:
+                    return self._call_json(_json({"op": "commit_prepared", "token": prepared["token"]}))
+                deltas = self._stage_callback_deltas(
                     prepared["new_documents"], prepared["sequence"], regular_views
                 )
-                checkpoints = {name: self._callback_checkpoint(name, state, prepared["sequence"])
-                               for name, state in states.items()}
+                updates = {name: self._callback_checkpoint(name, delta, prepared["sequence"])
+                           for name, delta in deltas.items()}
                 result = self._call_json(_json({"op": "commit_prepared", "token": prepared["token"],
-                                                "checkpoints": checkpoints}))
+                                                "callback_updates": updates}))
             except BaseException:
                 self._call({"op": "cancel_prepared"})
                 raise
-            for name, state in states.items():
-                self._views[name].states = state
+            for name, delta in deltas.items():
+                self._views[name].states.update(delta)
             return result
         except DatabaseError as error:
             # The engine's limit errors are host-neutral; add the Python recovery.
@@ -529,6 +543,17 @@ class Database:
         # Validate from the key itself, independently of the transport envelope.
         return self._call_json(_json({"op": "canonical_key", "key": key})), key
 
+    def _canonical_keys(self, keys: list[Any]) -> list[tuple[str, Any]]:
+        if not keys:
+            return []
+        copied = [_copy(key) for key in keys]
+        results: list[tuple[str, Any]] = []
+        for offset in range(0, len(copied), 4096):
+            chunk = copied[offset:offset + 4096]
+            encoded = self._call_json(_json({"op": "canonical_keys", "keys": chunk}))
+            results.extend(zip(encoded, chunk, strict=True))
+        return results
+
     def _callback_checkpoint(self, name, state_map, sequence):
         entry = self._views[name]
         groups = []
@@ -547,39 +572,66 @@ class Database:
         return {"format": 1, "descriptor": _copy(entry.descriptor),
                 "sequence": sequence, "groups": groups}
 
-    def _stage_callbacks(self, documents, sequence, names, *, initial=None):
-        states = {}
+    def _collect_view_emissions(self, view: View, documents):
+        raw_items = []
+        for value in documents:
+            if value["source"].startswith("_"):
+                continue
+            doc = Document(value["id"], _copy(value["payload"]), value["position"], value["source"])
+            for ordinal, (key, contribution) in enumerate(view.map(doc)):
+                if len(raw_items) >= 4096:
+                    raise DatabaseError("A callback batch may emit at most 4096 contributions")
+                contribution = _copy(contribution)
+                if getattr(view.reducer, "positioned", True) is False and hasattr(view.reducer, "prepare"):
+                    contribution = _copy(view.reducer.prepare(contribution, doc, ordinal))
+                raw_items.append((key, contribution))
+        if not raw_items:
+            return {}
+        canonicalized = self._canonical_keys([item[0] for item in raw_items])
+        emissions: dict[str, tuple[Any, list[Any]]] = {}
+        for (canon_key, key), (_, contribution) in zip(canonicalized, raw_items, strict=True):
+            if canon_key not in emissions:
+                emissions[canon_key] = (key, [])
+            emissions[canon_key][1].append(contribution)
+        return emissions
+
+    def _stage_callback_deltas(self, documents, sequence, names):
+        deltas = {}
         evaluating = self._callback_evaluating
         self._callback_evaluating = True
         try:
             for name in names:
                 entry = self._views[name]
                 view = entry.view
-                state_map = dict(initial[name] if initial is not None else entry.states)
-                emissions = {}
-                count = 0
-                for value in documents:
-                    if value["source"].startswith("_"):
-                        continue
-                    doc = Document(value["id"], _copy(value["payload"]), value["position"], value["source"])
-                    for ordinal, (key, contribution) in enumerate(view.map(doc)):
-                        count += 1
-                        if count > 4096:
-                            raise DatabaseError("A callback batch may emit at most 4096 contributions")
-                        canon_key, key = self._canonical_key(key)
-                        contribution = _copy(contribution)
-                        if getattr(view.reducer, "positioned", True) is False and hasattr(view.reducer, "prepare"):
-                            contribution = _copy(view.reducer.prepare(contribution, doc, ordinal))
-                        if canon_key not in emissions:
-                            emissions[canon_key] = (key, [])
-                        emissions[canon_key][1].append(contribution)
+                state_map = entry.states
+                emissions = self._collect_view_emissions(view, documents)
+                delta = {}
+                for canon_key, (key, contributions) in sorted(emissions.items()):
+                    current = _copy(state_map[canon_key][1]) if canon_key in state_map else _copy(view.reducer.identity())
+                    state = _copy(view.reducer.add(current, contributions))
+                    # Finalizers may mutate their argument; state and result are independent.
+                    result = _copy(view.reducer.finalize(_copy(state)))
+                    delta[canon_key] = (key, state, result, sequence)
+                deltas[name] = delta
+        finally:
+            self._callback_evaluating = evaluating
+        return deltas
+
+    def _stage_callbacks(self, documents, sequence, names, *, initial=None):
+        states = {name: dict(self._views[name].states) for name in names} if initial is None else initial
+        evaluating = self._callback_evaluating
+        self._callback_evaluating = True
+        try:
+            for name in names:
+                view = self._views[name].view
+                state_map = states[name]
+                emissions = self._collect_view_emissions(view, documents)
                 for canon_key, (key, contributions) in sorted(emissions.items()):
                     current = _copy(state_map[canon_key][1]) if canon_key in state_map else _copy(view.reducer.identity())
                     state = _copy(view.reducer.add(current, contributions))
                     # Finalizers may mutate their argument; state and result are independent.
                     result = _copy(view.reducer.finalize(_copy(state)))
                     state_map[canon_key] = (key, state, result, sequence)
-                states[name] = state_map
         finally:
             self._callback_evaluating = evaluating
         return states
@@ -613,6 +665,10 @@ class Database:
         finally:
             self._callback_evaluating = evaluating
         state_map[canon_key] = (_copy(orig_key), _copy(new_state), _MISSING, sequence)
+        entry.dirty = True
+        if entry.dirty_keys is None:
+            entry.dirty_keys = set()
+        entry.dirty_keys.add(canon_key)
 
     def _finalize_view_group(self, view_name: str, canon_key: str):
         entry = self._views[view_name]
@@ -631,11 +687,12 @@ class Database:
     def _commit_projection_suffix(
         self,
         view_name: str,
-        pending_emissions: dict[str, tuple[Any, list[Any]]],
+        pending_emissions: dict[str, tuple[Any, list[Any]] | tuple[Any, list[Any], int]],
         checkpoint: int,
         replay: Any,
     ) -> None:
-        for canon_key, (orig_key, vals) in pending_emissions.items():
+        for canon_key, pending in pending_emissions.items():
+            orig_key, vals = pending[0], pending[1]
             self._reduce_view_group(
                 view_name, canon_key, orig_key, vals, checkpoint
             )
@@ -648,23 +705,36 @@ class Database:
             }
         ]
         entry = self._views[view_name]
+        dirty_keys = entry.dirty_keys or set()
+        write_delta = bool(
+            entry.external_descriptor_matches
+            and entry.delta_count < 64
+            and len(dirty_keys) < len(entry.states)
+        )
+        keys_to_encode = sorted(dirty_keys) if write_delta else sorted(entry.states.keys())
         groups = []
-        for canon_key in list(entry.states.keys()):
+        for canon_key in keys_to_encode:
             k, s, fin, seq = self._finalize_view_group(view_name, canon_key)
             groups.append({"key": _copy(k), "state": _copy(s), "result": _copy(fin), "sequence": seq})
+        payload: dict[str, Any] = {
+            "descriptor": entry.descriptor,
+            "checkpoint": checkpoint,
+            "groups": groups,
+        }
+        if write_delta:
+            payload["delta"] = True
         records.append(
-                {
-                    "id": str(checkpoint),
-                    "source": f"_view:{view_name}",
-                    "position": checkpoint,
-                    "payload": {
-                        "descriptor": entry.descriptor,
-                        "checkpoint": checkpoint,
-                        "groups": groups,
-                    },
-                }
-            )
+            {
+                "id": str(checkpoint),
+                "source": f"_view:{view_name}",
+                "position": checkpoint,
+                "payload": payload,
+            }
+        )
         self._ingest_records(records, callbacks=False)
+        entry.external_descriptor_matches = True
+        entry.dirty_keys = set()
+        entry.delta_count = (entry.delta_count + 1) if write_delta else 0
 
     def ingest_many(self, documents: Iterable[Document], *, batch_size=100) -> Iterator[IngestResult]:
         """Replay a larger iterable as bounded, separately committed batches."""
@@ -688,13 +758,40 @@ class Database:
             raise DatabaseError("Callback preview requires a resolved Document; call view.map(document) explicitly")
         return self._call({"op": "preview", "payload": payload})
 
+    def _restore_external_projection(self, view_name: str, descriptor: dict[str, Any], watermark: int):
+        source_name = f"_view:{view_name}"
+        latest = self.get(str(watermark), source=source_name)
+        if latest is None or not isinstance(latest.payload, dict):
+            return False, {}, 0
+        if latest.payload.get("descriptor") != descriptor:
+            return False, {}, 0
+        if not latest.payload.get("delta", False):
+            return True, self._restore_callback_groups(latest.payload), 0
+        chain = []
+        for doc in self.documents():
+            if doc.source != source_name or doc.position > watermark:
+                continue
+            if not isinstance(doc.payload, dict) or doc.payload.get("descriptor") != descriptor:
+                chain = []
+                continue
+            if not doc.payload.get("delta", False):
+                chain = [doc.payload]
+            else:
+                chain.append(doc.payload)
+        if not chain or chain[0].get("delta", False):
+            return False, {}, 0
+        states = self._restore_callback_groups(chain[0])
+        for delta_payload in chain[1:]:
+            states.update(self._restore_callback_groups(delta_payload))
+        return True, states, len(chain) - 1
+
     @_synchronized
     def register(self, view: View, *, _external=False) -> str:
         """Attach a descriptor-bound callback projection and recover its coverage.
 
         Ordinary callback projections replay retained source batches. The external
-        materializer separately validates its authoritative stream and stores one
-        atomic progress/state record; it is not reconstructed from pointer records.
+        materializer separately validates its authoritative stream and stores
+        atomic progress/state records.
         """
         self._assert_mutable()
         registered, descriptor = _validate_callback_view(view)
@@ -706,36 +803,42 @@ class Database:
             descriptor=descriptor,
             states={},
             mode="external" if _external else "documents",
+            dirty_keys=set(),
         )
         self._views[view.name] = entry
         try:
             if _external:
-                checkpoint = None
                 watermark = self.stats()["checkpoints"].get(f"_view:{view.name}")
                 if watermark is not None:
-                    saved = self.get(str(watermark), source=f"_view:{view.name}")
-                    checkpoint = saved.payload if saved is not None else None
-                matches = checkpoint is not None and checkpoint.get("descriptor") == descriptor
-                entry.external_descriptor_matches = matches
-                if matches:
-                    entry.states = self._restore_callback_groups(checkpoint)
+                    matches, restored, delta_count = self._restore_external_projection(
+                        view.name, descriptor, watermark
+                    )
+                    entry.external_descriptor_matches = matches
+                    if matches:
+                        entry.states = restored
+                        entry.delta_count = delta_count
             else:
                 saved = self._call({"op": "callback_checkpoints"}).get(view.name)
+                sequence = self.stats()["sequence"]
                 coverage = 0
+                loaded_warm = False
                 if saved is not None and saved.get("descriptor") == descriptor:
                     try:
                         entry.states = self._restore_callback_groups(saved)
                         coverage = saved["sequence"]
                         # Coverage must be a real boundary in this native generation.
                         self._call({"op": "document_batches", "since": coverage})
+                        loaded_warm = True
                     except (DatabaseError, KeyError, TypeError):
                         entry.states = {}
                         coverage = 0
-                states = self._replay_callbacks([view.name], coverage)
-                sequence = self.stats()["sequence"]
-                checkpoints = {view.name: self._callback_checkpoint(view.name, states[view.name], sequence)}
-                self._call_json(_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
-                entry.states = states[view.name]
+                        loaded_warm = False
+                if not loaded_warm or coverage != sequence:
+                    states = self._replay_callbacks([view.name], coverage)
+                    checkpoints = {view.name: self._callback_checkpoint(view.name, states[view.name], sequence)}
+                    self._call_json(_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
+                    entry.states = states[view.name]
+                entry.dirty = False
         except BaseException:
             if previous is None:
                 self._views.pop(view.name, None)
@@ -745,9 +848,12 @@ class Database:
         return view.version
 
     def _restore_callback_groups(self, checkpoint):
+        raw_groups = checkpoint["groups"]
+        if not raw_groups:
+            return {}
+        canonicalized = self._canonical_keys([item["key"] for item in raw_groups])
         states = {}
-        for item in checkpoint["groups"]:
-            canon_key, key = self._canonical_key(item["key"])
+        for (canon_key, key), item in zip(canonicalized, raw_groups, strict=True):
             if canon_key in states:
                 raise DatabaseError("Callback checkpoint repeats a group key")
             states[canon_key] = (key, _copy(item["state"]), _copy(item["result"]), item["sequence"])
@@ -766,13 +872,29 @@ class Database:
             if batch["complete"]:
                 return states
 
-    def get(self, id: str, *, source: str = "default") -> Document | None:
-        """Fetch an immutable document by its id and source in O(1)."""
-        result = self._call({"op": "get", "id": str(id), "source": source})
+    def get(
+        self,
+        id: str | None = None,
+        *,
+        position: int | None = None,
+        source: str = "default",
+    ) -> Document | None:
+        """Fetch an immutable document by its id or source position in O(1)."""
+        _identity(source, "source")
+        if (id is None) == (position is None):
+            raise DatabaseError("get requires either id or position, not both")
+        request: dict[str, Any] = {"op": "get", "source": source}
+        if id is not None:
+            request["id"] = _identity(id, "id")
+        else:
+            if type(position) is not int or not 0 <= position <= 9_007_199_254_740_991:
+                raise DatabaseError("position must be a nonnegative JavaScript-safe integer")
+            request["position"] = position
+        result = self._call(request)
         return _document(result) if result else None
 
     @_synchronized
-    def query(self, name_or_key=_MISSING, *, view: str | None = None, key=_MISSING,
+    def query(self, view_name=_MISSING, *, view: str | None = None, key=_MISSING,
               start_key=_MISSING, end_key=_MISSING, prefix=_MISSING,
               inclusive_start=True, inclusive_end=True, limit=100, cursor=None, after=None) -> Snapshot:
         """Read exact keys, an ascending key range, or a string/array prefix.
@@ -780,42 +902,28 @@ class Database:
         Bounds are inclusive by default. Supply the same selector and both
         continuation tokens on subsequent pages; page size may change.
         """
-        if view is not None:
-            if not isinstance(view, str) or view not in self._views:
-                raise DatabaseError(f"Unknown registered callback view: {view!r}")
-            if name_or_key is not _MISSING:
-                if key is not _MISSING:
-                    raise DatabaseError("Cannot specify both positional key and keyword key=")
-                key = name_or_key
+        if view_name is not _MISSING and view is not None:
+            raise DatabaseError("Cannot specify both positional view name and keyword view=")
+        selected_view = view if view is not None else (view_name if view_name is not _MISSING else None)
+        if selected_view is not None:
+            if not isinstance(selected_view, str) or selected_view not in self._views:
+                raise DatabaseError(f"Unknown registered callback view: {selected_view!r}")
             return self._query_callback(
-                view, key=key, start_key=start_key, end_key=end_key, prefix=prefix,
+                selected_view, key=key, start_key=start_key, end_key=end_key, prefix=prefix,
                 inclusive_start=inclusive_start, inclusive_end=inclusive_end,
                 limit=limit, cursor=cursor, after=after,
             )
-
-        name = name_or_key if isinstance(name_or_key, str) and name_or_key in self._views else None
-        if name is None:
-            has_selector = any(v is not _MISSING for v in (key, start_key, end_key, prefix))
-            if name_or_key is not _MISSING and has_selector:
-                if isinstance(name_or_key, str):
-                    raise DatabaseError(f"Unknown registered callback view: {name_or_key!r}")
-                raise DatabaseError("Cannot combine a positional key with key, range, or prefix selectors")
-            if self.view.is_callback:
-                name = self.view.name
-                if name_or_key is not _MISSING:
-                    key = name_or_key
-        if name is not None:
+        if self.view.is_callback:
             return self._query_callback(
-                name, key=key, start_key=start_key, end_key=end_key, prefix=prefix,
+                self.view.name, key=key, start_key=start_key, end_key=end_key, prefix=prefix,
                 inclusive_start=inclusive_start, inclusive_end=inclusive_end,
                 limit=limit, cursor=cursor, after=after,
             )
 
         request = {"op": "query", "limit": limit,
                    "inclusive_start": inclusive_start, "inclusive_end": inclusive_end}
-        actual_key = key if key is not _MISSING else (name_or_key if name_or_key is not _MISSING else _MISSING)
-        if actual_key is not _MISSING:
-            request["key"] = _copy(actual_key)
+        if key is not _MISSING:
+            request["key"] = _copy(key)
         for option, value in (("start_key", start_key), ("end_key", end_key), ("prefix", prefix)):
             if value is not _MISSING:
                 request[option] = _copy(value)
@@ -898,7 +1006,7 @@ class Database:
         continuation = None if complete else _json([QUERY_FORMAT, cursor, selected, entries[limit - 1][0]])
         return Snapshot(tuple(rows), cursor=cursor, after=continuation, complete=complete)
 
-    def rows(self, name_or_key=_MISSING, *, view: str | None = None, key=_MISSING,
+    def rows(self, view_name=_MISSING, *, view: str | None = None, key=_MISSING,
              start_key=_MISSING, end_key=_MISSING, prefix=_MISSING,
              inclusive_start=True, inclusive_end=True, limit=100) -> Iterator[Row]:
         options = {"inclusive_start": inclusive_start, "inclusive_end": inclusive_end}
@@ -907,7 +1015,7 @@ class Database:
         for option, value in (("key", key), ("start_key", start_key), ("end_key", end_key), ("prefix", prefix)):
             if value is not _MISSING:
                 options[option] = _copy(value)
-        args = (_copy(name_or_key),) if name_or_key is not _MISSING else ()
+        args = (view_name,) if view_name is not _MISSING else ()
         page = self.query(*args, limit=limit, **options)
         while True:
             yield from page.rows
@@ -940,12 +1048,20 @@ class Database:
         """Update disposable native callback caches without changing source bytes."""
         if self._engine is None:
             return
+        dirty_views = [
+            name for name, entry in self._views.items()
+            if entry.mode == "documents" and entry.dirty
+        ]
+        if not dirty_views:
+            return
         sequence = self.stats()["sequence"]
-        checkpoints = {name: self._callback_checkpoint(name, entry.states, sequence)
-                       for name, entry in self._views.items()
-                       if entry.mode == "documents"}
-        if checkpoints:
-            self._call_json(_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
+        checkpoints = {
+            name: self._callback_checkpoint(name, self._views[name].states, sequence)
+            for name in dirty_views
+        }
+        self._call_json(_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
+        for name in dirty_views:
+            self._views[name].dirty = False
 
     @_synchronized
     def checkpoint(self, source: str | None = None):
@@ -973,4 +1089,5 @@ class Database:
         result = self._call_json(_json(request))
         for name, state in states.items():
             self._views[name].states = state
+            self._views[name].dirty = False
         return result
