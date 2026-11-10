@@ -2,10 +2,26 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.3.3. Each version links its GitHub release;
+before moving existing databases to 0.4.0. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
+
+## [0.4.0](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.0) — 2026-11-10
+
+### Reproducible reducers and portable SDK hardening
+
+- Build the bundled `reducer.wasm` module reproducibly in-repo from `native/reducer` (`foldlitedb-reducer-wasm`, ABI v1: `mean/v1`, `envelope/v1`, `sum/v1`, `count/v1`, and `finite-scalar-position/v1`) with zero-buffering borrowed deserialization, `scripts/build_reducer_wasm.py --check`, generated third-party license notices, and domain-neutral terminology.
+- Harden the AssemblyScript view SDK (`views/assembly/sdk/`) to reject lone UTF-16 surrogate escapes, reject trailing non-whitespace JSON tokens, and cap decimal mantissa scanning at 768 significant digits with a sticky nonzero remainder bit to prevent superlinear big-decimal inputs. Rebuild bundled `metrics`, `catalogue`, and `documents` Wasm modules; opening existing `0.2.0`/`0.3.x` logs with bundled views automatically reconstructs their disposable `.cache` without log migration.
+- Enforce exact IEEE-754 double / JS shortest-spelling integer validation on Wasm responses in `portable_assets/host.js`, canonicalize `-0` retained keys and align cursor error types in `portable_assets/worker.js`, and validate empty-coverage bootstrap state keys plus pre-write buffer overlap and post-call failure poisoning across Rust and JS reducer hosts.
+
+### Native storage, PyO3, and Python API
+
+- Allow `Database.migrate(source, destination)` on `FOLDLOG1` logs to skip an incomplete torn final frame directly without requiring a separate open/close pass, allow opening read-only logs inside unwriteable parent directories, load `.cache` checkpoints in a single streaming SHA-256 pass, hash log frames without redundant cloning, enforce the 8 MiB frame limit on `:memory:`, and export `MAX_CACHE_BYTES`.
+- Replace English substring exception matching across Rust and PyO3 with structured `EngineError` / `ErrorKind` tuples (`DatabaseError`, `DocumentConflict`, `SourceOrderError`, `CursorExpired`).
+- Decouple per-batch callback commits from full-state serialization via incremental `callback_updates`, batch `canonical_keys` normalization across groups, raise the PyO3 request ceiling for checkpoint persistence to 1 GiB, and set `opt-level = 1` on `wasmi` in dev/test Cargo profiles.
+- Make `Database.query()` and `Database.rows()` use the optional positional parameter strictly for a registered callback `view_name` (requiring `key=...` for exact key selection), support `Database.get(id=None, *, position=None, source="default")` with strict validation, wire up `batch_size` / `max_batch_bytes` per-group flushing in `materialize_jsonl_view`, append incremental suffix deltas (`"delta": True`) in `Database.projection`, and ship `py.typed`.
+- Fix `read_jsonl_tail` exact newline-boundary line retention, validate `sse()` event names against empty/`\r`/`\n`/`:`, wake idle `stream_events` generators immediately on `Subscriber.close()`, `fsync` `repair_jsonl_tail` truncations, handle empty `AppendJournal.sync()`, remove vestigial `MANIFEST.in`, and enforce `rustfmt`, `clippy`, `ruff`, and reducer Wasm reproducibility in CI.
 
 ## [0.3.3](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.3) — 2026-11-10
 
