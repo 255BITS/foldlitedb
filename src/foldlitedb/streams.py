@@ -116,7 +116,7 @@ def read_jsonl_tail(path, limit=100, max_bytes=1048576, *, decode=None,
     import json
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000:
         raise ValueError('limit must be between 1 and 10000')
-    if not isinstance(max_bytes, int) or not 1 <= max_bytes <= MAX_PAGE_BYTES:
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 1 <= max_bytes <= MAX_PAGE_BYTES:
         raise ValueError('max_bytes must be between 1 and 16777216')
     path = Path(path)
     if not path.exists():

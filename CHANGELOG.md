@@ -2,10 +2,21 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.3.2. Each version links its GitHub release;
+before moving existing databases to 0.3.3. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
+
+## [0.3.3](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.3) — 2026-11-10
+
+### State machine and lifecycle hardening
+
+- Validate callback `View` definitions before opening or resetting the native storage engine so invalid callback views never truncate an existing log when `reset=True` is passed, and make `View.module` read-only.
+- Release native ownership without writing a checkpoint (`{"op": "close", "checkpoint": false}`) when `Database(...)` initialization aborts on a generation mismatch or callback registration error, preserving any existing valid `.cache` sidecar on disk; reject opening an existing non-empty untagged database with an explicit `generation`.
+- Consolidate Python callback view state into a cohesive `_RegisteredView` structure with atomic rollback on failed `register()`, enforce re-entrancy guards (`_callback_evaluating`) across lazy group finalization and incremental projection reduction, and pass rebuilt callback checkpoints into `{"op": "rebuild"}` so `Database.rebuild()` writes and syncs `.cache` once with accurate `cache.bytes` reporting.
+- Support an explicit `view=` keyword argument on `Database.query()` and `Database.rows()`, reject ambiguous simultaneous positional and keyword key selectors, and prevent guest Wasm `"View rejected operation: ..."` messages from being misclassified as `DocumentConflict` or `CursorExpired`.
+- Resolve symlink targets (including dangling symlinks) before validating primary log paths so dangling symlinks cannot target reserved `.cache` or `.lock` sidecars, allow read-only `FOLDLOG1` and migration source logs to open without write permissions or in-place tail truncation, skip reading obsolete checkpoints when `reset=True`, and validate ABI input/output buffer disjointness in native and JS reducer hosts.
+- Preserve caller watermark dictionaries in `stream_events`, emit `gap` without a false `ready` frame when a subscriber overflows during replay, terminate closed subscriber loops cleanly, reject boolean `max_bytes` in `read_jsonl_tail`, and mark `AppendJournal` failed on `sync()` verification errors.
 
 ## [0.3.2](https://github.com/255BITS/foldlitedb/releases/tag/v0.3.2) — 2026-11-03
 

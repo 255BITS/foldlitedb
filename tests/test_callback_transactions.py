@@ -270,3 +270,116 @@ def test_callback_maps_receive_independent_payload_copies():
         assert total(db) == 99
         assert db.query("other").rows[0].result == 2
         assert next(db.documents()).payload == {"value": 2}
+
+
+def test_failed_open_and_invalid_callback_view_never_clobber_log_or_cache(tmp_path, monkeypatch):
+    from foldlitedb import GenerationMismatch
+
+    path = tmp_path / "safe_open.fold"
+    cache = tmp_path / "safe_open.fold.cache"
+    with Database(path, total_view(), generation="gen-1") as db:
+        db.add({"value": 10})
+    original_log = path.read_bytes()
+    original_cache = cache.read_bytes()
+
+    # Invalid callback View with reset=True must fail BEFORE touching the log.
+    bad_view = View("totals", version="1", map="not-callable", reducer="not-reducer")
+    with pytest.raises(DatabaseError, match="callable"):
+        Database(path, bad_view, reset=True)
+    assert path.read_bytes() == original_log
+    assert cache.read_bytes() == original_cache
+
+    # Generation mismatch must close without overwriting the valid cache.
+    with pytest.raises(GenerationMismatch):
+        Database(path, total_view(), generation="gen-2")
+    assert cache.read_bytes() == original_cache
+
+    # Failing callback replay during open must close without overwriting the valid cache.
+    def boom(_doc):
+        raise RuntimeError("boom during open")
+
+    with pytest.raises(RuntimeError, match="boom during open"):
+        Database(path, total_view(version="2", mapper=boom))
+    assert cache.read_bytes() == original_cache
+
+    # Opening an existing non-empty un-tagged database with generation= must fail.
+    untagged = tmp_path / "untagged.fold"
+    with Database(untagged) as db:
+        db.add({"metric": "x", "value": 1})
+    with pytest.raises(GenerationMismatch):
+        Database(untagged, generation="gen-1")
+
+    # View.module is read-only and callback View ignores same-named files in cwd.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "collision_name").write_bytes(b"not wasm")
+    v = View("collision_name", version="1")
+    assert v.is_callback
+    with pytest.raises(AttributeError):
+        v.module = b"mutated"
+
+
+def test_lazy_finalization_and_group_reduction_enforce_reentrancy_and_rebuild_writes_cache_once(tmp_path):
+    path = tmp_path / "rebuild_once.fold"
+    cache = tmp_path / "rebuild_once.fold.cache"
+    with Database(path, total_view()) as db:
+        db.add({"value": 4})
+        db.add({"value": 6})
+        stats = db.rebuild()
+        assert stats["cache"]["bytes"] == cache.stat().st_size
+
+    # Re-entrancy guard blocks mutation inside lazy finalization and _reduce_view_group.
+    db_ref = None
+    view = View(
+        "lazy",
+        version="1",
+        map=lambda d: [("k", d.payload["value"])],
+        reducer=OrderedFold(
+            0,
+            lambda s, v: s + v,
+            version="1",
+            finalize=lambda s: db_ref.add({"value": 99}) if s == 10 else s,
+        ),
+    )
+    with Database(":memory:", view) as db:
+        db_ref = db
+        db._reduce_view_group("lazy", None, "k", [10], 1)
+        with pytest.raises(DatabaseError, match="must not mutate"):
+            db.query("lazy")
+        with pytest.raises(DatabaseError, match="must not mutate"):
+            db.checkpoint()
+        db._views["lazy"].states.clear()
+
+
+def test_explicit_view_query_disambiguation_and_rust_reducer_trap_recovery():
+    from foldlitedb import CursorExpired, DocumentConflict
+    from foldlitedb.reducers import Reducer
+
+    with Database(":memory:", total_view()) as db:
+        db.register(View("by_key", version="1", map=lambda d: [(d.payload["k"], d.payload["value"])],
+                         reducer=OrderedFold(0, lambda s, v: s + v, version="1")))
+        db.add_many([{"k": "a", "value": 3}, {"k": "b", "value": 7}])
+        assert [r.result for r in db.rows(view="by_key")] == [3, 7]
+        assert db.query("a", view="by_key").rows[0].result == 3
+        with pytest.raises(DatabaseError, match="both positional key and keyword key"):
+            db.query("a", view="by_key", key="b")
+        with pytest.raises(DatabaseError, match="Unknown registered callback view"):
+            db.query("unknown_view", key="a")
+        with pytest.raises(DatabaseError, match="Unknown registered callback view"):
+            db.query(view="unknown_view")
+
+        # Guest Wasm view error messages containing "conflict" or "cursor" are DatabaseError,
+        # not DocumentConflict or CursorExpired.
+        class DummyEngine:
+            def execute_json(self, _req):
+                raise ValueError("View rejected operation: simulated conflict and cursor text")
+
+        with pytest.raises(DatabaseError) as exc_info:
+            db._execute_json(DummyEngine(), "{}")
+        assert not isinstance(exc_info.value, (DocumentConflict, CursorExpired))
+
+    # RustReducer with implicitly owned runtime recovers after a trap.
+    reducer = RustReducer("sum/v1")
+    reducer._runtime = Reducer(fuel=10)
+    with pytest.raises(DatabaseError):
+        reducer.identity()
+    assert reducer.identity()["count"] == 0
