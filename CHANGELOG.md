@@ -2,10 +2,17 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.4.0. Each version links its GitHub release;
+before moving existing databases to 0.4.1. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
+
+## [0.4.1](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.1) — 2026-11-10
+
+This release publishes the changes prepared in 0.4.0 and 0.3.3. **0.4.0 and
+0.3.3 were not published to PyPI:** the Apple Silicon wheel build referenced the
+retired `macos-14` GitHub Actions runner image (`wheels.yml` now uses
+`macos-15`). Their GitHub tags are retained without moving them.
 
 ## [0.4.0](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.0) — 2026-11-10
 
