@@ -1,6 +1,6 @@
 use foldlitedb_portable_engine::{
-    Engine, ABI_BUFFER_BYTES, MAX_BATCH_DOCUMENTS, MAX_BATCH_EMISSIONS, MAX_JSON_DEPTH,
-    MAX_LOG_FRAME_BYTES, MAX_SAFE_INTEGER,
+    Engine, ErrorKind, ReducerInstance, ABI_BUFFER_BYTES, MAX_BATCH_DOCUMENTS, MAX_BATCH_EMISSIONS,
+    MAX_JSON_DEPTH, MAX_LOG_FRAME_BYTES, MAX_SAFE_INTEGER,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -137,7 +137,7 @@ fn raw_map_only_module(response: &str) -> Vec<u8> {
               (then i32.const 400000 global.set $output i32.const {response_len})
               (else unreachable))))))"#,
         descriptor_data = escape(&descriptor),
-        response_data = escape(&response),
+        response_data = escape(response),
         descriptor_len = descriptor.len(),
         response_len = response.len()
     ))
@@ -200,9 +200,18 @@ fn inexact_integer_view_outputs_are_rejected_before_any_write() {
     // A guest using 64-bit integer arithmetic can emit integers that no
     // double represents; they are rejected rather than silently rounded.
     for (response, literal) in [
-        (r#"{"ok":[[{"key":9007199254740993,"value":1}]]}"#, "9007199254740993"),
-        (r#"{"ok":[[{"key":"x","value":{"n":18446744073709551615}}]]}"#, "18446744073709551615"),
-        (r#"{"ok":[[{"key":"x","value":-9223372036854775807}]]}"#, "-9223372036854775807"),
+        (
+            r#"{"ok":[[{"key":9007199254740993,"value":1}]]}"#,
+            "9007199254740993",
+        ),
+        (
+            r#"{"ok":[[{"key":"x","value":{"n":18446744073709551615}}]]}"#,
+            "18446744073709551615",
+        ),
+        (
+            r#"{"ok":[[{"key":"x","value":-9223372036854775807}]]}"#,
+            "-9223372036854775807",
+        ),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("guest.fold");
@@ -404,4 +413,104 @@ fn batch_and_cursor_errors_give_recovery_and_closed_preview_fails() {
             .unwrap_err(),
         "Database is closed"
     );
+}
+
+#[test]
+fn get_strictly_validates_id_position_and_source_and_execute_typed_classifies_errors() {
+    let mut engine = Engine::open(":memory:", METRICS).unwrap();
+    call(
+        &mut engine,
+        json!({"op":"ingest","documents":[
+            {"id":"doc-a","source":"events","position":5,"payload":{"metric":"x","value":9}}
+        ]}),
+    );
+    assert_eq!(
+        call(
+            &mut engine,
+            json!({"op":"get","source":"events","id":"doc-a"})
+        )["position"],
+        5
+    );
+    assert_eq!(
+        call(
+            &mut engine,
+            json!({"op":"get","source":"events","position":5})
+        )["id"],
+        "doc-a"
+    );
+    assert_eq!(
+        call(
+            &mut engine,
+            json!({"op":"get","source":"events","position":6})
+        ),
+        Value::Null
+    );
+
+    // Reject missing selector, both selectors, non-string id, non-string source, negative position.
+    for invalid in [
+        json!({"op":"get","source":"events"}),
+        json!({"op":"get","source":"events","id":"doc-a","position":5}),
+        json!({"op":"get","source":"events","id":5}),
+        json!({"op":"get","source":123,"id":"doc-a"}),
+        json!({"op":"get","source":"events","position":-1}),
+        json!({"op":"get","source":"events","position":"5"}),
+    ] {
+        let err = engine.execute_typed(invalid).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DatabaseError);
+    }
+
+    // Verify structured ErrorKind classification without substring fragility.
+    let conflict = engine
+        .execute_typed(json!({"op":"ingest","documents":[
+            {"id":"doc-a","source":"events","position":5,"payload":{"metric":"x","value":99}}
+        ]}))
+        .unwrap_err();
+    assert_eq!(conflict.kind, ErrorKind::DocumentConflict);
+
+    let order = engine
+        .execute_typed(json!({"op":"ingest","documents":[
+            {"id":"doc-b","source":"events","position":2,"payload":{"metric":"x","value":1}}
+        ]}))
+        .unwrap_err();
+    assert_eq!(order.kind, ErrorKind::SourceOrderError);
+
+    let expired = engine
+        .execute_typed(json!({"op":"changes","since":"foreign:deadbeef:1"}))
+        .unwrap_err();
+    assert_eq!(expired.kind, ErrorKind::CursorExpired);
+}
+
+#[test]
+fn reducer_instance_detects_prewrite_overlap_and_poisons_on_postcall_abi_violation() {
+    // 1. Overlapping input_ptr (0) and output_ptr (1024) caught before writing input.
+    let overlapping = wat::parse_str(
+        r#"(module
+          (memory (export "memory") 8 256)
+          (func (export "abi_version") (result i32) i32.const 1)
+          (func (export "input_ptr") (result i32) i32.const 0)
+          (func (export "input_capacity") (result i32) i32.const 262144)
+          (func (export "output_ptr") (result i32) i32.const 1024)
+          (func (export "execute") (param i32) (result i32) i32.const 2))"#,
+    )
+    .unwrap();
+    let mut r_overlap = ReducerInstance::new(&overlapping, 1_000_000).unwrap();
+    let err = r_overlap.execute_json(b"{}").unwrap_err();
+    assert!(err.contains("overlap"), "{err}");
+
+    // 2. Post-call invalid response length (0) poisons the stateful reducer instance.
+    let zero_len = wat::parse_str(
+        r#"(module
+          (memory (export "memory") 8 256)
+          (func (export "abi_version") (result i32) i32.const 1)
+          (func (export "input_ptr") (result i32) i32.const 0)
+          (func (export "input_capacity") (result i32) i32.const 262144)
+          (func (export "output_ptr") (result i32) i32.const 300000)
+          (func (export "execute") (param i32) (result i32) i32.const 0))"#,
+    )
+    .unwrap();
+    let mut r_poison = ReducerInstance::new(&zero_len, 1_000_000).unwrap();
+    let first_err = r_poison.execute_json(b"{}").unwrap_err();
+    assert!(first_err.contains("length"), "{first_err}");
+    let second_err = r_poison.execute_json(b"{}").unwrap_err();
+    assert!(second_err.contains("create a new instance"), "{second_err}");
 }

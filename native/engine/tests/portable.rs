@@ -358,7 +358,10 @@ fn browser_number_spellings_are_normalized_for_mapping_export_and_replay() {
         let error = engine
             .execute(serde_json::from_str(&wire).unwrap())
             .unwrap_err();
-        assert!(error.contains(literal) && error.contains("IEEE-754"), "{error}");
+        assert!(
+            error.contains(literal) && error.contains("IEEE-754"),
+            "{error}"
+        );
     }
     assert_eq!(execute(&mut engine, json!({"op":"stats"}))["documents"], 0);
     let wire = r#"{"op":"ingest","documents":[{"id":"large","payload":{"metric":"x","value":1.0000000000000001e18,"nested":[9007199254740992,9007199254740994]}}]}"#;
@@ -397,7 +400,10 @@ fn browser_number_spellings_are_normalized_for_mapping_export_and_replay() {
         execute(&mut rebuilt, json!({"op":"documents"}))["documents"],
         exported["documents"]
     );
-    assert_eq!(execute(&mut rebuilt, json!({"op":"query"}))["rows"], rows["rows"]);
+    assert_eq!(
+        execute(&mut rebuilt, json!({"op":"query"}))["rows"],
+        rows["rows"]
+    );
 }
 
 fn fs_remove_cache(path: &std::path::Path) {
@@ -463,11 +469,18 @@ fn payload_integers_must_be_exact_doubles_matching_the_python_rule() {
     let documents: Vec<Value> = accepted
         .iter()
         .enumerate()
-        .map(|(index, value)| json!({"id":index.to_string(),"payload":{"metric":"n","value":value}}))
+        .map(
+            |(index, value)| json!({"id":index.to_string(),"payload":{"metric":"n","value":value}}),
+        )
         .collect();
     let inserted = execute(&mut engine, json!({"op":"ingest","documents":documents}));
     assert_eq!(inserted["inserted"], accepted.len());
-    for (document, value) in inserted["documents"].as_array().unwrap().iter().zip(&accepted) {
+    for (document, value) in inserted["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&accepted)
+    {
         assert_eq!(document["payload"]["value"].as_f64(), value.as_f64());
     }
     let exported = execute(&mut engine, json!({"op":"documents"}));
@@ -477,7 +490,10 @@ fn payload_integers_must_be_exact_doubles_matching_the_python_rule() {
     assert_eq!(execute(&mut reopened, json!({"op":"documents"})), exported);
     let rebuilt = execute(&mut reopened, json!({"op":"rebuild"}));
     assert_eq!(rebuilt["documents"], accepted.len());
-    assert_eq!(execute(&mut reopened, json!({"op":"query"}))["rows"], result);
+    assert_eq!(
+        execute(&mut reopened, json!({"op":"query"}))["rows"],
+        result
+    );
 }
 
 #[test]
@@ -652,7 +668,6 @@ fn internal_sources_starting_with_underscore_are_stored_without_wasm_mapping() {
     assert_eq!(reopened_stats["checkpoints"]["_view:metrics"], 0);
     assert_eq!(reopened_stats["cache"]["status"], "loaded");
 }
-
 
 #[test]
 fn shared_host_conformance_corpus_covers_sources_depth_and_output_buffers() {

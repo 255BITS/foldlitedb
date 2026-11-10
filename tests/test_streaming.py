@@ -2,8 +2,11 @@
 import asyncio
 import base64
 import json
+import time
 
-from foldlitedb.streaming import Subscriber, stream_events
+import pytest
+
+from foldlitedb.streaming import Subscriber, sse, stream_events
 
 
 def cursor(offset):
@@ -60,4 +63,36 @@ def test_overflow_during_replay_delivers_gap_without_ready_and_preserves_caller_
         assert events[0].startswith(b'event: frame\n')
         assert events[1].startswith(b'event: gap\n')
         assert caller_watermarks == {'documents': cursor(3)}
+    asyncio.run(run())
+
+
+def test_sse_validates_event_name_and_subscriber_close_wakes_stream_immediately():
+    for invalid_event in ['', 'frame\nevent: injected', 'frame\r', 'bad:name', None, 123]:
+        with pytest.raises(ValueError, match='Invalid SSE event name'):
+            sse(invalid_event, {'ok': True})
+
+    async def run():
+        subscriber = Subscriber('documents')
+        generator = stream_events(
+            lambda *_args, **_kw: ([], [], {}),
+            subscriber,
+            {'documents': cursor(1)},
+            stream_id='documents',
+            heartbeat_seconds=30,
+        )
+        first = await anext(generator)
+        assert first.startswith(b'event: ready\n')
+
+        started = time.monotonic()
+
+        async def close_soon():
+            await asyncio.sleep(0.02)
+            subscriber.close()
+
+        closer = asyncio.create_task(close_soon())
+        remaining = [event async for event in generator]
+        await closer
+        assert remaining == []
+        assert time.monotonic() - started < 1.0
+
     asyncio.run(run())

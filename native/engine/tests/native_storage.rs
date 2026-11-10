@@ -811,3 +811,145 @@ fn close_without_checkpoint_releases_ownership_and_preserves_existing_cache() {
     call(&mut reopened, json!({"op":"close","checkpoint":false}));
     assert_eq!(fs::read(&cache).unwrap(), saved_cache);
 }
+
+#[test]
+fn legacy_torn_tail_migrates_directly_and_readonly_directories_work_for_legacy_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    let legacy_path = directory.path().join("torn_legacy.fold");
+    let mut owner = open(&legacy_path);
+    add(&mut owner, "one", 7);
+    add(&mut owner, "two", 11);
+    drop(owner);
+
+    let clean_legacy = legacy_log(&fs::read(&legacy_path).unwrap());
+    let mut torn_legacy = clean_legacy.clone();
+    torn_legacy.extend(b"BA");
+    fs::write(&legacy_path, &torn_legacy).unwrap();
+
+    // Direct migration from a retired FOLDLOG1 log with a torn final frame succeeds
+    // without touching source bytes.
+    let migrated_path = directory.path().join("migrated_from_torn.fold");
+    Engine::migrate_log(
+        legacy_path.to_str().unwrap(),
+        migrated_path.to_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(&legacy_path).unwrap(), torn_legacy);
+    let mut migrated = open(&migrated_path);
+    assert_eq!(call(&mut migrated, json!({"op":"stats"}))["documents"], 2);
+    drop(migrated);
+
+    // Opening a writable FOLDLOG1 log recovers (truncates) its torn tail cleanly.
+    let mut writable_legacy = open(&legacy_path);
+    assert_eq!(
+        call(&mut writable_legacy, json!({"op":"stats"}))["documents"],
+        2
+    );
+    drop(writable_legacy);
+    assert_eq!(fs::read(&legacy_path).unwrap(), clean_legacy);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let ro_dir = directory.path().join("ro_dir");
+        fs::create_dir(&ro_dir).unwrap();
+        let ro_legacy = ro_dir.join("legacy.fold");
+        fs::write(&ro_legacy, &torn_legacy).unwrap();
+        fs::set_permissions(&ro_legacy, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let ro_v2 = ro_dir.join("modern.fold");
+        let mut v2_owner = open(&ro_v2);
+        add(&mut v2_owner, "one", 1);
+        drop(v2_owner);
+        // Remove the sidecar .lock so opening ro_v2 must create a lock in a 0o555 dir.
+        let _ = fs::remove_file(sibling(&ro_v2, ".lock"));
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Read-only FOLDLOG1 opens and migrates even when no .lock can be created.
+        let mut ro_opened = open(&ro_legacy);
+        assert_eq!(call(&mut ro_opened, json!({"op":"stats"}))["documents"], 2);
+        drop(ro_opened);
+
+        let ro_migrated = directory.path().join("migrated_from_ro_dir.fold");
+        Engine::migrate_log(ro_legacy.to_str().unwrap(), ro_migrated.to_str().unwrap()).unwrap();
+        assert_eq!(
+            call(&mut open(&ro_migrated), json!({"op":"stats"}))["documents"],
+            2
+        );
+
+        // Mutable FOLDLOG2 still requires exclusive lock creation and rejects 0o555 dir.
+        assert!(Engine::open(ro_v2.to_str().unwrap(), METRICS).is_err());
+
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&ro_legacy, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
+#[test]
+fn memory_enforces_log_frame_limit_and_incremental_callback_updates_merge_groups() {
+    let mut mem = Engine::open(":memory:", METRICS).unwrap();
+    let payload = "x".repeat(200_000);
+    let oversized_docs: Vec<Value> = (0..45)
+        .map(|i| json!({"id":format!("doc-{i}"),"source":"_meta","payload":{"pad":payload}}))
+        .collect();
+    let err = mem
+        .execute(json!({"op":"ingest","documents":oversized_docs}))
+        .unwrap_err();
+    assert!(err.contains("8 MiB"), "{err}");
+    assert_eq!(call(&mut mem, json!({"op":"stats"}))["documents"], 0);
+
+    // Incremental callback_updates merge delta groups into BTreeMap checkpoints.
+    let prepared1 = call(
+        &mut mem,
+        json!({"op":"prepare_ingest","documents":[{"id":"d1","payload":{"k":"a"}}]}),
+    );
+    call(
+        &mut mem,
+        json!({
+            "op": "commit_prepared",
+            "token": prepared1["token"],
+            "callback_updates": {
+                "v": {
+                    "format": 1,
+                    "descriptor": {"version": "1"},
+                    "sequence": prepared1["sequence"],
+                    "groups": [
+                        {"key": "a", "state": 1, "result": 1, "sequence": 1},
+                        {"key": "b", "state": 2, "result": 2, "sequence": 1}
+                    ]
+                }
+            }
+        }),
+    );
+    let prepared2 = call(
+        &mut mem,
+        json!({"op":"prepare_ingest","documents":[{"id":"d2","payload":{"k":"a"}}]}),
+    );
+    call(
+        &mut mem,
+        json!({
+            "op": "commit_prepared",
+            "token": prepared2["token"],
+            "callback_updates": {
+                "v": {
+                    "format": 1,
+                    "descriptor": {"version": "1"},
+                    "sequence": prepared2["sequence"],
+                    "groups": [
+                        {"key": "a", "state": 10, "result": 10, "sequence": 2}
+                    ]
+                }
+            }
+        }),
+    );
+    let saved = call(&mut mem, json!({"op":"callback_checkpoints"}));
+    assert_eq!(saved["v"]["sequence"], prepared2["sequence"]);
+    assert_eq!(
+        saved["v"]["groups"],
+        json!([
+            {"key": "a", "state": 10, "result": 10, "sequence": 2},
+            {"key": "b", "state": 2, "result": 2, "sequence": 1}
+        ])
+    );
+}

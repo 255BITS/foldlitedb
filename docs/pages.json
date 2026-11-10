@@ -4,6 +4,6 @@
   {"file": "portable.html", "title": "Portable views", "description": "Write a map and reducer in AssemblyScript, then run the same WebAssembly module in native Python or a browser."},
   {"file": "api.html", "title": "Python API", "description": "The Rust-native Database and View API: immutable appends, range and prefix queries, snapshots, changes, checkpoint, rebuild, and Rust embedding limits."},
   {"file": "concepts.html", "title": "Documents and caches", "description": "Immutable source identity, deterministic folds, append-only durability, cache verification, and reconstruction."},
-  {"file": "upgrading.html", "title": "Upgrade guide", "description": "Upgrade to 0.3.3: faster native Wasm execution, compatible 0.3.x logs and cursors, and verified copy migration for 0.1.x."},
+  {"file": "upgrading.html", "title": "Upgrade guide", "description": "Upgrade to 0.4.0: hardened portable views, reproducible numeric reducers, compatible FOLDLOG2 logs, and verified copy migration for 0.1.x."},
   {"file": "releasing.html", "title": "Releases", "description": "Maintainer setup for PyPI Trusted Publishing, tested native distributions, and release verification."}
 ]

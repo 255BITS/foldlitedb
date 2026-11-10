@@ -384,17 +384,17 @@ def test_shared_conformance_sources_depth_and_relocated_output(portable_page):
       }
       return {sources,depths,modules};
     }""", fixture)
-    for case, actual in zip(fixture["source_cases"], result["sources"]):
+    for case, actual in zip(fixture["source_cases"], result["sources"], strict=True):
         assert actual["inserted"] == actual["replayed"] == 1
         assert len(actual["rows"]) == int(case["mapped"])
         assert actual["source"] == case["source"] and actual["equivalent"]
         with PortableDatabase(":memory:") as native:
             native.add({"metric": "x", "value": 2}, id="one", source=case["source"])
             assert native._call({"op": "query"})["rows"] == actual["rows"]
-    for case, actual in zip(fixture["payload_depth_cases"], result["depths"]):
+    for case, actual in zip(fixture["payload_depth_cases"], result["depths"], strict=True):
         assert actual["accepted"] == case["accepted"], (case, actual)
         assert actual["documents"] == int(case["accepted"])
-    for case, actual in zip(fixture["output_modules"], result["modules"]):
+    for case, actual in zip(fixture["output_modules"], result["modules"], strict=True):
         assert actual["accepted"] == case["accepted"], (case["output_pointer"], actual)
         if not actual["accepted"]:
             assert "output buffer" in actual["error"]
@@ -637,3 +637,140 @@ def test_browser_rows_snapshots_mutable_selectors_before_awaiting_pages(portable
     assert actual["prefixKeys"] == expected
     assert actual["rangeKeys"] == expected
     assert actual["typed"]
+
+
+def _leb_u(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def _leb_s(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if (value == 0 and not (byte & 0x40)) or (value == -1 and (byte & 0x40)):
+            out.append(byte)
+            return bytes(out)
+        out.append(byte | 0x80)
+
+
+def _guest_view_wasm(map_response: bytes):
+    descriptor = {"abi": 1, "name": "guest", "version": "1", "state_version": "1", "mergeable": False}
+    desc_bytes = json.dumps({"ok": descriptor}, separators=(",", ":")).encode("utf-8")
+    null_bytes = b'{"ok":null}'
+
+    def sec(sec_id: int, payload: bytes) -> bytes:
+        return bytes([sec_id]) + _leb_u(len(payload)) + payload
+
+    def fn_body(code: bytes) -> bytes:
+        body = b"\x00" + code + b"\x0b"
+        return _leb_u(len(body)) + body
+
+    # input JSON is {"op":"<op>",...}, so byte 7 is 'd' (100) for descriptor and 'm' (109) for map.
+    exec_code = (
+        b"\x41\x07\x2d\x00\x00\x41" + _leb_s(100) + b"\x46\x04\x7f"
+        + b"\x41" + _leb_s(300_000) + b"\x24\x00\x41" + _leb_s(len(desc_bytes))
+        + b"\x05\x41\x07\x2d\x00\x00\x41" + _leb_s(109) + b"\x46\x04\x7f"
+        + b"\x41" + _leb_s(310_000) + b"\x24\x00\x41" + _leb_s(len(map_response))
+        + b"\x05\x41" + _leb_s(320_000) + b"\x24\x00\x41" + _leb_s(len(null_bytes))
+        + b"\x0b\x0b"
+    )
+    exports = [
+        ("memory", 2, 0),
+        ("abi_version", 0, 0),
+        ("input_ptr", 0, 1),
+        ("input_capacity", 0, 2),
+        ("output_ptr", 0, 3),
+        ("execute", 0, 4),
+    ]
+    export_payload = _leb_u(len(exports)) + b"".join(
+        _leb_u(len(name)) + name.encode("ascii") + bytes([kind]) + _leb_u(idx)
+        for name, kind, idx in exports
+    )
+    segments = [(300_000, desc_bytes), (310_000, map_response), (320_000, null_bytes)]
+    data_payload = _leb_u(len(segments)) + b"".join(
+        b"\x00\x41" + _leb_s(offset) + b"\x0b" + _leb_u(len(raw)) + raw
+        for offset, raw in segments
+    )
+    wasm = (
+        b"\x00asm\x01\x00\x00\x00"
+        + sec(1, b"\x02\x60\x00\x01\x7f\x60\x01\x7f\x01\x7f")
+        + sec(3, b"\x05\x00\x00\x00\x00\x01")
+        + sec(5, b"\x01\x01\x10\x80\x02")
+        + sec(6, b"\x01\x7f\x01\x41" + _leb_s(300_000) + b"\x0b")
+        + sec(7, export_payload)
+        + sec(10, _leb_u(5)
+              + fn_body(b"\x41\x01")
+              + fn_body(b"\x41\x00")
+              + fn_body(b"\x41" + _leb_s(262_144))
+              + fn_body(b"\x23\x00")
+              + fn_body(exec_code))
+        + sec(11, data_payload)
+    )
+    return wasm.hex(), descriptor
+
+
+def test_browser_guest_inexact_integers_negative_zero_keys_and_cursor_error_types(portable_page):
+    bad_hex, descriptor = _guest_view_wasm(b'{"ok":[[{"key":9007199254740993,"value":1}]]}')
+    good_hex, _ = _guest_view_wasm(
+        b'{"ok":[[{"key":-0.0,"value":{"exact":9007199254740994,"short":1000000000000000100}}]]}'
+    )
+    result = portable_page.evaluate("""async ({badHex, goodHex, descriptor}) => {
+      const {BrowserDatabase, DatabaseError, CursorExpired} = await import('./portable/client.js');
+      const {sha256Hex} = await import('./portable/host.js');
+      const fromHex = h => Uint8Array.from(h.match(/../g), p => parseInt(p, 16));
+      const badBytes = fromHex(badHex), goodBytes = fromHex(goodHex);
+      const badDb = await BrowserDatabase.connect({
+        bytes: badBytes,
+        spec: {abi: 1, module: 'bad.wasm', sha256: sha256Hex(badBytes), descriptor},
+      });
+      const goodDb = await BrowserDatabase.connect({
+        bytes: goodBytes,
+        spec: {abi: 1, module: 'good.wasm', sha256: sha256Hex(goodBytes), descriptor},
+      });
+      try {
+        let inexactError = '';
+        try { await badDb.preview(null); } catch (err) { inexactError = err.message; }
+
+        await goodDb.add({x: 1});
+        const rows = await goodDb.rows();
+        const keyIsPositiveZero = Object.is(rows[0].key, 0);
+
+        const stats = await goodDb.stats();
+        const prefix = stats.cursor.slice(0, stats.cursor.lastIndexOf(':') + 1);
+        const cursorErrors = [];
+        for (const call of [
+          () => goodDb.changes(123),
+          () => goodDb.changes(prefix + 'not-a-number'),
+          () => goodDb.changes(prefix + '999999'),
+        ]) {
+          try { await call(); cursorErrors.push('ok'); }
+          catch (err) {
+            cursorErrors.push({
+              isExpired: err instanceof CursorExpired,
+              isDbError: err instanceof DatabaseError,
+            });
+          }
+        }
+        return {inexactError, keyIsPositiveZero, rows, cursorErrors};
+      } finally {
+        badDb.close();
+        goodDb.close();
+      }
+    }""", {"badHex": bad_hex, "goodHex": good_hex, "descriptor": descriptor})
+    assert "9007199254740993" in result["inexactError"]
+    assert "not exactly representable" in result["inexactError"]
+    assert result["keyIsPositiveZero"] is True
+    assert result["cursorErrors"] == [
+        {"isExpired": False, "isDbError": True},
+        {"isExpired": False, "isDbError": True},
+        {"isExpired": True, "isDbError": True},
+    ]

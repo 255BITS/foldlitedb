@@ -354,16 +354,24 @@ def test_explicit_view_query_disambiguation_and_rust_reducer_trap_recovery():
     from foldlitedb import CursorExpired, DocumentConflict
     from foldlitedb.reducers import Reducer
 
-    with Database(":memory:", total_view()) as db:
+    with Database(":memory:", View("by_key_primary", version="1",
+                                   map=lambda d: [(d.payload["k"], d.payload["value"])],
+                                   reducer=OrderedFold(0, lambda s, v: s + v, version="1"))) as db:
         db.register(View("by_key", version="1", map=lambda d: [(d.payload["k"], d.payload["value"])],
                          reducer=OrderedFold(0, lambda s, v: s + v, version="1")))
-        db.add_many([{"k": "a", "value": 3}, {"k": "b", "value": 7}])
+        db.add_many([{"k": "a", "value": 3}, {"k": "by_key", "value": 7}])
         assert [r.result for r in db.rows(view="by_key")] == [3, 7]
-        assert db.query("a", view="by_key").rows[0].result == 3
-        with pytest.raises(DatabaseError, match="both positional key and keyword key"):
-            db.query("a", view="by_key", key="b")
+        assert db.query("by_key", key="a").rows[0].result == 3
+        assert db.query(view="by_key", key="a").rows[0].result == 3
+        # key="by_key" on primary view never collides with secondary view named "by_key".
+        assert db.query(key="by_key").rows[0].result == 7
+        assert [r.result for r in db.rows("by_key", key="by_key")] == [7]
+        with pytest.raises(DatabaseError, match="Cannot specify both positional view name and keyword view="):
+            db.query("by_key", view="by_key")
         with pytest.raises(DatabaseError, match="Unknown registered callback view"):
             db.query("unknown_view", key="a")
+        with pytest.raises(DatabaseError, match="Unknown registered callback view"):
+            db.query("a")
         with pytest.raises(DatabaseError, match="Unknown registered callback view"):
             db.query(view="unknown_view")
 
@@ -383,3 +391,37 @@ def test_explicit_view_query_disambiguation_and_rust_reducer_trap_recovery():
     with pytest.raises(DatabaseError):
         reducer.identity()
     assert reducer.identity()["count"] == 0
+
+
+def test_callback_state_exceeding_8_mib_checkpoints_reopens_warm_and_rebuilds(tmp_path):
+    """Callback checkpoints exceeding the 8 MiB per-frame log limit persist and reopen cleanly."""
+    chunk = "z" * 200_000
+    large_view = View(
+        "large_state",
+        version="1",
+        map=lambda d: [(d.payload["group"], chunk)],
+        reducer=OrderedFold("", lambda s, v: v, version="1"),
+    )
+    path = tmp_path / "large_cb.fold"
+    with Database(path, large_view) as db:
+        # 50 groups * 200 KB > 10 MiB (> 8 MiB per-frame log limit), committed incrementally.
+        for i in range(50):
+            db.add({"group": f"g-{i:03d}"}, id=f"doc-{i:03d}")
+        # Subsequent tiny append only sends delta for g-000, not 10 MiB!
+        db.add({"group": "g-000"}, id="doc-extra")
+        cp = db.checkpoint()
+        assert cp["cache"]["bytes"] > 9 * 1024 * 1024
+        assert db.get("doc-010").position == 10
+        assert db.get(position=10).id == "doc-010"
+        assert db.get(position=9999) is None
+        with pytest.raises(DatabaseError, match="either id or position"):
+            db.get()
+        with pytest.raises(DatabaseError, match="either id or position"):
+            db.get("doc-010", position=10)
+
+    with Database(path, large_view) as reopened:
+        assert reopened.stats()["cache"]["status"] == "loaded"
+        assert reopened.query(key="g-049").rows[0].result == chunk
+        rebuilt = reopened.rebuild()
+        assert rebuilt["cache"]["bytes"] > 9 * 1024 * 1024
+        assert reopened.query(key="g-000").rows[0].result == chunk

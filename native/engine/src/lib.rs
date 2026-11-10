@@ -42,6 +42,9 @@ pub const MAX_BATCH_EMISSIONS: usize = 4096;
 /// Maximum encoded size of one committed log frame (one batch of documents).
 pub const MAX_LOG_FRAME_BYTES: usize = storage::MAX_FRAME_BYTES;
 
+/// Maximum encoded size of one disposable `.cache` checkpoint file.
+pub const MAX_CACHE_BYTES: u64 = storage::MAX_CACHE_BYTES;
+
 /// Maximum JSON nesting depth of payloads, keys, states and results.
 pub const MAX_JSON_DEPTH: usize = 64;
 
@@ -49,6 +52,76 @@ const MAX_SAFE_SEQUENCE: u64 = MAX_SAFE_INTEGER;
 const MAX_PAGE: usize = 1024;
 const CURSOR_RECOVERY: &str = "Obtain a fresh snapshot with db.query() and replace the previous results before resuming changes.";
 type Result<T> = std::result::Result<T, String>;
+type TypedResult<T> = std::result::Result<T, EngineError>;
+
+/// Structured error category matching public Python and browser exception types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    DatabaseError,
+    DocumentConflict,
+    SourceOrderError,
+    CursorExpired,
+}
+
+impl ErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DatabaseError => "DatabaseError",
+            Self::DocumentConflict => "DocumentConflict",
+            Self::SourceOrderError => "SourceOrderError",
+            Self::CursorExpired => "CursorExpired",
+        }
+    }
+}
+
+/// Structured engine error pairing an [`ErrorKind`] with a human-readable message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineError {
+    pub kind: ErrorKind,
+    pub message: String,
+}
+
+impl EngineError {
+    pub fn database(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::DatabaseError,
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::DocumentConflict,
+            message: message.into(),
+        }
+    }
+
+    pub fn source_order(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::SourceOrderError,
+            message: message.into(),
+        }
+    }
+
+    pub fn cursor_expired(message: &str) -> Self {
+        Self {
+            kind: ErrorKind::CursorExpired,
+            message: cursor_error(message),
+        }
+    }
+}
+
+impl From<String> for EngineError {
+    fn from(message: String) -> Self {
+        Self::database(message)
+    }
+}
+
+impl From<&str> for EngineError {
+    fn from(message: &str) -> Self {
+        Self::database(message)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +156,79 @@ struct BatchBoundary {
     sequence: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallbackGroup {
+    key: Value,
+    state: Value,
+    result: Value,
+    sequence: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCallbackCheckpoint {
+    format: u64,
+    descriptor: Value,
+    sequence: u64,
+    groups: Vec<CallbackGroup>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CallbackCheckpoint {
+    format: u64,
+    descriptor: Value,
+    sequence: u64,
+    groups: BTreeMap<String, CallbackGroup>,
+}
+
+impl Serialize for CallbackCheckpoint {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Encoded<'a> {
+            format: u64,
+            descriptor: &'a Value,
+            sequence: u64,
+            groups: Vec<&'a CallbackGroup>,
+        }
+        Encoded {
+            format: self.format,
+            descriptor: &self.descriptor,
+            sequence: self.sequence,
+            groups: self.groups.values().collect(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CallbackCheckpoint {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let raw = RawCallbackCheckpoint::deserialize(deserializer)?;
+        let mut groups = BTreeMap::new();
+        for group in raw.groups {
+            validate_json(&group.key, 0).map_err(serde::de::Error::custom)?;
+            validate_exact_integers(&group.key).map_err(serde::de::Error::custom)?;
+            let encoded = canonical_json(&group.key).map_err(serde::de::Error::custom)?;
+            if groups.insert(encoded, group).is_some() {
+                return Err(serde::de::Error::custom(
+                    "Duplicate canonical key in callback checkpoint",
+                ));
+            }
+        }
+        Ok(Self {
+            format: raw.format,
+            descriptor: raw.descriptor,
+            sequence: raw.sequence,
+            groups,
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
@@ -93,7 +239,7 @@ pub(crate) struct State {
     #[serde(default)]
     batches: Vec<BatchBoundary>,
     #[serde(default)]
-    callback_checkpoints: BTreeMap<String, Value>,
+    callback_checkpoints: BTreeMap<String, CallbackCheckpoint>,
     #[serde(skip)]
     identities: BTreeMap<(String, String), usize>,
     #[serde(skip)]
@@ -379,20 +525,26 @@ impl Engine {
     /// doubles by `serde_json` before the engine sees them, so callers that
     /// build requests from text should validate such literals themselves.
     pub fn execute(&mut self, request: Value) -> Result<Value> {
+        self.execute_typed(request).map_err(|error| error.message)
+    }
+
+    /// Execute a portable engine request and preserve structured error categories
+    /// so host bindings never classify exceptions by English substring matching.
+    pub fn execute_typed(&mut self, request: Value) -> TypedResult<Value> {
         if self.storage.is_none() {
-            return Err("Database is closed".into());
+            return Err(EngineError::database("Database is closed"));
         }
         if !request.is_object() {
-            return Err("Request must be a JSON object".into());
+            return Err(EngineError::database("Request must be a JSON object"));
         }
         match request
             .get("op")
             .and_then(Value::as_str)
-            .ok_or("Request requires an op string")?
+            .ok_or_else(|| EngineError::database("Request requires an op string"))?
         {
             "ingest" => self.ingest(&request),
             "prepare_ingest" => self.prepare_ingest(&request),
-            "commit_prepared" => self.commit_prepared(&request),
+            "commit_prepared" => self.commit_prepared(&request).map_err(Into::into),
             "cancel_prepared" => {
                 self.prepared = None;
                 Ok(json!({"cancelled":true}))
@@ -402,21 +554,43 @@ impl Engine {
             "set_callback_checkpoints" => {
                 self.prepared = None;
                 let checkpoints = callback_checkpoints(&request, self.state.sequence)?;
+                let updates = callback_updates(&request, self.state.sequence)?;
                 self.state.callback_checkpoints.extend(checkpoints);
+                apply_callback_updates(&mut self.state.callback_checkpoints, updates);
                 Ok(json!({"updated":true}))
             }
-            "preview" => self.preview(&request),
+            "preview" => self.preview(&request).map_err(Into::into),
             "canonical_key" => {
-                let key = request.get("key").ok_or("canonical_key requires a key")?;
+                let key = request
+                    .get("key")
+                    .ok_or_else(|| EngineError::database("canonical_key requires a key"))?;
                 validate_json(key, 0)?;
                 validate_exact_integers(key)?;
                 Ok(json!(canonical_json(key)?))
             }
+            "canonical_keys" => {
+                let keys = request
+                    .get("keys")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| EngineError::database("canonical_keys requires a keys array"))?;
+                if keys.len() > MAX_BATCH_EMISSIONS {
+                    return Err(EngineError::database(format!(
+                        "canonical_keys accepts at most {MAX_BATCH_EMISSIONS} keys per batch"
+                    )));
+                }
+                let mut encoded = Vec::with_capacity(keys.len());
+                for key in keys {
+                    validate_json(key, 0)?;
+                    validate_exact_integers(key)?;
+                    encoded.push(canonical_json(key)?);
+                }
+                Ok(json!(encoded))
+            }
             "query" => self.query(&request),
             "changes" => self.changes(&request),
             "documents" => self.documents(&request),
-            "get" => self.get(&request),
-            "stats" => self.stats(),
+            "get" => self.get(&request).map_err(Into::into),
+            "stats" => self.stats().map_err(Into::into),
             "descriptor" => Ok(self.runtime.descriptor.clone()),
             "checkpoint" => {
                 self.prepared = None;
@@ -431,7 +605,9 @@ impl Engine {
                 let write_checkpoint = match request.get("checkpoint") {
                     None => true,
                     Some(Value::Bool(flag)) => *flag,
-                    Some(_) => return Err("close checkpoint must be a boolean".into()),
+                    Some(_) => {
+                        return Err(EngineError::database("close checkpoint must be a boolean"))
+                    }
                 };
                 if !write_checkpoint {
                     self.checkpoint_on_drop = false;
@@ -442,9 +618,11 @@ impl Engine {
                 // ownership lock are released either way so the log can be reopened.
                 let checkpointed = self.checkpoint();
                 self.storage.take();
-                checkpointed.map(|()| json!({"closed":true}))
+                checkpointed
+                    .map(|()| json!({"closed":true}))
+                    .map_err(Into::into)
             }
-            _ => Err("Unknown portable engine operation".into()),
+            _ => Err(EngineError::database("Unknown portable engine operation")),
         }
     }
 
@@ -476,7 +654,12 @@ impl Engine {
         )
     }
 
-    fn parse_cursor(&self, value: Option<&Value>, current: u64, allow_start: bool) -> Result<u64> {
+    fn parse_cursor(
+        &self,
+        value: Option<&Value>,
+        current: u64,
+        allow_start: bool,
+    ) -> TypedResult<u64> {
         match value {
             None | Some(Value::Null) => Ok(if allow_start { 0 } else { current }),
             Some(Value::Number(n)) if allow_start && n.as_u64() == Some(0) => Ok(0),
@@ -485,18 +668,22 @@ impl Engine {
                 let sequence = cursor
                     .strip_prefix(&prefix)
                     .ok_or_else(|| {
-                        cursor_error(
-                        "Cursor belongs to a different database, view module, or cache generation",
-                    )
+                        EngineError::cursor_expired(
+                            "Cursor belongs to a different database, view module, or cache generation",
+                        )
                     })?
                     .parse::<u64>()
-                    .map_err(|_| cursor_error("Invalid cursor sequence"))?;
+                    .map_err(|_| EngineError::database("Invalid cursor sequence"))?;
                 if sequence > current {
-                    return Err(cursor_error("Cursor is ahead of this database"));
+                    return Err(EngineError::cursor_expired(
+                        "Cursor is ahead of this database",
+                    ));
                 }
                 Ok(sequence)
             }
-            _ => Err(cursor_error("Cursor must be an opaque cursor string")),
+            _ => Err(EngineError::database(
+                "Cursor must be an opaque cursor string",
+            )),
         }
     }
 
@@ -509,12 +696,12 @@ impl Engine {
         Ok(emissions)
     }
 
-    fn ingest(&mut self, request: &Value) -> Result<Value> {
+    fn ingest(&mut self, request: &Value) -> TypedResult<Value> {
         self.prepared = None;
         let documents = request
             .get("documents")
             .and_then(Value::as_array)
-            .ok_or("ingest requires a documents array")?;
+            .ok_or_else(|| EngineError::database("ingest requires a documents array"))?;
         let stage = stage(&mut self.runtime, &self.state, documents)?;
         let response = json!({"documents":stage.resolved,"inserted":stage.documents.len(),
             "replayed":stage.replayed,"sequence":stage.sequence,"cursor":self.cursor(stage.sequence)});
@@ -529,12 +716,12 @@ impl Engine {
         Ok(response)
     }
 
-    fn prepare_ingest(&mut self, request: &Value) -> Result<Value> {
+    fn prepare_ingest(&mut self, request: &Value) -> TypedResult<Value> {
         self.prepared = None;
         let documents = request
             .get("documents")
             .and_then(Value::as_array)
-            .ok_or("prepare_ingest requires a documents array")?;
+            .ok_or_else(|| EngineError::database("prepare_ingest requires a documents array"))?;
         let stage = stage(&mut self.runtime, &self.state, documents)?;
         let token = Uuid::new_v4().to_string();
         let response = json!({"token":token,"documents":stage.resolved,
@@ -555,6 +742,7 @@ impl Engine {
         }
         let stage = prepared.stage;
         let checkpoints = callback_checkpoints(request, stage.sequence)?;
+        let updates = callback_updates(request, stage.sequence)?;
         let response = json!({"documents":stage.resolved,"inserted":stage.documents.len(),
             "replayed":stage.replayed,"sequence":stage.sequence,"cursor":self.cursor(stage.sequence)});
         if !stage.documents.is_empty() {
@@ -568,10 +756,11 @@ impl Engine {
             self.state.publish(stage);
         }
         self.state.callback_checkpoints.extend(checkpoints);
+        apply_callback_updates(&mut self.state.callback_checkpoints, updates);
         Ok(response)
     }
 
-    fn document_batches(&self, request: &Value) -> Result<Value> {
+    fn document_batches(&self, request: &Value) -> TypedResult<Value> {
         let since = request
             .get("since")
             .map(|v| safe_integer(v, "batch coverage"))
@@ -585,12 +774,16 @@ impl Engine {
                 .iter()
                 .any(|batch| batch.sequence == snapshot)
         {
-            return Err("Callback snapshot must identify a committed batch boundary".into());
+            return Err(EngineError::database(
+                "Callback snapshot must identify a committed batch boundary",
+            ));
         }
         if since > snapshot
             || (since != 0 && !self.state.batches.iter().any(|b| b.sequence == since))
         {
-            return Err("Callback coverage must identify a committed batch boundary".into());
+            return Err(EngineError::database(
+                "Callback coverage must identify a committed batch boundary",
+            ));
         }
         let index = self
             .state
@@ -620,7 +813,7 @@ impl Engine {
             .iter()
             .map(|d| serde_json::to_value(d).expect("serializable record"))
             .collect::<Vec<_>>();
-        let stage = stage(&mut self.runtime, &self.state, &documents)?;
+        let stage = stage(&mut self.runtime, &self.state, &documents).map_err(|e| e.message)?;
         if stage.replayed != 0 || stage.documents.len() != documents.len() {
             return Err("Native log contains duplicate immutable documents".into());
         }
@@ -640,7 +833,7 @@ impl Engine {
         Ok(())
     }
 
-    fn rebuild(&mut self, request: &Value) -> Result<Value> {
+    fn rebuild(&mut self, request: &Value) -> TypedResult<Value> {
         self.prepared = None;
         let scan = self.storage.as_mut().unwrap().scan()?;
         let mut rebuilt = State::empty();
@@ -654,7 +847,9 @@ impl Engine {
                 .collect();
             let staged = stage(&mut self.runtime, &rebuilt, &documents)?;
             if staged.replayed != 0 {
-                return Err("Native log contains duplicate immutable documents".into());
+                return Err(EngineError::database(
+                    "Native log contains duplicate immutable documents",
+                ));
             }
             document_count += documents.len() as u64;
             rebuilt.publish(staged);
@@ -685,7 +880,7 @@ impl Engine {
         Ok(stats)
     }
 
-    fn query(&self, request: &Value) -> Result<Value> {
+    fn query(&self, request: &Value) -> TypedResult<Value> {
         let snapshot = self.parse_cursor(request.get("cursor"), self.state.sequence, false)?;
         let cursor = self.cursor(snapshot);
         let limit = page_limit(request)?;
@@ -720,7 +915,7 @@ impl Engine {
         Ok(json!({"rows":rows,"cursor":cursor,"after":after,"complete":complete}))
     }
 
-    fn changes(&self, request: &Value) -> Result<Value> {
+    fn changes(&self, request: &Value) -> TypedResult<Value> {
         let current = self.state.sequence;
         let since = self.parse_cursor(request.get("since"), current, true)?;
         let limit = page_limit(request)?;
@@ -740,7 +935,7 @@ impl Engine {
         Ok(json!({"rows":rows,"cursor":self.cursor(sequence),"complete":complete}))
     }
 
-    fn documents(&self, request: &Value) -> Result<Value> {
+    fn documents(&self, request: &Value) -> TypedResult<Value> {
         let snapshot = self.parse_cursor(request.get("cursor"), self.state.sequence, false)?;
         let cursor = self.cursor(snapshot);
         let limit = page_limit(request)?;
@@ -774,26 +969,37 @@ impl Engine {
     }
 
     fn get(&self, request: &Value) -> Result<Value> {
-        let source = request
-            .get("source")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let id_str = match request.get("id") {
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(Value::Number(n)) => Some(n.to_string()),
-            _ => None,
+        let object = request.as_object().ok_or("Request must be a JSON object")?;
+        let source = match object.get("source") {
+            None | Some(Value::Null) => "default",
+            Some(Value::String(s)) if !s.is_empty() && s.len() <= 4096 => s.as_str(),
+            _ => return Err("source must be a nonempty string of at most 4096 bytes".into()),
         };
-        if let Some(id) = id_str {
-            if let Some(&index) = self.state.identities.get(&(source.to_string(), id)) {
-                return Ok(document_value(&self.state.documents[index]));
-            }
+        let id = match object.get("id") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if !s.is_empty() && s.len() <= 4096 => Some(s.as_str()),
+            _ => return Err("id must be a nonempty string of at most 4096 bytes".into()),
+        };
+        let position = match object.get("position") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(safe_integer(value, "position")?),
+        };
+        match (id, position) {
+            (Some(id), None) => Ok(self
+                .state
+                .identities
+                .get(&(source.to_owned(), id.to_owned()))
+                .map(|&index| document_value(&self.state.documents[index]))
+                .unwrap_or(Value::Null)),
+            (None, Some(position)) => Ok(self
+                .state
+                .positions
+                .get(&(source.to_owned(), position))
+                .map(|&index| document_value(&self.state.documents[index]))
+                .unwrap_or(Value::Null)),
+            (None, None) => Err("get requires either id or position".into()),
+            (Some(_), Some(_)) => Err("get accepts either id or position, not both".into()),
         }
-        if let Some(position) = request.get("position").and_then(Value::as_u64) {
-            if let Some(&index) = self.state.positions.get(&(source.to_string(), position)) {
-                return Ok(document_value(&self.state.documents[index]));
-            }
-        }
-        Ok(Value::Null)
     }
 
     fn stats(&self) -> Result<Value> {
@@ -828,13 +1034,13 @@ impl Drop for Engine {
     }
 }
 
-fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<Stage> {
+fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> TypedResult<Stage> {
     if documents.len() > MAX_BATCH_DOCUMENTS {
-        return Err(format!(
+        return Err(EngineError::database(format!(
             "An ingest batch may contain at most {MAX_BATCH_DOCUMENTS} documents \
              (MAX_BATCH_DOCUMENTS); this batch has {}. Split it into smaller batches.",
             documents.len()
-        ));
+        )));
     }
     let mut staged = Stage {
         documents: Vec::new(),
@@ -850,12 +1056,12 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<St
     let mut positions = BTreeMap::new();
     let mut checkpoints = BTreeMap::new();
     for document in documents {
-        let object = document
-            .as_object()
-            .ok_or("Each document must be an object with a payload")?;
+        let object = document.as_object().ok_or_else(|| {
+            EngineError::database("Each document must be an object with a payload")
+        })?;
         let payload = object
             .get("payload")
-            .ok_or("Each document requires a payload")?;
+            .ok_or_else(|| EngineError::database("Each document requires a payload"))?;
         let (payload_text, payload) = canonical_payload(payload)?;
         let requested_id = optional_string(object, "id")?;
         let source = optional_string(object, "source")?.unwrap_or_else(|| "default".into());
@@ -902,16 +1108,18 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<St
                 || canonical_json(&record.payload)? != payload_text
                 || requested_id.as_ref().is_some_and(|id| record.id != *id)
             {
-                return Err(
-                    "Document replay conflicts with an immutable id or source position".into(),
-                );
+                return Err(EngineError::conflict(
+                    "Document replay conflicts with an immutable id or source position",
+                ));
             }
             staged.replayed += 1;
             staged.resolved.push(document_value(existing));
             continue;
         }
         if last.is_some_and(|last| position <= last) {
-            return Err("New source positions must advance the retained checkpoint".into());
+            return Err(EngineError::source_order(
+                "New source positions must advance the retained checkpoint",
+            ));
         }
         let id = requested_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         staged.sequence = next_sequence(staged.sequence)?;
@@ -957,7 +1165,10 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> Result<St
                 Some(value) => value,
                 None => {
                     staged.query_keys.insert(
-                        QueryKey(serde_json::from_str(&key).map_err(|_| "Invalid mapped key")?),
+                        QueryKey(
+                            serde_json::from_str(&key)
+                                .map_err(|_| EngineError::database("Invalid mapped key"))?,
+                        ),
                         key.clone(),
                     );
                     runtime.call(json!({"op":"identity"}))?
@@ -1063,29 +1274,66 @@ fn checkpoint_matches_log(state: &State, batches: &[storage::VerifiedBatch]) -> 
     documents.next().is_none()
 }
 
-fn callback_checkpoints(request: &Value, sequence: u64) -> Result<BTreeMap<String, Value>> {
-    let checkpoints = match request.get("checkpoints") {
-        None => BTreeMap::new(),
-        Some(value) => serde_json::from_value(value.clone())
-            .map_err(|_| "Callback checkpoints must be an object")?,
-    };
-    validate_callback_checkpoints(&checkpoints, sequence)?;
-    Ok(checkpoints)
+fn callback_checkpoints(
+    request: &Value,
+    sequence: u64,
+) -> Result<BTreeMap<String, CallbackCheckpoint>> {
+    parse_callback_checkpoint_map(request, "checkpoints", sequence)
 }
 
-fn validate_callback_checkpoints(
-    checkpoints: &BTreeMap<String, Value>,
+fn callback_updates(
+    request: &Value,
     sequence: u64,
-) -> Result<()> {
-    for (name, checkpoint) in checkpoints {
+) -> Result<BTreeMap<String, CallbackCheckpoint>> {
+    parse_callback_checkpoint_map(request, "callback_updates", sequence)
+}
+
+fn apply_callback_updates(
+    target: &mut BTreeMap<String, CallbackCheckpoint>,
+    updates: BTreeMap<String, CallbackCheckpoint>,
+) {
+    for (name, delta) in updates {
+        match target.get_mut(&name) {
+            Some(existing)
+                if existing.format == delta.format && existing.descriptor == delta.descriptor =>
+            {
+                existing.sequence = delta.sequence;
+                existing.groups.extend(delta.groups);
+            }
+            _ => {
+                target.insert(name, delta);
+            }
+        }
+    }
+}
+
+fn parse_callback_checkpoint_map(
+    request: &Value,
+    field: &str,
+    sequence: u64,
+) -> Result<BTreeMap<String, CallbackCheckpoint>> {
+    let Some(raw) = request.get(field) else {
+        return Ok(BTreeMap::new());
+    };
+    let entries = raw
+        .as_object()
+        .ok_or("Callback checkpoints must be an object")?;
+    let mut parsed = BTreeMap::new();
+    for (name, checkpoint) in entries {
+        let checkpoint_obj = checkpoint
+            .as_object()
+            .ok_or("Invalid callback checkpoint name or format")?;
         if name.is_empty()
             || name.len() > 4096
-            || checkpoint.get("format").and_then(Value::as_u64) != Some(1)
+            || checkpoint_obj.get("format").and_then(Value::as_u64) != Some(1)
+            || !checkpoint_obj
+                .keys()
+                .all(|k| matches!(k.as_str(), "format" | "descriptor" | "sequence" | "groups"))
         {
             return Err("Invalid callback checkpoint name or format".into());
         }
         let coverage = safe_integer(
-            checkpoint
+            checkpoint_obj
                 .get("sequence")
                 .ok_or("Callback checkpoint requires coverage")?,
             "callback coverage",
@@ -1093,31 +1341,97 @@ fn validate_callback_checkpoints(
         if coverage > sequence {
             return Err("Callback checkpoint is ahead of the committed log".into());
         }
-        validate_json(
-            checkpoint
-                .get("descriptor")
-                .ok_or("Callback checkpoint requires descriptor")?,
-            0,
-        )?;
-        for group in checkpoint
+        let descriptor = checkpoint_obj
+            .get("descriptor")
+            .ok_or("Callback checkpoint requires descriptor")?;
+        validate_json(descriptor, 0)?;
+        let raw_groups = checkpoint_obj
             .get("groups")
             .and_then(Value::as_array)
-            .ok_or("Callback checkpoint requires groups")?
-        {
-            for field in ["key", "state", "result"] {
-                let value = group
-                    .get(field)
-                    .ok_or("Callback group requires key, state and result")?;
+            .ok_or("Callback checkpoint requires groups")?;
+        let mut groups = BTreeMap::new();
+        for group in raw_groups {
+            let group_obj = group
+                .as_object()
+                .ok_or("Callback group requires key, state and result")?;
+            if !group_obj
+                .keys()
+                .all(|k| matches!(k.as_str(), "key" | "state" | "result" | "sequence"))
+            {
+                return Err("Callback group contains unknown fields".into());
+            }
+            let key = group_obj
+                .get("key")
+                .ok_or("Callback group requires key, state and result")?;
+            let state = group_obj
+                .get("state")
+                .ok_or("Callback group requires key, state and result")?;
+            let result = group_obj
+                .get("result")
+                .ok_or("Callback group requires key, state and result")?;
+            for value in [key, state, result] {
                 validate_json(value, 0)?;
                 validate_exact_integers(value)?;
             }
             let group_sequence = safe_integer(
-                group
+                group_obj
                     .get("sequence")
                     .ok_or("Callback group requires sequence")?,
                 "callback group sequence",
             )?;
             if group_sequence > coverage {
+                return Err("Callback group is ahead of its checkpoint".into());
+            }
+            let canonical_key = canonical_json(key)?;
+            if groups
+                .insert(
+                    canonical_key,
+                    CallbackGroup {
+                        key: key.clone(),
+                        state: state.clone(),
+                        result: result.clone(),
+                        sequence: group_sequence,
+                    },
+                )
+                .is_some()
+            {
+                return Err("Duplicate canonical key in callback checkpoint".into());
+            }
+        }
+        parsed.insert(
+            name.clone(),
+            CallbackCheckpoint {
+                format: 1,
+                descriptor: descriptor.clone(),
+                sequence: coverage,
+                groups,
+            },
+        );
+    }
+    Ok(parsed)
+}
+
+fn validate_callback_checkpoints(
+    checkpoints: &BTreeMap<String, CallbackCheckpoint>,
+    sequence: u64,
+) -> Result<()> {
+    for (name, checkpoint) in checkpoints {
+        if name.is_empty() || name.len() > 4096 || checkpoint.format != 1 {
+            return Err("Invalid callback checkpoint name or format".into());
+        }
+        if checkpoint.sequence > MAX_SAFE_SEQUENCE || checkpoint.sequence > sequence {
+            return Err("Callback checkpoint is ahead of the committed log".into());
+        }
+        validate_json(&checkpoint.descriptor, 0)?;
+        for (canonical_key, group) in &checkpoint.groups {
+            for value in [&group.key, &group.state, &group.result] {
+                validate_json(value, 0)?;
+                validate_exact_integers(value)?;
+            }
+            if canonical_json(&group.key)? != *canonical_key {
+                return Err("Invalid canonical key in callback checkpoint".into());
+            }
+            if group.sequence > MAX_SAFE_SEQUENCE || group.sequence > checkpoint.sequence {
                 return Err("Callback group is ahead of its checkpoint".into());
             }
         }

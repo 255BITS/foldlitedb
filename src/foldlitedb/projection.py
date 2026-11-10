@@ -108,8 +108,8 @@ async def materialize_jsonl_view(
     cursor_position,
     max_groups=2048,
     timeout=180,
-    batch_size=64,
-    max_batch_bytes=65536,
+    batch_size=1024,
+    max_batch_bytes=262144,
 ):
     """Resume a durable view from its committed projection document and cursor.
 
@@ -188,7 +188,11 @@ async def materialize_jsonl_view(
             database = await asyncio.to_thread(Database, path, generation=generation, reset=True)
             await asyncio.to_thread(database.register, view_with_map, _external=True)
         rows = await read_groups(database)
-        known.update(database._canonical_key(row.key)[0] for row in rows)
+        if rows:
+            canonicalized = await asyncio.to_thread(
+                database._canonical_keys, [row.key for row in rows]
+            )
+            known.update(canon_key for canon_key, _ in canonicalized)
         checkpoint = await asyncio.to_thread(database.checkpoint, "projection")
         replay = None
         if checkpoint is not None:
@@ -201,7 +205,7 @@ async def materialize_jsonl_view(
         if replay is not None:
             await asyncio.to_thread(read_page, replay, limit=1)
         target = cursor_position(target_cursor)
-        pending_emissions: dict[str, tuple[object, list[object]]] = {}
+        pending_emissions: dict[str, tuple[object, list[object], int]] = {}
         advanced = False
         while cursor_position(replay) < target:
             if time.monotonic() - started > timeout:
@@ -212,7 +216,7 @@ async def materialize_jsonl_view(
             if not documents:
                 raise ValueError("Historical projection watermark disappeared")
             page_advanced = False
-            for document, end in zip(documents, cursors):
+            for document, end in zip(documents, cursors, strict=True):
                 if cursor_position(end) > target:
                     break
                 position = document_position(document)
@@ -228,14 +232,29 @@ async def materialize_jsonl_view(
                 for ordinal, (canon_key, key, val) in enumerate(bounded_emissions(doc)):
                     if getattr(view.reducer, "positioned", True) is False and hasattr(view.reducer, "prepare"):
                         val = _copy(view.reducer.prepare(val, doc, ordinal))
+                    val_bytes = len(json_bytes(val))
                     entry = pending_emissions.get(canon_key)
+                    if entry is not None and (
+                        len(entry[1]) >= batch_size or entry[2] + val_bytes > max_batch_bytes
+                    ):
+                        await asyncio.to_thread(
+                            database._reduce_view_group,
+                            view.name,
+                            canon_key,
+                            entry[0],
+                            entry[1],
+                            position,
+                        )
+                        del pending_emissions[canon_key]
+                        entry = None
                     if entry is None:
                         vals = [val]
-                        pending_emissions[canon_key] = (key, vals)
+                        group_bytes = val_bytes
                     else:
                         vals = entry[1]
                         vals.append(val)
-                    if len(vals) >= 1024:
+                        group_bytes = entry[2] + val_bytes
+                    if len(vals) >= batch_size or group_bytes >= max_batch_bytes:
                         await asyncio.to_thread(
                             database._reduce_view_group,
                             view.name,
@@ -244,7 +263,9 @@ async def materialize_jsonl_view(
                             vals,
                             position,
                         )
-                        del pending_emissions[canon_key]
+                        pending_emissions.pop(canon_key, None)
+                    else:
+                        pending_emissions[canon_key] = (key, vals, group_bytes)
                 replay = end
                 checkpoint = position
                 page_advanced = True

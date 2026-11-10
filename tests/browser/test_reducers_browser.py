@@ -158,3 +158,29 @@ def test_reducer_verifies_module_without_web_crypto(page):
     assert result["value"] == expected
     assert "digest mismatch" in result["rejected"]
     assert page.evaluate("typeof crypto.subtle?.digest") == "function"
+
+
+def test_validate_bootstrap_rejects_extra_state_fields_at_empty_coverage(page):
+    result = page.evaluate("""async () => {
+      const {validateBootstrap} = await import('./host.js');
+      const mockReducer = {
+        spec: {sha256: 'a'.repeat(64)},
+        finalize: () => ({count: 0, value: null}),
+        identity: () => ({reducer: 'mean/v1', version: 1, count: 0, sum: 0}),
+      };
+      const base = {
+        identity: 'scope',
+        reducer: 'mean/v1',
+        module_sha256: 'a'.repeat(64),
+        start: 0,
+        end: 0,
+        state: {reducer: 'mean/v1', version: 1, count: 0, sum: 0, extra: 42},
+      };
+      try {
+        validateBootstrap(mockReducer, base);
+        return 'accepted';
+      } catch (err) {
+        return err.message;
+      }
+    }""")
+    assert "identity state" in result

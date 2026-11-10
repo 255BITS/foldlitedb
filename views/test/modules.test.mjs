@@ -75,11 +75,19 @@ test('Unicode, JSON escapes, and zero emissions survive the byte ABI', async () 
 test('malformed syntax and invalid UTF-8 return errors and allow subsequent calls', async () => {
   const { raw, call } = await load();
   for (const text of [
-    '', '{', 'null trailing', '{"op":"identity",}', '{"op":"map","documents":[,]}',
+    '', '{', 'null trailing', '{"op":"identity"} trailing', '{"op":"identity"} {}',
+    '{"op":"identity",}', '{"op":"map","documents":[,]}',
     '{"op":"map","documents":[01]}', '{"op":"map","documents":[1.]}',
     '{"op":"map","documents":[1e]}', '{"op":"map","documents":["\\q"]}',
     '{"op":"map","documents":["\u0001"]}', '[[]',
   ]) assert.match(raw(encoder.encode(text)).error, /JSON/);
+  for (const text of [
+    '{"op":"map","documents":["\\ud800"]}',
+    '{"op":"map","documents":["\\udc00"]}',
+    '{"op":"map","documents":["\\ud800a"]}',
+    '{"op":"map","documents":["\\ud800\\ud800"]}',
+    '{"op":"map","documents":[{"\\ud800":1}]}',
+  ]) assert.match(raw(encoder.encode(text)).error, /Unicode/);
   for (const bytes of [[0xc0, 0x80], [0xe2, 0x82], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xff]]) {
     assert.match(raw(Uint8Array.from(bytes)).error, /UTF-8/);
   }
@@ -135,7 +143,7 @@ test('catalogue preserves structured string state and latest-event order', async
 
 test('reserved object member names, escaped keys, and floating point tokens round trip', async () => {
   const { call } = await load('catalogue');
-  const ids = ['__proto__', 'constructor', 'toString', '', '\u0000\n"\\', '\ud800'];
+  const ids = ['__proto__', 'constructor', 'toString', '', '\u0000\n"\\', '\ue000', '🚀'];
   const docs = ids.map((id, index) => ({ category: 'reserved', id, title: `title-${index}` }));
   const contributions = call({ op: 'map', documents: docs }).flat().map(row => row.value);
   let state = call({ op: 'add', state: call({ op: 'identity' }), values: contributions });
@@ -196,6 +204,19 @@ test('decimal ties, subnormal boundaries, and overflow round correctly', async (
     assert.equal(response.ok[0][0].value, JSON.parse(token), token.slice(0, 40));
   }
   assert.match(raw(encoder.encode(`{"op":"map","documents":[{"metric":"x","value":${maximumCutoff}}]}`)).error, /finite/);
+  for (const token of [
+    '0.' + '1'.repeat(200000),
+    '1' + '0'.repeat(200000) + 'e-200000',
+    '0.' + '0'.repeat(200000) + '1e200001',
+    `${halfMinimum}` + '0'.repeat(200000) + 'e-201075',
+    `${halfMinimum}` + '0'.repeat(200000) + '1e-201076',
+  ]) {
+    const started = performance.now();
+    const response = raw(encoder.encode(`{"op":"map","documents":[{"metric":"x","value":${token}}]}`));
+    assert.ok(performance.now() - started < 200, '200k-digit decimal parse must stay O(1)');
+    assert.equal(response.error, undefined, response.error);
+    assert.equal(response.ok[0][0].value, JSON.parse(token));
+  }
 });
 
 test('batched and sequential metrics preserve ordinary IEEE-754 arithmetic', async () => {

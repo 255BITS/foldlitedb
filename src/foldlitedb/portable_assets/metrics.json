@@ -1,7 +1,7 @@
 {
   "abi": 1,
   "module": "metrics.wasm",
-  "sha256": "e23a6ede5b3c21bfd263682fbd0bc5402c48b18871f481915adea5666919fa93",
+  "sha256": "d451efa22265a6ea3152a28b6505af293e1e3707e72cbbd472366e2bd738d450",
   "descriptor": {
     "abi": 1,
     "name": "metrics",

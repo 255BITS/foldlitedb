@@ -1,7 +1,7 @@
 {
   "abi": 1,
-  "sha256": "864115d9bb62750c69b26313573764ced77bcc7cc7439f62b1b5d516b33da148",
-  "bytes": 209562,
+  "sha256": "31f94c08cb2aee1f07979f895fa11aa423cf76ba76b461e587fbefa853d5a5c7",
+  "bytes": 244354,
   "rust": "1.90.0",
   "max_memory_bytes": 16777216,
   "max_request_bytes": 262144,

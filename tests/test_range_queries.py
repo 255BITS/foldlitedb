@@ -10,7 +10,7 @@ import zlib
 
 import pytest
 
-from foldlitedb import Database, DatabaseError, OrderedFold, View
+from foldlitedb import CursorExpired, Database, DatabaseError, OrderedFold, View
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "query_keys.json"
@@ -304,9 +304,11 @@ V020_CACHE = (
 def test_real_020_cache_and_snapshot_cursor_upgrade_without_wasm_replay(tmp_path):
     path = tmp_path / "from-020.fold"
     original_log = zlib.decompress(base64.b64decode(V020_LOG))
+    original_cache = zlib.decompress(base64.b64decode(V020_CACHE))
     path.write_bytes(original_log)
-    path.with_suffix(".fold.cache").write_bytes(zlib.decompress(base64.b64decode(V020_CACHE)))
-    with Database(path) as database:
+    path.with_suffix(".fold.cache").write_bytes(original_cache)
+    v020_view = View((Path(__file__).parent / "fixtures" / "metrics_020.wasm").read_bytes())
+    with Database(path, v020_view) as database:
         assert database.stats()["cache"]["status"] == "loaded"
         assert database.stats()["replay"]["documents"] == 0
         assert_keys(database.query(cursor=V020_CURSOR).rows, ['"', "A", "B"])
@@ -315,8 +317,20 @@ def test_real_020_cache_and_snapshot_cursor_upgrade_without_wasm_replay(tmp_path
             database.query(cursor=V020_CURSOR, after=json.dumps([V020_CURSOR, '"A"']))
     # Windows ownership locks prevent other handles from reading an active log.
     assert path.read_bytes() == original_log
-    with Database(path) as database:
+    with Database(path, v020_view) as database:
         database.add({"metric": "A", "value": 7})
         assert database.changes(since=V020_CURSOR).rows[0].result["sum"] == 9
         snapshot = database.query(cursor=V020_CURSOR)
         assert snapshot.rows[1].result["sum"] == 2
+
+    # Opening a 0.2.0 log+cache with the updated bundled metrics.wasm seamlessly
+    # rebuilds the disposable cache and expires the old module's cursor.
+    rebuilt_path = tmp_path / "from-020-bundled.fold"
+    rebuilt_path.write_bytes(original_log)
+    rebuilt_path.with_suffix(".fold.cache").write_bytes(original_cache)
+    with Database(rebuilt_path) as database:
+        assert database.stats()["cache"]["status"] == "module-mismatch"
+        assert database.stats()["replay"]["documents"] == 3
+        assert_keys(database.query().rows, ['"', "A", "B"])
+        with pytest.raises(CursorExpired):
+            database.query(cursor=V020_CURSOR)

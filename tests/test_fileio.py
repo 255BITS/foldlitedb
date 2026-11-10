@@ -51,3 +51,12 @@ def test_failed_sync_marks_journal_failed(tmp_path):
     assert journal.failed
     with pytest.raises(OSError, match='incomplete'):
         journal.append({'n': 3})
+
+
+def test_empty_journal_sync_does_not_fail_before_first_append(tmp_path):
+    journal = AppendJournal(tmp_path / 'empty.jsonl')
+    boundary = journal.sync()
+    assert boundary == {'offset': 0, 'sha256': hashlib.sha256(b'').hexdigest()}
+    assert not journal.failed
+    journal.append({'n': 1})
+    assert journal.sync()['offset'] > 0

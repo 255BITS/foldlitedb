@@ -20,7 +20,7 @@ const FRAME_HEADER: usize = 84;
 const LEGACY_FRAME_HEADER: usize = 52;
 const CACHE_HEADER: u64 = 48;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,7 +53,7 @@ pub(crate) struct Checkpoint<StateData = State> {
 
 pub(crate) struct Disk {
     file: File,
-    _lock: File,
+    _lock: Option<File>,
     path: PathBuf,
     pub database_id: String,
     pub offset: u64,
@@ -61,6 +61,7 @@ pub(crate) struct Disk {
     pub batches: u64,
     pub poisoned: bool,
     legacy: bool,
+    read_only_handle: bool,
 }
 
 pub(crate) enum Storage {
@@ -209,6 +210,14 @@ fn chained(prefix: &[u8; 32], frame: &[u8]) -> [u8; 32] {
     digest.finalize().into()
 }
 
+fn chained_parts(prefix: &[u8; 32], head: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(prefix);
+    digest.update(head);
+    digest.update(payload);
+    digest.finalize().into()
+}
+
 fn resolve_primary_path(requested: &Path) -> Result<PathBuf> {
     if requested.exists() {
         return fs::canonicalize(requested).map_err(error);
@@ -275,24 +284,60 @@ impl Storage {
         if fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err("Native lock path must not be a symbolic link".into());
         }
-        let mut lock = OpenOptions::new()
+        let validate_lock_marker = |handle: &mut File| -> Result<usize> {
+            let lock_size = handle.metadata().map_err(error)?.len();
+            if lock_size > LOCK_MAGIC.len() as u64 {
+                return Err("Native lock path contains an unrelated file".into());
+            }
+            let mut lock_bytes = vec![0; lock_size as usize];
+            handle.read_exact(&mut lock_bytes).map_err(error)?;
+            if !LOCK_MAGIC.starts_with(&lock_bytes) {
+                return Err("Native lock path contains an unrelated file".into());
+            }
+            Ok(lock_bytes.len())
+        };
+        let (mut lock, lock_bytes_len, writable_lock, deferred_lock_err) = match OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&lock_path)
-            .map_err(error)?;
-        lock.try_lock()
-            .map_err(|e| format!("Native storage is already open or cannot be locked: {e}"))?;
-        let lock_size = lock.metadata().map_err(error)?.len();
-        if lock_size > LOCK_MAGIC.len() as u64 {
-            return Err("Native lock path contains an unrelated file".into());
-        }
-        let mut lock_bytes = vec![0; lock_size as usize];
-        lock.read_exact(&mut lock_bytes).map_err(error)?;
-        if !LOCK_MAGIC.starts_with(&lock_bytes) {
-            return Err("Native lock path contains an unrelated file".into());
-        }
+        {
+            Ok(mut handle) => {
+                handle.try_lock().map_err(|e| {
+                    format!("Native storage is already open or cannot be locked: {e}")
+                })?;
+                let len = validate_lock_marker(&mut handle)?;
+                (Some(handle), len, true, None)
+            }
+            Err(lock_err)
+                if !reset
+                    && !create_new
+                    && matches!(
+                        lock_err.kind(),
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::ReadOnlyFilesystem
+                    ) =>
+            {
+                match File::open(&lock_path) {
+                    Ok(mut handle) => {
+                        handle
+                            .try_lock()
+                            .or_else(|_| handle.try_lock_shared())
+                            .map_err(|e| {
+                                format!("Native storage is already open or cannot be locked: {e}")
+                            })?;
+                        let len = validate_lock_marker(&mut handle)?;
+                        (Some(handle), len, false, Some(error(lock_err)))
+                    }
+                    Err(open_err) if open_err.kind() == std::io::ErrorKind::NotFound => {
+                        (None, LOCK_MAGIC.len(), false, Some(error(lock_err)))
+                    }
+                    Err(_) => return Err(error(lock_err)),
+                }
+            }
+            Err(lock_err) => return Err(error(lock_err)),
+        };
         // A legacy primary named `<other>.cache` must never be treated as a
         // disposable accelerator. Check even when that other primary is absent.
         validate_sidecar(&sibling(&path, ".cache"))?;
@@ -316,8 +361,17 @@ impl Storage {
             }
         };
         let initialized = (|| -> Result<(String, [u8; 32], bool)> {
-            file.try_lock()
-                .map_err(|e| format!("Native storage is already open or cannot be locked: {e}"))?;
+            if read_only_handle {
+                file.try_lock()
+                    .or_else(|_| file.try_lock_shared())
+                    .map_err(|e| {
+                        format!("Native storage is already open or cannot be locked: {e}")
+                    })?;
+            } else {
+                file.try_lock().map_err(|e| {
+                    format!("Native storage is already open or cannot be locked: {e}")
+                })?;
+            }
             if !read_only_handle && (reset || file.metadata().map_err(error)?.len() == 0) {
                 // Keep both coordination and data inode locks for the entire reset.
                 // A reset is explicitly destructive; I/O failure is reported rather
@@ -343,22 +397,34 @@ impl Storage {
             {
                 return Err("Native log header is corrupt or uses an unsupported format".into());
             }
+            if !writable_lock && !legacy && !migration_source {
+                return Err(deferred_lock_err.unwrap_or_else(|| {
+                    "Native log requires write access unless it is a read-only legacy FOLDLOG1 log"
+                        .into()
+                }));
+            }
             if read_only_handle && !legacy && !migration_source {
-                return Err("Native log requires write access unless it is a read-only legacy FOLDLOG1 log".into());
+                return Err(
+                    "Native log requires write access unless it is a read-only legacy FOLDLOG1 log"
+                        .into(),
+                );
             }
             let id = Uuid::from_slice(&bytes[8..24]).map_err(error)?.to_string();
             let prefix: [u8; 32] = Sha256::digest(bytes).into();
-            if lock_bytes.len() != LOCK_MAGIC.len() {
+            if writable_lock && lock_bytes_len != LOCK_MAGIC.len() {
+                let lock_handle = lock.as_mut().expect("writable lock handle");
                 // Recover only a bounded known marker prefix, and only after
                 // the primary file has been locked and its header validated.
-                lock.seek(SeekFrom::Start(0)).map_err(error)?;
+                lock_handle.seek(SeekFrom::Start(0)).map_err(error)?;
                 if take_failure("lock-marker-short-write") {
-                    lock.write_all(&LOCK_MAGIC[..4]).map_err(error)?;
+                    lock_handle.write_all(&LOCK_MAGIC[..4]).map_err(error)?;
                     return Err("Native storage: injected incomplete lock marker".into());
                 }
-                lock.write_all(LOCK_MAGIC).map_err(error)?;
-                lock.set_len(LOCK_MAGIC.len() as u64).map_err(error)?;
-                lock.sync_all().map_err(error)?;
+                lock_handle.write_all(LOCK_MAGIC).map_err(error)?;
+                lock_handle
+                    .set_len(LOCK_MAGIC.len() as u64)
+                    .map_err(error)?;
+                lock_handle.sync_all().map_err(error)?;
                 sync_directory(&path)?;
             }
             Ok((id, prefix, legacy))
@@ -390,6 +456,7 @@ impl Storage {
             batches: 0,
             poisoned: false,
             legacy,
+            read_only_handle,
         }))
     }
 
@@ -480,6 +547,26 @@ impl Storage {
     pub fn append(&mut self, batch: Batch) -> Result<()> {
         match self {
             Self::Memory { batches } => {
+                struct FrameLimitWriter(usize);
+                impl Write for FrameLimitWriter {
+                    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                        self.0 = self.0.saturating_add(buf.len());
+                        if self.0 > MAX_FRAME_BYTES {
+                            return Err(std::io::Error::other("exceeds MAX_FRAME_BYTES"));
+                        }
+                        Ok(buf.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        Ok(())
+                    }
+                }
+                let mut counter = FrameLimitWriter(0);
+                if serde_json::to_writer(&mut counter, &batch).is_err()
+                    || counter.0 == 0
+                    || counter.0 > MAX_FRAME_BYTES
+                {
+                    return Err("Document batch exceeds native log frame limit of 8 MiB".into());
+                }
                 batches.push(batch);
                 Ok(())
             }
@@ -500,26 +587,24 @@ impl Storage {
             }
             let mut head = [0u8; CACHE_HEADER as usize];
             file.read_exact(&mut head).map_err(error)?;
+            let payload_bytes = size - CACHE_HEADER;
             if &head[..8] != CACHE_MAGIC
-                || u64::from_le_bytes(head[8..16].try_into().unwrap()) != size - CACHE_HEADER
+                || u64::from_le_bytes(head[8..16].try_into().unwrap()) != payload_bytes
             {
                 return Err("Invalid checkpoint header".into());
             }
-            let mut digest = Sha256::new();
-            let mut buffer = [0u8; 65536];
-            loop {
-                let read = file.read(&mut buffer).map_err(error)?;
-                if read == 0 {
-                    break;
-                }
-                digest.update(&buffer[..read]);
-            }
-            if digest.finalize()[..] != head[16..48] {
+            let mut reader = DigestReader {
+                reader: file.take(payload_bytes),
+                digest: Sha256::new(),
+                bytes: 0,
+            };
+            let checkpoint: Checkpoint =
+                serde_json::from_reader(std::io::BufReader::with_capacity(65536, &mut reader))
+                    .map_err(error)?;
+            std::io::copy(&mut reader, &mut std::io::sink()).map_err(error)?;
+            if reader.bytes != payload_bytes || reader.digest.finalize()[..] != head[16..48] {
                 return Err("Checkpoint checksum mismatch".into());
             }
-            file.seek(SeekFrom::Start(CACHE_HEADER)).map_err(error)?;
-            let checkpoint =
-                serde_json::from_reader(std::io::BufReader::new(file)).map_err(error)?;
             Ok((checkpoint, size))
         })();
         match result {
@@ -710,10 +795,8 @@ impl Disk {
             if batch.documents.is_empty() || batch.documents.len() > 1024 {
                 return Err("Native log batch document count is corrupt".into());
             }
-            let mut frame = head.to_vec();
-            frame.extend(payload);
-            prefix = chained(&prefix, &frame);
-            offset += frame.len() as u64;
+            prefix = chained_parts(&prefix, &head, &payload);
+            offset += (head.len() + payload.len()) as u64;
             batches.push(VerifiedBatch {
                 batch,
                 end: offset,
@@ -722,10 +805,10 @@ impl Disk {
         }
         let recovered = length - offset;
         if recovered > 0 {
-            if !recover {
+            if !recover && !self.legacy {
                 return Err("Migration source has an incomplete tail; open it normally to recover before migration".into());
             }
-            if !self.legacy {
+            if recover && !self.read_only_handle {
                 self.file.set_len(offset).map_err(error)?;
                 self.file.sync_all().map_err(error)?;
             }
@@ -776,6 +859,20 @@ impl Disk {
         self.prefix = chained(&self.prefix, &frame);
         self.batches += 1;
         Ok(())
+    }
+}
+
+struct DigestReader<R> {
+    reader: R,
+    digest: Sha256,
+    bytes: u64,
+}
+impl<R: Read> Read for DigestReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.reader.read(buffer)?;
+        self.digest.update(&buffer[..read]);
+        self.bytes += read as u64;
+        Ok(read)
     }
 }
 

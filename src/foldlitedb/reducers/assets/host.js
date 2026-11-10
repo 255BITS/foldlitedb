@@ -38,7 +38,7 @@ function finiteJSON(value, depth = 0) {
   }
   throw new ReducerError('Request must contain finite JSON values');
 }
-/* Web Crypto exists only in secure contexts (HTTPS, localhost). A viewer opened
+/* Web Crypto exists only in secure contexts (HTTPS, localhost). A page opened
    over plain HTTP from another host must still verify the bundled module, so this
    portable SHA-256 replaces crypto.subtle there. Both paths reject a mismatch. */
 const SHA256_K = Uint32Array.of(
@@ -116,11 +116,20 @@ export class Reducer {
     const encoded = encoder.encode(JSON.stringify(request));
     if (encoded.length > 262144) throw new ReducerError('Request exceeds 262144 bytes');
     let result;
+    let wroteInput = false;
     try {
       const inputPtr = this.exports.input_ptr();
       if (!Number.isSafeInteger(inputPtr) || inputPtr < 0 || inputPtr + 262144 > this.exports.memory.buffer.byteLength) {
         throw new ReducerError('Input buffer out of bounds');
       }
+      const preOutputPtr = this.exports.output_ptr();
+      if (!Number.isSafeInteger(preOutputPtr) || preOutputPtr < 0 || preOutputPtr + 65536 > this.exports.memory.buffer.byteLength) {
+        throw new ReducerError('Output buffer out of bounds');
+      }
+      if (inputPtr < preOutputPtr + 65536 && preOutputPtr < inputPtr + 262144) {
+        throw new ReducerError('ABI buffers must not overlap');
+      }
+      wroteInput = true;
       new Uint8Array(this.exports.memory.buffer, inputPtr, encoded.length).set(encoded);
       const length = this.exports.execute(encoded.length);
       if (!(length > 0 && length <= 65536)) throw new ReducerError('Invalid reducer response length');
@@ -132,11 +141,24 @@ export class Reducer {
         throw new ReducerError('ABI buffers must not overlap');
       }
       result = JSON.parse(decoder.decode(new Uint8Array(this.exports.memory.buffer, outputPtr, length)));
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        throw new ReducerError('Invalid reducer response envelope');
+      }
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) this.failed = true;
-      throw error;
+      if (wroteInput || error instanceof WebAssembly.RuntimeError) this.failed = true;
+      throw error instanceof ReducerError ? error : new ReducerError(error.message || String(error));
     }
-    if ('error' in result) throw new ReducerError(result.error);
+    if ('error' in result) {
+      if (typeof result.error !== 'string') {
+        this.failed = true;
+        throw new ReducerError('Invalid reducer error response');
+      }
+      throw new ReducerError(result.error);
+    }
+    if (!Object.hasOwn(result, 'ok')) {
+      this.failed = true;
+      throw new ReducerError('Invalid reducer response envelope');
+    }
     return result.ok;
   }
   identity(reducer) { return this.request({op:'identity', reducer}); }
@@ -149,17 +171,20 @@ function offset(n) {
 }
 export function validateBootstrap(reducer, view) {
   const keys = ['identity','reducer','module_sha256','start','end','state'];
-  if (!view || Object.keys(view).length !== keys.length || keys.some(k => !(k in view))) throw new ReducerError('Invalid bootstrap fields');
+  if (!view || typeof view !== 'object' || Array.isArray(view) || Object.keys(view).length !== keys.length || keys.some(k => !Object.hasOwn(view, k))) throw new ReducerError('Invalid bootstrap fields');
   offset(view.start); offset(view.end);
   if (view.start > view.end) throw new ReducerError('Reversed coverage range');
   if (typeof view.identity !== 'string' || view.identity.length < 1 || view.identity.length > 256 || !/^[\x00-\x7F]+$/.test(view.identity)) throw new ReducerError('Invalid bootstrap identity');
   if (view.module_sha256 !== reducer.spec.sha256) throw new ReducerError('Bootstrap module digest mismatch');
-  if (!view.state || view.state.reducer !== view.reducer) throw new ReducerError('Bootstrap reducer mismatch');
+  if (!view.state || typeof view.state !== 'object' || Array.isArray(view.state) || view.state.reducer !== view.reducer) throw new ReducerError('Bootstrap reducer mismatch');
   reducer.finalize(view.state);
-  if (view.start === view.end && JSON.stringify(view.state) !== JSON.stringify(reducer.identity(view.reducer))) {
+  if (view.start === view.end) {
     // Compare fields without making JSON object insertion order part of state identity.
     const identity = reducer.identity(view.reducer);
-    if (Object.keys(identity).some(k => JSON.stringify(identity[k]) !== JSON.stringify(view.state[k]))) throw new ReducerError('Empty coverage must contain identity state');
+    const idKeys = Object.keys(identity);
+    if (Object.keys(view.state).length !== idKeys.length || idKeys.some(k => !Object.hasOwn(view.state, k) || JSON.stringify(identity[k]) !== JSON.stringify(view.state[k]))) {
+      throw new ReducerError('Empty coverage must contain identity state');
+    }
   }
 }
 export function appendFrame(reducer, view, frame) {

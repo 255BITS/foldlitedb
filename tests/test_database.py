@@ -149,7 +149,7 @@ def test_document_names_are_scoped_to_their_source():
 
 def test_structured_catalogue_fold_and_reserved_unicode_keys(tmp_path):
     with Database(tmp_path / "catalogue.db", View.bundled("catalogue")) as database:
-        documents = database.add_many([
+        database.add_many([
             {"category": "图书", "id": "__proto__", "title": "First"},
             {"category": "图书", "id": "line\n\"\\", "title": "Second 😀"},
             {"category": "图书", "id": "__proto__", "title": "Revised"},
