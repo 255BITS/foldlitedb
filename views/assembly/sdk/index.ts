@@ -139,6 +139,8 @@ export function dispatch(view: View, length: i32): i32 {
   const parser = new Parser(text);
   const requestValue = parser.value();
   if (parser.error.length > 0) return failure(parser.error);
+  parser.whitespace();
+  if (parser.cursor != text.length) return failure("Request is not valid JSON");
   // Validate each explicit datum at depth zero, not its ABI wrapper.
   if (!finiteJSON(requestValue, -2)) return failure("Request must contain finite JSON within 64 data nesting levels");
   const request = object(requestValue);

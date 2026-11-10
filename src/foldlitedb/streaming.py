@@ -25,6 +25,8 @@ def cursor_offset(cursor):
 
 
 def sse(event, value):
+    if not isinstance(event, str) or not event or any(ch in event for ch in ('\r', '\n', ':')):
+        raise ValueError('Invalid SSE event name')
     # No SSE id: native EventSource acknowledgement is not an application commit.
     return ('event: ' + event + '\ndata: ' + _json(value) + '\n\n').encode()
 
@@ -37,29 +39,62 @@ class Subscriber:
         self.queue = asyncio.Queue(maxsize=max_items)
         self.size = 0
         self.max_bytes = max_bytes
-        self.closed = False
+        self._closed = False
+        self._wakeup = asyncio.Event()
+
+    @property
+    def closed(self):
+        return self._closed
+
+    @closed.setter
+    def closed(self, value):
+        self._closed = bool(value)
+        if self._closed:
+            self._wakeup.set()
+
+    def close(self):
+        self.closed = True
 
     def accepts(self, stream_id):
         return self.stream_id == '*' or self.stream_id == stream_id
 
     def offer(self, event, data):
-        if self.closed:
+        if self._closed:
             return
         encoded = sse(event, data)
         if self.size + len(encoded) > self.max_bytes or self.queue.full():
-            self.closed = True
             while not self.queue.empty():
                 self.queue.get_nowait()
             encoded = sse('gap', {'reason': 'consumer_queue_exceeded', 'recover': 'reconnect_from_last_applied_cursor'})
             self.size = len(encoded)
             self.queue.put_nowait(encoded)
+            self.closed = True
             return
         self.size += len(encoded)
         self.queue.put_nowait(encoded)
+        self._wakeup.set()
 
     async def get(self):
         result = await self.queue.get()
         self.size -= len(result)
+        if self.queue.empty() and not self._closed:
+            self._wakeup.clear()
+        return result
+
+    async def _poll(self, timeout):
+        while self.queue.empty():
+            if self._closed:
+                return None
+            self._wakeup.clear()
+            if not self.queue.empty() or self._closed:
+                break
+            await asyncio.wait_for(self._wakeup.wait(), timeout=timeout)
+        if self.queue.empty():
+            return None
+        result = self.queue.get_nowait()
+        self.size -= len(result)
+        if self.queue.empty() and not self._closed:
+            self._wakeup.clear()
         return result
 
 
@@ -106,7 +141,7 @@ async def stream_events(read_page, subscriber, watermarks, *, stream_id, cursor=
                 frames, cursors, page = await asyncio.to_thread(read_page, stream_id, replay)
                 if not frames:
                     raise ValueError('Replay watermark is no longer available')
-                for frame, end in zip(frames, cursors):
+                for frame, end in zip(frames, cursors, strict=True):
                     if cursor_offset(end) > target:
                         break
                     replay_count += 1
@@ -131,12 +166,14 @@ async def stream_events(read_page, subscriber, watermarks, *, stream_id, cursor=
             if subscriber.closed and subscriber.queue.empty():
                 return
             try:
-                encoded = await asyncio.wait_for(subscriber.get(), timeout=heartbeat_seconds)
+                encoded = await subscriber._poll(heartbeat_seconds)
             except asyncio.TimeoutError:
                 if subscriber.closed and subscriber.queue.empty():
                     return
                 yield sse('heartbeat', {metadata_key: metadata()})
                 continue
+            if encoded is None:
+                return
             if encoded.startswith(b'event: frame\n'):
                 value = json.loads(encoded.split(b'data: ', 1)[1])
                 marker = watermarks.get(value['stream_id'])

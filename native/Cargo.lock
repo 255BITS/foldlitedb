@@ -116,6 +116,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "foldlitedb-reducer-wasm"
+version = "0.3.3"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

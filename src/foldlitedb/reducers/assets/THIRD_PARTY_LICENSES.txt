@@ -1,12 +1,16 @@
-Bundled Foldlite DB reducer WASM third-party notices (extracted from HyperGAN)
+Third-party licenses and notices for Foldlite DB's bundled reducer WebAssembly module
 
-Built with Rust 1.90.0. Direct/transitive crate versions and checksums are pinned in reducers/core/Cargo.lock. Upstream license texts are included below; build-time dependencies are included for provenance. Original copyrights retained below.
+Generated from the locked dependency graph of foldlitedb-reducer-wasm
+(native/Cargo.lock) for target wasm32-unknown-unknown. Build-time
+dependencies are included for provenance. Upstream texts are reproduced
+with LF line endings. Foldlite DB's own MIT license ships separately.
 
 
-=== itoa 1.0.18 ===
+=== itoa 1.0.18 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -186,6 +190,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -211,16 +216,18 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== memchr 2.8.3 ===
+=== memchr 2.8.3 (Unlicense OR MIT) ===
 
 
 COPYING
+
 This project is dual-licensed under the Unlicense and MIT licenses.
 
 You may use this code under the terms of either license.
 
 
 LICENSE-MIT
+
 The MIT License (MIT)
 
 Copyright (c) 2015 Andrew Gallant
@@ -244,10 +251,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 
-=== proc-macro2 1.0.107 ===
+=== proc-macro2 1.0.107 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -427,6 +435,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -452,10 +461,11 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== quote 1.0.47 ===
+=== quote 1.0.47 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -635,6 +645,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -660,10 +671,11 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== ryu 1.0.23 ===
+=== ryu 1.0.23 (Apache-2.0 OR BSL-1.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -843,6 +855,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-BOOST
+
 Boost Software License - Version 1.0 - August 17th, 2003
 
 Permission is hereby granted, free of charge, to any person or organization
@@ -868,10 +881,11 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== serde 1.0.228 ===
+=== serde 1.0.228 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -1051,6 +1065,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -1076,10 +1091,11 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== serde_core 1.0.228 ===
+=== serde_core 1.0.228 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -1259,6 +1275,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -1284,10 +1301,11 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== serde_derive 1.0.228 ===
+=== serde_derive 1.0.228 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -1467,6 +1485,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -1492,10 +1511,11 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== serde_json 1.0.145 ===
+=== serde_json 1.0.145 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -1675,6 +1695,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -1700,10 +1721,11 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== syn 2.0.119 ===
+=== syn 2.0.119 (MIT OR Apache-2.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -1883,6 +1905,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -1908,10 +1931,11 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-=== unicode-ident 1.0.26 ===
+=== unicode-ident 1.0.27 ((MIT OR Apache-2.0) AND Unicode-3.0) ===
 
 
 LICENSE-APACHE
+
                               Apache License
                         Version 2.0, January 2004
                      http://www.apache.org/licenses/
@@ -2091,6 +2115,7 @@ END OF TERMS AND CONDITIONS
 
 
 LICENSE-MIT
+
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
 documentation files (the "Software"), to deal in the
@@ -2117,6 +2142,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 LICENSE-UNICODE
+
 UNICODE LICENSE V3
 
 COPYRIGHT AND PERMISSION NOTICE
@@ -2156,68 +2182,3 @@ Except as contained in this notice, the name of a copyright holder shall
 not be used in advertising or otherwise to promote the sale, use or other
 dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
-
-
-=== Rust 1.90.0 LICENSE-MIT ===
-Copyright (c) The Rust Project Contributors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-=== Rust 1.90.0 COPYRIGHT ===
-Short version for non-lawyers:
-
-The Rust Project is dual-licensed under Apache 2.0 and MIT
-terms.
-
-It is Copyright (c) The Rust Project Contributors.
-
-Longer version:
-
-Copyrights in the Rust project are retained by their contributors. No
-copyright assignment is required to contribute to the Rust project.
-
-Some files include explicit copyright notices and/or license notices.
-For full authorship information, see the version control history or
-<https://thanks.rust-lang.org>
-
-Except as otherwise noted, Rust is licensed under the Apache License, Version
-2.0 <LICENSE-APACHE> or <http://www.apache.org/licenses/LICENSE-2.0> or the MIT
-license <LICENSE-MIT> or <http://opensource.org/licenses/MIT>, at your option.
-
-We track licenses for third-party materials in two ways:
-
-* We use [REUSE](https://reuse.software) to track license information for
-  in-tree source files - both those authored by the Rust project and those
-  authored by third parties. See `REUSE.toml`, and our cached output of the
-  `reuse` tool which is committed to `license-metadata.json`.
-* We use `cargo` to track license information for out-of-tree dependencies.
-
-These two sources of information are collected by the tool `generate-copyright`
-into a file called `COPYRIGHT.html`, which is shipped with each binary release
-of Rust. Please refer to that file for detailed information as to the components of
-any given Rust release. We also produce a `COPYRIGHT-library.html` file which only
-covers the subset of source code used in the Rust Standard Library, as opposed
-to the toolchain as a whole.

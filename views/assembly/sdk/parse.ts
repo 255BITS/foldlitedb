@@ -27,7 +27,26 @@ export class Parser {
       if (code == 92) this.cursor++;
       else if (code == 34) break;
     }
-    return JSON.parse<string>(this.text.slice(start, this.cursor));
+    const decoded = JSON.parse<string>(this.text.slice(start, this.cursor));
+    for (let i = 0; i < decoded.length; i++) {
+      const unit = decoded.charCodeAt(i);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        i++;
+        if (i >= decoded.length) {
+          this.error = "JSON strings must contain valid Unicode scalar values";
+          return "";
+        }
+        const low = decoded.charCodeAt(i);
+        if (low < 0xdc00 || low > 0xdfff) {
+          this.error = "JSON strings must contain valid Unicode scalar values";
+          return "";
+        }
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+        this.error = "JSON strings must contain valid Unicode scalar values";
+        return "";
+      }
+    }
+    return decoded;
   }
 
   value(depth: i32 = 0): JSON.Value {
@@ -38,13 +57,18 @@ export class Parser {
     }
     this.whitespace();
     const first = this.text.charCodeAt(this.cursor);
-    if (first == 34) return JSON.Value.from(this.string());
+    if (first == 34) {
+      const str = this.string();
+      if (this.error.length) return JSON.Value.empty();
+      return JSON.Value.from(str);
+    }
     if (first == 123) {
       const object = new JSON.Obj();
       this.cursor++;
       this.whitespace();
       while (this.text.charCodeAt(this.cursor) != 125) {
         const key = this.string();
+        if (this.error.length) return JSON.Value.empty();
         if (key.length > 65535) {
           this.error = "Object member names exceed 65535 UTF-16 code units";
           return JSON.Value.empty();

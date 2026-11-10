@@ -1,5 +1,7 @@
 //! Python owns ergonomic objects; the engine owns transactions and Wasm execution.
-use foldlitedb_portable_engine::{Engine as NativeEngine, ReducerInstance};
+use foldlitedb_portable_engine::{
+    Engine as NativeEngine, EngineError, ReducerInstance, MAX_CACHE_BYTES,
+};
 use pyo3::{exceptions::PyValueError, prelude::*};
 use std::sync::Mutex;
 
@@ -15,7 +17,7 @@ impl Engine {
     fn new(py: Python<'_>, path: String, module_bytes: Vec<u8>, reset: bool) -> PyResult<Self> {
         let inner = py
             .detach(move || NativeEngine::open_with_options(&path, &module_bytes, reset))
-            .map_err(PyValueError::new_err)?;
+            .map_err(|err| PyValueError::new_err(("DatabaseError", err)))?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
@@ -23,23 +25,24 @@ impl Engine {
     #[staticmethod]
     fn migrate_log(py: Python<'_>, source: String, destination: String) -> PyResult<()> {
         py.detach(move || NativeEngine::migrate_log(&source, &destination))
-            .map_err(PyValueError::new_err)
+            .map_err(|err| PyValueError::new_err(("DatabaseError", err)))
     }
 
     fn execute_json(&self, py: Python<'_>, request: String) -> PyResult<String> {
         py.detach(|| {
-            if request.len() > 8 * 1024 * 1024 {
-                return Err("Native request exceeds 8 MiB".to_owned());
+            if request.len() as u64 > MAX_CACHE_BYTES {
+                return Err(EngineError::database("Native request exceeds 1 GiB"));
             }
-            let request = serde_json::from_str(&request).map_err(|e| e.to_string())?;
+            let request =
+                serde_json::from_str(&request).map_err(|e| EngineError::database(e.to_string()))?;
             let mut engine = self
                 .inner
                 .lock()
-                .map_err(|_| "Native engine lock was poisoned".to_owned())?;
-            let response = engine.execute(request)?;
-            serde_json::to_string(&response).map_err(|e| e.to_string())
+                .map_err(|_| EngineError::database("Native engine lock was poisoned"))?;
+            let response = engine.execute_typed(request)?;
+            serde_json::to_string(&response).map_err(|e| EngineError::database(e.to_string()))
         })
-        .map_err(PyValueError::new_err)
+        .map_err(|err| PyValueError::new_err((err.kind.as_str(), err.message)))
     }
 }
 

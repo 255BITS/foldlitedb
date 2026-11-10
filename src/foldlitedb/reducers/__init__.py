@@ -1,15 +1,13 @@
 """Packaged WebAssembly reducers and streaming frame composition."""
 from __future__ import annotations
 
-import atexit
-from functools import lru_cache
 import hashlib
 from importlib.resources import files
 import json
-import os
-import sys
 import threading
 from typing import Any
+
+from ..database import DatabaseError, _encode
 
 MAX_REQUEST_BYTES = 262_144
 MAX_BATCH_VALUES = 1024
@@ -49,15 +47,11 @@ class Reducer:
     def __init__(self, *, fuel: int = 50_000_000):
         if type(fuel) is not int or not 1 <= fuel <= 1_000_000_000:
             raise ValueError("fuel must be an integer in 1..1000000000")
-        if sys.modules.get("wasmtime") is None and "wasmtime" in sys.modules:
-            raise RuntimeError(
-                "Portable view reduction requires foldlitedb[reducers]; document storage does not."
-            )
         try:
             from .._native import NativeReducer
         except ImportError as error:
             raise RuntimeError(
-                "Portable view reduction requires foldlitedb[reducers]; document storage does not."
+                "Native reducer runtime (foldlitedb._native) is unavailable."
             ) from error
 
         self.spec = descriptor()
@@ -87,12 +81,12 @@ class Reducer:
             return self._native.memory_bytes
 
     def request(self, request: dict[str, Any]) -> Any:
+        if not isinstance(request, dict):
+            raise ReducerError("Request must be a JSON object")
         try:
-            encoded = json.dumps(
-                request, allow_nan=False, separators=(",", ":"), ensure_ascii=True
-            )
-        except (ValueError, TypeError, RecursionError) as error:
-            raise ReducerError(f"Request must contain finite JSON values: {error}") from error
+            encoded = _encode(request)
+        except DatabaseError as error:
+            raise ReducerError(str(error)) from error
         if len(encoded.encode("utf-8")) > MAX_REQUEST_BYTES:
             raise ReducerError("Request exceeds 262144 bytes")
         with self._lock:
@@ -100,9 +94,18 @@ class Reducer:
                 raw_response = self._native.execute_json(encoded)
             except ValueError as error:
                 raise ReducerError(str(error)) from error
-            response = json.loads(raw_response)
+            try:
+                response = json.loads(raw_response)
+            except json.JSONDecodeError as error:
+                raise ReducerError(f"Malformed reducer response JSON: {error}") from error
+            if not isinstance(response, dict):
+                raise ReducerError("Reducer response must be a JSON object")
             if "error" in response:
+                if not isinstance(response["error"], str):
+                    raise ReducerError("Malformed reducer error response")
                 raise ReducerError(response["error"])
+            if "ok" not in response:
+                raise ReducerError("Reducer response missing 'ok' or 'error' field")
             return response["ok"]
 
     def identity(self, reducer: str):
@@ -166,7 +169,7 @@ def append_frame(reducer: Reducer, view, *, identity: str, start: int, end: int,
     """Commit a complete projection frame, including zero emissions, atomically.
 
     Already covered frames are replay and ignored. Partial overlaps and gaps fail.
-    Source offsets refer to committed projection records, not plotted point count.
+    Source offsets refer to committed projection records, not emitted contribution count.
     """
     validate_bootstrap(reducer, view)
     _offset(start)

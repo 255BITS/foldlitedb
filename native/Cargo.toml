@@ -1,6 +1,17 @@
 [workspace]
-members = ["engine", "python"]
+members = ["engine", "python", "reducer"]
 resolver = "2"
+
+# opt-level = 1 optimizes wasmi ~10x over -O0 while keeping wasmi's portable
+# loop dispatcher in dev/test builds (where Cargo retains overflow-checks=true,
+# which otherwise inhibits LLVM sibling tail-call elimination in wasmi 2.0).
+[profile.dev.package.wasmi]
+opt-level = 1
+debug = false
+
+[profile.test.package.wasmi]
+opt-level = 1
+debug = false
 
 [profile.release]
 opt-level = 3

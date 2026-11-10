@@ -2,7 +2,7 @@
 
 Applications supply document decoding, identity validation and cursor encoding.
 The reader owns byte budgets, incomplete tails and file generation checks. No
-application schema, training runtime or HTTP framework is imported here.
+application schema, domain runtime or HTTP framework is imported here.
 """
 import hashlib
 import os
@@ -45,11 +45,11 @@ def read_jsonl_page(path, state, *, consume, encode, limit=100,
     prefix = f'Stale {label} cursor: '
     try:
         handle = open_file(path) if open_file else path.open('rb')
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         if not allow_missing:
             raise
         if state.get('file') is not None or state['offset']:
-            raise ValueError(prefix + 'the log was removed; restart without a cursor')
+            raise ValueError(prefix + 'the log was removed; restart without a cursor') from exc
         return dict(documents=[], document_cursors=[], cursor=encode(state),
                     has_more=False, partial_tail=False)
     with handle as handle:
@@ -124,10 +124,13 @@ def read_jsonl_tail(path, limit=100, max_bytes=1048576, *, decode=None,
     with path.open('rb') as handle:
         handle.seek(0, 2)
         start = max(0, handle.tell() - max_bytes)
-        handle.seek(start)
-        data = handle.read(max_bytes)
-    if start:
-        data = data.partition(b'\n')[2]
+        if start > 0:
+            handle.seek(start - 1)
+            raw = handle.read(max_bytes + 1)
+            data = raw[1:] if raw[:1] == b'\n' else raw.partition(b'\n')[2]
+        else:
+            handle.seek(0)
+            data = handle.read(max_bytes)
     lines = data.split(b'\n')[:-1]
     documents = []
     decode = json.loads if decode is None else decode

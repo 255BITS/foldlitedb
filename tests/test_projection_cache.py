@@ -1,7 +1,6 @@
 """Persisted projection jobs resume exact cursor coverage and can be discarded."""
 import asyncio
 from pathlib import Path
-import time
 import pytest
 
 from foldlitedb.database import Database, DatabaseError, OrderedFold, RustReducer, View
@@ -263,3 +262,73 @@ def test_materialize_view_batches_group_reductions_and_keeps_log_compact(tmp_pat
     with Database(path) as db:
         assert db.stats()["documents"] <= 6
     assert path.stat().st_size < 16384
+
+
+def test_materialize_view_honors_batch_size_max_batch_bytes_and_delta_compaction(tmp_path):
+    add_batches = []
+
+    class TrackedFold(OrderedFold):
+        def add(self, state, values):
+            add_batches.append(len(values))
+            return super().add(state, values)
+
+    # 1. Explicit batch_size=10 flushes every 10 contributions.
+    docs_count = [{"n": n, "key": "g", "value": 1} for n in range(1, 26)]
+    asyncio.run(
+        materialize_jsonl_view(
+            tmp_path / "by_count.fold",
+            generation="one",
+            view=View("totals", version="1",
+                      map=lambda d: [(d.payload["document"]["key"], d.payload["document"]["value"])],
+                      reducer=TrackedFold(0, lambda s, v: s + v, version="1")),
+            read_page=lambda cursor, limit=128: (
+                [r for r in docs_count if r["n"] > int(cursor or 0)][:limit],
+                [str(r["n"]) for r in docs_count if r["n"] > int(cursor or 0)][:limit],
+                {},
+            ),
+            target_cursor="25",
+            target_position=25,
+            document_position=lambda d: d["n"],
+            cursor_position=lambda c: int(c or 0),
+            batch_size=10,
+        )
+    )
+    assert add_batches == [10, 10, 5]
+
+    # 2. Explicit max_batch_bytes=2048 flushes large contributions before exceeding byte budget.
+    add_batches.clear()
+    payload_600 = "y" * 600
+    docs_bytes = [{"n": n, "key": "g", "value": payload_600} for n in range(1, 8)]
+    asyncio.run(
+        materialize_jsonl_view(
+            tmp_path / "by_bytes.fold",
+            generation="one",
+            view=View("totals", version="1",
+                      map=lambda d: [(d.payload["document"]["key"], d.payload["document"]["value"])],
+                      reducer=TrackedFold(0, lambda s, _v: s + 1, version="1")),
+            read_page=lambda cursor, limit=128: (
+                [r for r in docs_bytes if r["n"] > int(cursor or 0)][:limit],
+                [str(r["n"]) for r in docs_bytes if r["n"] > int(cursor or 0)][:limit],
+                {},
+            ),
+            target_cursor="7",
+            target_position=7,
+            document_position=lambda d: d["n"],
+            cursor_position=lambda c: int(c or 0),
+            max_batch_bytes=2048,
+        )
+    )
+    assert add_batches == [3, 3, 1]
+
+    # 3. Incremental delta suffix records & bounded chain compaction after 64 deltas.
+    delta_path = tmp_path / "deltas.fold"
+    stream = [{"n": 1, "key": "base-a", "value": 10}, {"n": 2, "key": "base-b", "value": 20}]
+    asyncio.run(materialize(delta_path, stream, []))
+    for step in range(3, 70):
+        stream.append({"n": step, "key": "base-a", "value": 1})
+        rows = asyncio.run(materialize(delta_path, stream, []))
+    assert {r.key: r.result for r in rows} == {"base-a": 10 + 67, "base-b": 20}
+    with Database(delta_path) as db:
+        view_docs = [d for d in db.documents() if d.source == "_view:totals"]
+        assert any(d.payload.get("delta") is True for d in view_docs)
+        assert any(not d.payload.get("delta", False) and d.position > 2 for d in view_docs)
