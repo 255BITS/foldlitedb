@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Upgrade to 0.3.2: faster native Wasm execution, compatible 0.3.1 logs and cursors, and verified copy migration for 0.1.x.">
+  <meta name="description" content="Upgrade to 0.4.1: hardened portable views, reproducible numeric reducers, compatible FOLDLOG2 logs, and verified copy migration for 0.1.x.">
   <meta name="color-scheme" content="light">
   <title>Upgrade guide · Foldlite DB</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -40,24 +40,24 @@
     <div class="sidebar-note"><span class="status-dot" aria-hidden="true"></span>Immutable. Portable. Rebuildable.<br><span>Rust · Python · browser</span></div>
   </aside>
   <div class="page-layout">
-    <main id="content" tabindex="-1"><p class="eyebrow">Upgrade guide · 0.3.2</p>
-<h1>Upgrade to Foldlite DB 0.3.2</h1>
-<p class="lead">Version 0.3.2 upgrades the native Wasm interpreter for faster execution. The Python API, document log, cache format, bundled modules, and query continuations are compatible with 0.3.1. Existing 0.2.0 logs need no migration; older 0.1.x logs require the verified copy migration below.</p>
+    <main id="content" tabindex="-1"><p class="eyebrow">Upgrade guide · 0.4.1</p>
+<h1>Upgrade to Foldlite DB 0.4.1</h1>
+<p class="lead">Version 0.4.1 ships reproducible in-repo numeric reducers, hardened AssemblyScript portable views, incremental callback checkpoints, and stricter query/get validation while keeping the <code>FOLDLOG2</code> document log format unchanged. Existing 0.2.0 and 0.3.x logs need no log migration; older 0.1.x logs require the verified copy migration below.</p>
 <p>The <a href="https://github.com/255BITS/foldlitedb/blob/master/CHANGELOG.md">consolidated changelog</a> covers every published release. The <a href="https://github.com/255BITS/foldlitedb/releases/tag/v0.2.0">0.2.0 release</a> includes distribution hashes and validation receipts.</p>
 
-<h2 id="from-031">Upgrade from 0.3.1</h2>
-<p>Close the database, preserve its log and exact view artifacts, and install <code>foldlitedb==0.3.2</code>. Open the same log with the same view and compare results. Compatible caches retain their generation and cursors; no log migration or module rebuild is required. Rollback to 0.3.1 uses the same files after closing the new owner.</p>
-<p>Native execution now uses Wasmi 2.0 stable fuel accounting. Custom reducer <code>fuel</code> values count Wasm operations differently, so applications overriding that budget should validate representative requests again. Exhausted instances still require replacement. Python callbacks and browser execution use their existing computation paths.</p>
+<h2 id="from-031">Upgrade from 0.3.1, 0.3.2, or 0.3.3</h2>
+<p>Close the database, preserve its log and exact view artifacts, and install <code>foldlitedb==0.4.1</code>. Open the same log with the same view and compare results. Custom portable Wasm views whose module bytes are unchanged retain their checkpoints, generation, and cursors without replaying checkpointed batches. Bundled portable views (<code>View.bundled("metrics")</code>, <code>View.bundled("catalogue")</code>) and the callback document module were rebuilt with hardened JSON/Unicode/decimal parsing, so opening an older bundled database automatically reconstructs its disposable <code>.cache</code> from the unchanged log and starts a fresh cursor generation.</p>
+<p>Check two tightened Python call signatures before cutover: the optional positional argument on <code>db.query(view_name, ...)</code> and <code>db.rows(view_name, ...)</code> now exclusively names a registered callback view (pass <code>key=...</code> explicitly for exact key selection), and <code>db.get(id=None, *, position=None, source="default")</code> requires either a nonempty string <code>id</code> or a safe integer <code>position</code> rather than both or neither. Native execution continues to use Wasmi 2.0 fuel accounting from 0.3.2+. Rollback to 0.3.x uses the same <code>FOLDLOG2</code> log after closing the 0.4.1 owner and starting fresh cursors if the disposable cache was rebuilt.</p>
 
 <h2 id="from-020">Upgrade from 0.2.0</h2>
 <ol>
   <li>Close the database and preserve a backup of the document log and exact view artifacts, as for any package upgrade.</li>
-  <li>Install <code>foldlitedb==0.3.2</code> in a separate environment and open the same log with the same view. <code>FOLDLOG2</code> is unchanged. Existing compatible caches restore their generation and reconstruct the query ordering index without rerunning checkpointed Wasm.</li>
-  <li>Start fresh query traversals. 0.2.x <code>after</code> query tokens are rejected explicitly because their ordering and filter binding differ. Saved snapshot/change cursors remain valid when the compatible cache survives; cache reconstruction, module replacement, or explicit rebuild still expires them. Document pagination is unchanged.</li>
-  <li>Check application assumptions about row order. Numbers now sort numerically, strings by Unicode codepoint, arrays by recursive element order, and objects by their ordered members. Query ordering changes do not reorder documents, reducer contributions, or change-feed sequences. Compare results by key if an older test assumed serialized-JSON ordering.</li>
+  <li>Install <code>foldlitedb==0.4.1</code> in a separate environment and open the same log with the same view. <code>FOLDLOG2</code> is unchanged. Unchanged custom Wasm modules restore their compatible checkpoint and reconstruct the query ordering index without rerunning checkpointed Wasm; bundled views automatically rebuild their disposable <code>.cache</code> under the hardened 0.4.1 bundled modules.</li>
+  <li>Start fresh query traversals. 0.2.x <code>after</code> query tokens are rejected explicitly because their ordering and filter binding differ. Saved snapshot/change cursors remain valid when a compatible custom module cache survives; cache reconstruction, bundled module updates, module replacement, or explicit rebuild expires them cleanly so consumers refresh from a new snapshot. Document pagination is unchanged.</li>
+  <li>Check application assumptions about row order and query calls. Numbers sort numerically, strings by Unicode codepoint, arrays by recursive element order, and objects by their ordered members; pass exact key filters via <code>key=...</code> rather than positional arguments. Query ordering changes do not reorder documents, reducer contributions, or change-feed sequences.</li>
 </ol>
-<p>Use the same selector and inclusive flags on every query page; only <code>limit</code> may change. See the <a href="api.html#ranges">range and prefix reference</a>. Browser deployments must update the complete host assets together and obtain new worker cursors. The portable module ABI and bundled Wasm bytes are unchanged.</p>
-<p>For rollback to 0.2.0, close the new owner and use a fresh 0.2.0 query traversal; do not reuse 0.3.1 query tokens. The unchanged log format remains readable. Preserve the original backup and computation, and account for any writes made during the upgrade.</p>
+<p>Use the same selector and inclusive flags on every query page; only <code>limit</code> may change. See the <a href="api.html#ranges">range and prefix reference</a>. Browser deployments must update the complete host and module assets together and obtain new worker cursors. The portable module ABI v1 is unchanged.</p>
+<p>For rollback to 0.2.0, close the new owner, restore the 0.2.0 module if using bundled views, and use a fresh 0.2.0 query traversal; do not reuse 0.3.x/0.4.x query tokens. The unchanged log format remains readable. Preserve the original backup and computation, and account for any writes made during the upgrade.</p>
 
 <h2 id="before-you-start">Before you start</h2>
 <p>The remaining steps upgrade native <code>FOLDLOG1</code> document logs from 0.1.x to <code>FOLDLOG2</code>. New 0.2.0 and later databases already use the new format. Browser databases have no native log to migrate; see <a href="#browser">browser upgrades</a>. Compact external projection caches have a different source of truth; see <a href="#projections">external projections</a>.</p>
@@ -72,10 +72,10 @@
 <p>If the old primary filename uses the newly reserved sidecar namespace, make an independent closed-log copy under a permitted name such as <code>metrics-original.fold</code> and use that copy as the source in steps 3–5. Keep the untouched original as well. This lets the new reader inspect and compare it without bypassing filename protection.</p>
 <p>The log contains the retained documents. Its <code>.cache</code> sibling is disposable; copying a cache alone is not a backup. Do not delete a live owner's <code>.lock</code> file. Do not use <code>reset=True</code> to upgrade: reset explicitly discards source documents.</p>
 
-<h2 id="install">2. Install 0.3.2 in a separate environment</h2>
+<h2 id="install">2. Install 0.4.1 in a separate environment</h2>
 <pre><code>python -m venv .venv-upgrade
 . .venv-upgrade/bin/activate
-python -m pip install --only-binary=:all: foldlitedb==0.3.2
+python -m pip install --only-binary=:all: foldlitedb==0.4.1
 python -c "from importlib.metadata import version; print(version('foldlitedb'))"</code></pre>
 <p>On Windows Command Prompt, activate with <code>.venv-upgrade\Scripts\activate.bat</code>. Matching wheels need no compiler. For other source-build environments, follow the <a href="index.html#install">installation prerequisites</a>. Keep the previous environment available until cutover is complete.</p>
 
@@ -128,7 +128,7 @@ with Database(source, view) as original, Database(destination, view) as migrated
 
 <h2 id="cutover">6. Switch the application and replace cursors</h2>
 <ol>
-  <li>Configure the application to use <code>metrics-v2.fold</code> with its verified view and the 0.3.2 environment. Avoid renaming or mixing old sidecars into the new database.</li>
+  <li>Configure the application to use <code>metrics-v2.fold</code> with its verified view and the 0.4.1 environment. Avoid renaming or mixing old sidecars into the new database.</li>
   <li>Recreate application state from a fresh snapshot. Old cursors belong to the original database generation; portable change-feed consumers must resume from the new snapshot's cursor.</li>
   <li>Resume one database owner and normal producers. Stable source IDs and positions still support identical retries.</li>
   <li>Check the application’s expected results and writer health. Keep the original log, backup, and previous environment until the cutover is accepted.</li>
@@ -136,7 +136,7 @@ with Database(source, view) as original, Database(destination, view) as migrated
 
 <h2 id="compatibility">Application compatibility checks</h2>
 <table><thead><tr><th>Area</th><th>Current behavior and action</th></tr></thead><tbody>
-<tr><td>Callback reads</td><td>A primary callback supplies <code>query()</code>/<code>rows()</code>. Additional registered callbacks use <code>query(name)</code>. Snapshot pages are descriptor-bound; historical pages can replay original batches.</td></tr>
+<tr><td>Callback reads</td><td>A primary callback supplies <code>query()</code>/<code>rows()</code>. Additional registered callbacks use <code>query(name)</code>; pass exact key filters via <code>key=...</code>. Snapshot pages are descriptor-bound; historical pages can replay original batches.</td></tr>
 <tr><td>Callback live feeds and preview</td><td>Primary callback <code>changes()</code>/<code>preview()</code> explicitly fail. Use fresh query snapshots, or inspect the mapper with a resolved <code>Document</code>. Portable Wasm views retain both operations.</td></tr>
 <tr><td>Callback code changes</td><td>Update the view/reducer version or references when behavior or captured inputs change. Ordinary callback caches then reconstruct from documents. Callbacks remain trusted deterministic Python.</td></tr>
 <tr><td>Metadata sources</td><td>Source names beginning <code>_</code> are retained metadata and do not map in either host. If older browser data used such names for observations, resolve that source policy before cutover; copying a log does not rename identities.</td></tr>
@@ -146,7 +146,7 @@ with Database(source, view) as original, Database(destination, view) as migrated
 
 <h2 id="projections">External projection caches</h2>
 <p><code>materialize_jsonl_view</code> keeps compact cursor/state documents; the external stream is authoritative and its raw history is not retained in that cache. Do not treat that file as a replacement for the external source.</p>
-<p>Preserve the external stream, generation identity, callback code, and references. Close the old cache owner, select a fresh permitted cache filename, and run the helper against the verified external source with 0.3.2. This regenerates state and consumed progress together. Copy migration is available if retaining a legacy cache is necessary, but it does not turn compact metadata into a source archive. A changed descriptor or source generation must reconstruct from the external source; historical external snapshots are unavailable.</p>
+<p>Preserve the external stream, generation identity, callback code, and references. Close the old cache owner, select a fresh permitted cache filename, and run the helper against the verified external source with 0.4.1. This regenerates state and consumed progress together. Copy migration is available if retaining a legacy cache is necessary, but it does not turn compact metadata into a source archive. A changed descriptor or source generation must reconstruct from the external source; historical external snapshots are unavailable.</p>
 
 <h2 id="browser">Browser upgrades</h2>
 <p>Export resolved documents before reloading or closing the old worker. Deploy the complete new <code>portable_assets</code> directory, including modules, manifests, and client/worker/host/error files; do not mix old hosts with new manifests or Wasm. Start a new worker, ingest the exported records with their original IDs, sources, positions, and order, and compare keys, states, and results. Obtain new cursors. Browser state remains in memory and has no native log migration step.</p>
@@ -160,16 +160,16 @@ with Database(source, view) as original, Database(destination, view) as migrated
 <tr><td>Legacy log is read-only</td><td>Complete copy migration and configure the new filename.</td></tr>
 <tr><td>Already open or cannot be locked</td><td>Stop and close every owner. Do not remove the ownership lock to bypass it.</td></tr>
 <tr><td>Destination exists</td><td>Choose a fresh filename or inspect the existing migrated copy. Do not reset or overwrite it to retry.</td></tr>
-<tr><td>Migration source has an incomplete tail</td><td>Keep the raw backup. Work on a copy, open/close it normally with the intended view to recover an interrupted tail, then retry migration. Complete-frame corruption must fail; do not edit or remove frames to force acceptance.</td></tr>
+<tr><td>Migration source has an incomplete tail</td><td>Keep the raw backup. <code>FOLDLOG1</code> copy migration automatically skips an incomplete torn final frame while leaving the source untouched; for a <code>FOLDLOG2</code> source with an interrupted final frame, open and close a working copy normally first to recover the tail, then retry migration. Complete-frame corruption must fail; do not edit or remove frames to force acceptance.</td></tr>
 <tr><td>Unsupported or corrupt header</td><td>Confirm that this is a Foldlite native document log and that the backup is intact. Copy migration does not convert another database's format.</td></tr>
 <tr><td>Checkpoint or close fails</td><td>Keep the document log. Fix the reported cache-path, disk-space, or size issue; a failed accelerator save does not roll back durable appends. See <a href="concepts.html">documents and caches</a>.</td></tr>
 </tbody></table>
 </main>
-    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#from-031">Upgrade from 0.3.1</a>
+    <aside class="page-toc" aria-label="On this page"><p>On this page</p><a href="#from-031">Upgrade from 0.3.1, 0.3.2, or 0.3.3</a>
 <a href="#from-020">Upgrade from 0.2.0</a>
 <a href="#before-you-start">Before you start</a>
 <a href="#backup">1. Stop writers and back up the source</a>
-<a href="#install">2. Install 0.3.2 in a separate environment</a>
+<a href="#install">2. Install 0.4.1 in a separate environment</a>
 <a href="#inspect">3. Inspect the closed log with its intended view</a>
 <a href="#migrate">4. Copy into a new log</a>
 <a href="#verify">5. Compare documents, results, and rebuilt results</a>

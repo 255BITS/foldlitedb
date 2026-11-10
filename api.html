@@ -170,13 +170,14 @@ with Database(":memory:") as automatic:
 
 <h2 id="reads">Rows, snapshots, and changes</h2>
 <span id="portable-reads"></span>
-<pre class="signature"><code>db.rows(*, key=&lt;omitted&gt;, start_key=&lt;omitted&gt;, end_key=&lt;omitted&gt;,
-        prefix=&lt;omitted&gt;, inclusive_start=True, inclusive_end=True, limit=100) → iterator[Row]
-db.query(*, key=&lt;omitted&gt;, start_key=&lt;omitted&gt;, end_key=&lt;omitted&gt;,
-         prefix=&lt;omitted&gt;, inclusive_start=True, inclusive_end=True,
-         limit=100, cursor=None, after=None) → Snapshot
+<pre class="signature"><code>db.rows(view_name=&lt;omitted&gt;, *, view=None, key=&lt;omitted&gt;, start_key=&lt;omitted&gt;,
+        end_key=&lt;omitted&gt;, prefix=&lt;omitted&gt;, inclusive_start=True,
+        inclusive_end=True, limit=100) → iterator[Row]
+db.query(view_name=&lt;omitted&gt;, *, view=None, key=&lt;omitted&gt;, start_key=&lt;omitted&gt;,
+         end_key=&lt;omitted&gt;, prefix=&lt;omitted&gt;, inclusive_start=True,
+         inclusive_end=True, limit=100, cursor=None, after=None) → Snapshot
 db.changes(*, since, limit=100) → ChangePage</code></pre>
-<p><code>rows</code> lazily follows snapshot pages, pinning the committed prefix on first iteration. <code>limit</code> is a page size from 1 through 1024, not a total row limit. Omit all selectors for every group or supply any JSON <code>key</code>, including null, for exact filtering. No operation lock spans a yield into application code.</p>
+<p><code>rows</code> lazily follows snapshot pages, pinning the committed prefix on first iteration. <code>limit</code> is a page size from 1 through 1024, not a total row limit. Omit <code>view_name</code>/<code>view</code> for the primary view or pass a registered callback view name; supply any JSON <code>key</code>, including null, via the <code>key=</code> keyword argument for exact filtering. No operation lock spans a yield into application code.</p>
 <p>A <code>Row</code> has <code>key</code>, reducer <code>state</code>, finalized <code>result</code>, and committed <code>sequence</code>. A <code>Snapshot</code> has <code>rows</code>, <code>cursor</code>, <code>after</code>, and <code>complete</code>. Continue with both returned cursor and after token, preserving every selector and inclusive flag. Page size may change. Changed selectors, another snapshot, and legacy query tokens fail explicitly. New ingestion does not change the pinned snapshot.</p>
 <pre data-run="python"><code>with Database(":memory:") as db:
     db.add_many([
@@ -276,6 +277,7 @@ with TemporaryDirectory() as directory:
 <span id="portable-export"></span>
 <pre class="signature"><code>db.checkpoint() → dict
 db.rebuild() → dict
+db.get(id=None, *, position=None, source="default") → Document | None
 db.documents(*, limit=100) → iterator[Document]
 db.stats() → dict
 db.close()</code></pre>
@@ -286,7 +288,7 @@ db.close()</code></pre>
     assert db.checkpoint()["checkpointed"] is True
     assert db.rebuild()["rebuilt"] is True
     assert [(row.key, row.state, row.result) for row in db.rows()] == expected</code></pre>
-<p><code>documents</code> exports resolved records in original ingestion order at a snapshot pinned on first iteration. Page size is 1–1024. Back up these records or the log and retain exact view artifacts; the cache can be regenerated. Re-import through <code>ingest</code> or <code>ingest_many</code>.</p>
+<p><code>get</code> resolves a single retained <code>Document</code> within <code>source</code> by either nonempty string <code>id</code> or safe integer <code>position</code> (returning <code>None</code> if absent, and raising <code>DatabaseError</code> when neither or both selectors are supplied). <code>documents</code> exports resolved records in original ingestion order at a snapshot pinned on first iteration. Page size is 1–1024. Back up these records or the log and retain exact view artifacts; the cache can be regenerated. Re-import through <code>ingest</code> or <code>ingest_many</code>.</p>
 <p><code>stats</code> includes <code>documents</code>, <code>groups</code>, <code>sequence</code>, <code>cursor</code>, <code>generation</code>, <code>module_sha256</code>, <code>descriptor</code>, and source <code>checkpoints</code>. <code>storage</code> is <code>"append-only-log"</code> or <code>"memory"</code>. The <code>cache</code> object reports <code>status</code>, <code>bytes</code>, and <code>log_offset</code>; <code>replay</code> reports processed <code>batches</code> and <code>documents</code>; <code>log</code> reports <code>bytes</code>, <code>batches</code>, <code>recovered_tail_bytes</code>, and <code>writer_poisoned</code>, which is <code>true</code> after an I/O error until the log is reopened.</p>
 <p>Engine sequence counts inserted documents and changed group states, rather than documents alone. Reopening always verifies the complete log, even with a valid cache. Current retained documents, indexes, and view history grow in host memory; there is no compaction or bounded total-memory guarantee.</p>
 <p><code>cache.status</code> describes startup or the most recent checkpoint operation, not whether the in-memory view is usable. For example, <code>status="missing"</code>, <code>bytes=0</code>, and <code>replay.documents=2513</code> is healthy after rebuilding from a missing cache. The status stays <code>"missing"</code> until <code>checkpoint()</code> or clean close writes a cache. <code>cache.bytes</code> is the cache file size inspected or last written, not the memory used by the view; <code>cache.log_offset</code> is the reused or checkpointed log prefix.</p>
@@ -310,6 +312,7 @@ db.close()</code></pre>
 <tr><td><code>MAX_BATCH_DOCUMENTS</code></td><td>1024</td><td>Documents in one atomic ingestion batch.</td></tr>
 <tr><td><code>MAX_BATCH_EMISSIONS</code></td><td>4096</td><td>Map contributions produced by one batch.</td></tr>
 <tr><td><code>MAX_LOG_FRAME_BYTES</code></td><td>8 MiB</td><td>One encoded log frame (one committed batch).</td></tr>
+<tr><td><code>MAX_CACHE_BYTES</code></td><td>1 GiB</td><td>One encoded derived checkpoint snapshot.</td></tr>
 <tr><td><code>MAX_JSON_DEPTH</code></td><td>64</td><td>Nesting of payloads, keys, states, and results.</td></tr>
 <tr><td><code>MAX_SAFE_INTEGER</code></td><td>2<sup>53</sup> − 1</td><td>Positions and sequences. Integers above it that a double represents exactly are accepted but read back as floats, so keep integer-typed domain values within it.</td></tr>
 </tbody></table>

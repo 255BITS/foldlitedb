@@ -1,7 +1,7 @@
 {
   "abi": 1,
   "module": "catalogue.wasm",
-  "sha256": "78df9ec84239780a3a6f5d157a02686e45b074201d902b751ef42c453650b825",
+  "sha256": "71e7f7c0a27d9810ee86af380a70eef69fd6efb3d372200811a055e5c40fe5fb",
   "descriptor": {
     "abi": 1,
     "name": "catalogue",

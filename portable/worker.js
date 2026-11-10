@@ -82,16 +82,18 @@ class MemoryDatabase {
     this.view = view;
     this.epoch = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     this.sequence = 0; this.documents = []; this.batches = []; this.identities = new Map(); this.positions = new Map();
-    this.checkpoints = new Map(); this.states = new Map(); this.history = []; this.documentBytes = 0; this.historyBytes = 0;
+    this.checkpoints = new Map(); this.states = new Map(); this.history = []; this.historyEntries = []; this.documentBytes = 0; this.historyBytes = 0;
   }
   cursor(sequence = this.sequence) { return `${this.epoch}:${this.view.spec.sha256}:${sequence}`; }
-  readCursor(cursor = this.cursor()) {
-    if (cursor === 0 || cursor === null) return 0;
-    if (typeof cursor !== 'string' || !cursor.startsWith(`${this.epoch}:${this.view.spec.sha256}:`)) throw new CursorExpired('Cursor belongs to another database or view module.' + cursorRecovery);
+  readCursor(cursor, allowStart = false) {
+    if (cursor === undefined || cursor === null) return allowStart ? 0 : this.sequence;
+    if (allowStart && cursor === 0) return 0;
+    if (typeof cursor !== 'string') throw new ViewError('Cursor must be an opaque cursor string');
+    if (!cursor.startsWith(`${this.epoch}:${this.view.spec.sha256}:`)) throw new CursorExpired('Cursor belongs to another database or view module.' + cursorRecovery);
     const tail = cursor.slice(cursor.lastIndexOf(':') + 1);
-    if (!/^(0|[1-9][0-9]*)$/.test(tail)) throw new CursorExpired('Invalid cursor.' + cursorRecovery);
+    if (!/^(0|[1-9][0-9]*)$/.test(tail)) throw new ViewError('Invalid cursor sequence');
     const sequence = Number(tail);
-    if (!Number.isSafeInteger(sequence)) throw new CursorExpired('Invalid cursor sequence.' + cursorRecovery);
+    if (!Number.isSafeInteger(sequence)) throw new ViewError('Invalid cursor sequence');
     if (sequence > this.sequence) throw new CursorExpired('Cursor is ahead of committed state.' + cursorRecovery);
     return sequence;
   }
@@ -99,7 +101,7 @@ class MemoryDatabase {
     if (!Array.isArray(input) || input.length > MAX_BATCH) throw new ViewError(`A batch must be an array of at most ${MAX_BATCH} documents`);
     databaseRequestJSON({op: 'ingest', documents: input});
     const identities = new Map(this.identities), positions = new Map(this.positions), checkpoints = new Map(this.checkpoints), states = new Map(this.states);
-    const appended = [], events = [], resolved = [];
+    const appended = [], events = [], eventEntries = [], resolved = [];
     let sequence = this.sequence, documentBytes = this.documentBytes, historyBytes = this.historyBytes, replayed = 0;
     for (const supplied of input) {
       if (!supplied || Array.isArray(supplied) || typeof supplied !== 'object' || !Object.hasOwn(supplied, 'payload')) throw new ViewError('Each document needs a payload');
@@ -138,7 +140,7 @@ class MemoryDatabase {
       for (const contributions of mapped) {
         for (const contribution of contributions) {
           const key = canonical(contribution.key);
-          if (!groups.has(key)) groups.set(key, {key: contribution.key, values: []});
+          if (!groups.has(key)) groups.set(key, {key: JSON.parse(key), values: []});
           groups.get(key).values.push(contribution.value);
         }
       }
@@ -146,13 +148,13 @@ class MemoryDatabase {
         const previous = states.get(encoded);
         const state = this.view.add(previous ? previous.state : this.view.identity(), group.values);
         const row = {key: group.key, state, result: this.view.finalize(state), sequence: ++sequence};
-        states.set(encoded, row); events.push(row); historyBytes += bytes(row);
+        states.set(encoded, row); events.push(row); eventEntries.push([encoded, row]); historyBytes += bytes(row);
       }
       if (states.size > MAX_GROUPS || this.history.length + events.length > MAX_EVENTS || historyBytes > MAX_HISTORY_BYTES) throw new ViewError('In-memory view history limit reached; export your documents');
     }
     // Commit every retained record, checkpoint, state, and change together.
     this.identities = identities; this.positions = positions; this.checkpoints = checkpoints; this.states = states;
-    this.documents.push(...appended); this.history.push(...events); this.sequence = sequence;
+    this.documents.push(...appended); this.history.push(...events); this.historyEntries.push(...eventEntries); this.sequence = sequence;
     if (appended.length) this.batches.push(appended);
     this.documentBytes = documentBytes; this.historyBytes = historyBytes;
     return {documents: resolved, inserted: appended.length, replayed, sequence, cursor: this.cursor()};
@@ -199,8 +201,11 @@ class MemoryDatabase {
         if (canonical(last) !== token[3] || !queryMatches(last, selector)) throw new Error();
       } catch { throw new ViewError('Invalid query continuation key'); }
     }
-    const atSnapshot = new Map();
-    for (const row of this.history) if (row.sequence <= snapshot) atSnapshot.set(canonical(row.key), row);
+    let atSnapshot = this.states;
+    if (snapshot !== this.sequence) {
+      atSnapshot = new Map();
+      for (const [encoded, row] of this.historyEntries) if (row.sequence <= snapshot) atSnapshot.set(encoded, row);
+    }
     const remaining = [...atSnapshot.entries()].filter(([, row]) => (last === undefined || compareKeys(row.key, last) > 0)
       && queryMatches(row.key, selector)).sort(([, a], [, b]) => compareKeys(a.key, b.key));
     const page = remaining.slice(0, limit), complete = remaining.length <= limit;
@@ -208,7 +213,7 @@ class MemoryDatabase {
       after: complete ? null : JSON.stringify([QUERY_FORMAT, cursor, selection, page.at(-1)[0]]), complete};
   }
   changes(request) {
-    const since = this.readCursor(request.since ?? 0), limit = this.limit(request);
+    const since = this.readCursor(request.since ?? 0, true), limit = this.limit(request);
     const remaining = this.history.filter(row => row.sequence > since), rows = remaining.slice(0, limit), complete = remaining.length <= limit;
     return {rows, cursor: this.cursor(complete ? this.sequence : rows.at(-1).sequence), complete};
   }
