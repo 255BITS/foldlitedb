@@ -756,3 +756,58 @@ fn migration_never_creates_missing_sources_or_modifies_incomplete_source_bytes()
     assert_eq!(fs::read(&missing).unwrap(), bytes);
     assert!(!destination.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn dangling_symlinks_to_sidecar_paths_are_rejected_and_readonly_legacy_logs_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let target_cache = directory.path().join("other.fold.cache");
+    let alias = directory.path().join("alias.fold");
+    std::os::unix::fs::symlink(&target_cache, &alias).unwrap();
+    assert!(Engine::open(alias.to_str().unwrap(), METRICS)
+        .err()
+        .unwrap()
+        .contains("reserved"));
+    assert!(!target_cache.exists());
+
+    let legacy_path = directory.path().join("readonly_legacy.fold");
+    let mut owner = open(&legacy_path);
+    add(&mut owner, "one", 5);
+    drop(owner);
+    let mut legacy_bytes = legacy_log(&fs::read(&legacy_path).unwrap());
+    legacy_bytes.extend(b"BA");
+    fs::write(&legacy_path, &legacy_bytes).unwrap();
+    fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let mut legacy = open(&legacy_path);
+    assert_eq!(call(&mut legacy, json!({"op":"stats"}))["documents"], 1);
+    assert_eq!(
+        call(&mut legacy, json!({"op":"stats"}))["log"]["recovered_tail_bytes"],
+        2
+    );
+    drop(legacy);
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+}
+
+#[test]
+fn close_without_checkpoint_releases_ownership_and_preserves_existing_cache() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("preserve_cache.fold");
+    let cache = sibling(&path, ".cache");
+    let mut owner = open(&path);
+    add(&mut owner, "one", 10);
+    drop(owner);
+    let saved_cache = fs::read(&cache).unwrap();
+
+    let mut reopened = open(&path);
+    call(
+        &mut reopened,
+        json!({"op":"set_callback_checkpoints","checkpoints":{
+            "totals":{"format":1,"descriptor":{"version":"1"},"sequence":1,"groups":[]}
+        }}),
+    );
+    call(&mut reopened, json!({"op":"close","checkpoint":false}));
+    assert_eq!(fs::read(&cache).unwrap(), saved_cache);
+}

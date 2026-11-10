@@ -209,6 +209,34 @@ fn chained(prefix: &[u8; 32], frame: &[u8]) -> [u8; 32] {
     digest.finalize().into()
 }
 
+fn resolve_primary_path(requested: &Path) -> Result<PathBuf> {
+    if requested.exists() {
+        return fs::canonicalize(requested).map_err(error);
+    }
+    let mut current = requested.to_path_buf();
+    for _ in 0..40 {
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
+            return Ok(current);
+        };
+        if !metadata.file_type().is_symlink() {
+            return fs::canonicalize(&current).map_err(error);
+        }
+        let target = fs::read_link(&current).map_err(error)?;
+        current = if target.is_absolute() {
+            target
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(target)
+        };
+        if current.exists() {
+            return fs::canonicalize(&current).map_err(error);
+        }
+    }
+    Err("Too many levels of symbolic links".into())
+}
+
 impl Storage {
     pub fn open_with_options(path: &str, reset: bool, create_new: bool) -> Result<Self> {
         Self::open_mode(path, reset, create_new, false)
@@ -234,15 +262,13 @@ impl Storage {
         }
         // A symbolic alias must use its target's sidecars and reservation policy.
         // Actual inode locking below additionally protects hard-link aliases.
-        let path = if requested.exists() {
-            fs::canonicalize(&requested).map_err(error)?
-        } else {
-            requested
-        };
+        let path = resolve_primary_path(&requested)?;
         if !migration_source {
             validate_primary_path(&path)?;
         }
-        if create_new && fs::symlink_metadata(&path).is_ok() {
+        if create_new
+            && (fs::symlink_metadata(&requested).is_ok() || fs::symlink_metadata(&path).is_ok())
+        {
             return Err("Migration destination already exists".into());
         }
         let lock_path = sibling(&path, ".lock");
@@ -277,11 +303,22 @@ impl Storage {
         } else {
             options.create(true);
         }
-        let mut file = options.open(&path).map_err(error)?;
+        let (mut file, read_only_handle) = if migration_source {
+            (File::open(&path).map_err(error)?, true)
+        } else {
+            match options.open(&path) {
+                Ok(handle) => (handle, false),
+                Err(write_err) if !reset && !create_new => match File::open(&path) {
+                    Ok(handle) => (handle, true),
+                    Err(_) => return Err(error(write_err)),
+                },
+                Err(write_err) => return Err(error(write_err)),
+            }
+        };
         let initialized = (|| -> Result<(String, [u8; 32], bool)> {
             file.try_lock()
                 .map_err(|e| format!("Native storage is already open or cannot be locked: {e}"))?;
-            if reset || file.metadata().map_err(error)?.len() == 0 {
+            if !read_only_handle && (reset || file.metadata().map_err(error)?.len() == 0) {
                 // Keep both coordination and data inode locks for the entire reset.
                 // A reset is explicitly destructive; I/O failure is reported rather
                 // than hidden, and the stable lock inode is never removed.
@@ -305,6 +342,9 @@ impl Storage {
                 || Sha256::digest(&bytes[..24])[..] != bytes[24..]
             {
                 return Err("Native log header is corrupt or uses an unsupported format".into());
+            }
+            if read_only_handle && !legacy && !migration_source {
+                return Err("Native log requires write access unless it is a read-only legacy FOLDLOG1 log".into());
             }
             let id = Uuid::from_slice(&bytes[8..24]).map_err(error)?.to_string();
             let prefix: [u8; 32] = Sha256::digest(bytes).into();
@@ -685,8 +725,10 @@ impl Disk {
             if !recover {
                 return Err("Migration source has an incomplete tail; open it normally to recover before migration".into());
             }
-            self.file.set_len(offset).map_err(error)?;
-            self.file.sync_all().map_err(error)?;
+            if !self.legacy {
+                self.file.set_len(offset).map_err(error)?;
+                self.file.sync_all().map_err(error)?;
+            }
         }
         self.file.seek(SeekFrom::Start(offset)).map_err(error)?;
         self.offset = offset;

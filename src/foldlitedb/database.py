@@ -5,6 +5,7 @@ its durable input; every view state, index, and checkpoint can be recreated.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import wraps
 import hashlib
 from importlib.resources import files
@@ -90,6 +91,7 @@ class RustReducer:
     def __init__(self, name: str, *, runtime=None, positioned: bool = False):
         self.name = name
         self._runtime = runtime
+        self._owns_runtime = runtime is None
         self.positioned = positioned
 
     @property
@@ -105,8 +107,17 @@ class RustReducer:
             self._runtime = Reducer()
         return self._runtime
 
+    def _invoke(self, fn):
+        from .reducers import Reducer, ReducerError
+        try:
+            return fn(self.runtime)
+        except ReducerError as error:
+            if self._owns_runtime and "trapped" in str(error):
+                self._runtime = Reducer()
+            raise DatabaseError(str(error)) from error
+
     def identity(self):
-        return self.runtime.identity(self.name)
+        return self._invoke(lambda rt: rt.identity(self.name))
 
     def prepare(self, value, document: Document, ordinal: int):
         if self.positioned:
@@ -128,20 +139,20 @@ class RustReducer:
         for value in values:
             size = len(json.dumps(value, allow_nan=False, separators=(",", ":"), ensure_ascii=True).encode())
             if batch and (len(batch) >= MAX_BATCH_VALUES or used + size + 1 > MAX_REQUEST_BYTES):
-                state = self.runtime.add(state, batch)
+                state = self._invoke(lambda rt: rt.add(state, batch))
                 batch = []
                 used = overhead(state)
             if used + size + bool(batch) > MAX_REQUEST_BYTES:
                 raise DatabaseError("One numeric contribution exceeds the reducer request byte budget")
             used += size + bool(batch)
             batch.append(value)
-        return self.runtime.add(state, batch) if batch else state
+        return self._invoke(lambda rt: rt.add(state, batch)) if batch else state
 
     def merge(self, left, right):
-        return self.runtime.merge(left, right)
+        return self._invoke(lambda rt: rt.merge(left, right))
 
     def finalize(self, state):
-        return self.runtime.finalize(state)
+        return self._invoke(lambda rt: rt.finalize(state))
 
 
 class OrderedFold:
@@ -191,10 +202,11 @@ class View:
         if (
             map is not None
             or reducer is not None
-            or (version is not None and isinstance(name_or_module, str) and not os.path.exists(str(name_or_module)))
+            or version is not None
+            or references is not None
         ):
             self.name = _identity(str(name_or_module), "view name")
-            self.version = _identity(version or "1", "view version")
+            self.version = _identity("1" if version is None else version, "view version")
             self.map = map
             self.reducer = reducer
             self.references = _copy(dict(references or {}))
@@ -230,10 +242,6 @@ class View:
             return self._bundled_module
         return self._module
 
-    @module.setter
-    def module(self, value: bytes):
-        self._module = value
-
     @classmethod
     def bundled(cls, name: str = "metrics") -> View:
         """Load a checked, precompiled example without an AssemblyScript compiler."""
@@ -242,6 +250,39 @@ class View:
         resources = portable_assets()
         manifest = json.loads(resources.joinpath(name + ".json").read_text())
         return cls(resources.joinpath(name + ".wasm").read_bytes(), sha256=manifest["sha256"])
+
+
+def _validate_callback_view(view: View) -> tuple[View, dict[str, Any]]:
+    _identity(view.name, "view name")
+    _identity(view.version, "view version")
+    if not callable(view.map):
+        raise DatabaseError("View map must be callable")
+    if any(not callable(getattr(view.reducer, method, None))
+           for method in ("identity", "add", "finalize")):
+        raise DatabaseError("View reducer must implement identity, add, and finalize")
+    descriptor = _copy({"version": view.version, "references": view.references,
+                        "reducer": getattr(view.reducer, "descriptor", str(view.reducer))})
+    registered = View(view.name, version=view.version, map=view.map,
+                      reducer=view.reducer, references=descriptor["references"])
+    return registered, descriptor
+
+
+@dataclass
+class _RegisteredView:
+    view: View
+    descriptor: dict[str, Any]
+    states: dict[str, tuple[Any, Any, Any, int]]
+    mode: str = "documents"
+    external_descriptor_matches: bool = False
+
+    def copy(self) -> _RegisteredView:
+        return _RegisteredView(
+            view=self.view,
+            descriptor=_copy(self.descriptor),
+            states=dict(self.states),
+            mode=self.mode,
+            external_descriptor_matches=self.external_descriptor_matches,
+        )
 
 
 def _document(value):
@@ -284,13 +325,10 @@ class Database:
             self.view = view
         else:
             self.view = View(view)
+        if getattr(self.view, "is_callback", False):
+            _validate_callback_view(self.view)
 
-        self._views: dict[str, View] = {}
-        self._view_descriptors: dict[str, Any] = {}
-        self._view_states: dict[str, dict[str, tuple[Any, Any, Any, int]]] = {}
-        self._view_dirty: dict[str, bool] = {}
-        self._view_modes: dict[str, str] = {}
-        self._external_descriptor_matches: dict[str, bool] = {}
+        self._views: dict[str, _RegisteredView] = {}
 
         try:
             from ._native import Engine
@@ -306,28 +344,39 @@ class Database:
         except (ValueError, TypeError, OverflowError) as error:
             raise DatabaseError(str(error)) from error
 
-        if generation is not None:
-            existing_gen = self.get("_generation", source="_meta")
-            if existing_gen is not None:
-                found = existing_gen.payload.get("generation") if isinstance(existing_gen.payload, dict) else None
-                if found != generation:
-                    self.close()
-                    raise GenerationMismatch(f"Database generation mismatch: expected {generation}, found {found}")
-            else:
-                self._ingest_records([{"id": "_generation", "source": "_meta", "position": 0, "payload": {"generation": generation}}])
+        try:
+            if generation is not None:
+                _identity(generation, "generation")
+                existing_gen = self.get("_generation", source="_meta")
+                if existing_gen is not None:
+                    found = existing_gen.payload.get("generation") if isinstance(existing_gen.payload, dict) else None
+                    if found != generation:
+                        raise GenerationMismatch(f"Database generation mismatch: expected {generation}, found {found}")
+                elif self.stats()["documents"] > 0:
+                    raise GenerationMismatch(f"Database generation mismatch: expected {generation}, found None")
+                else:
+                    self._ingest_records([{"id": "_generation", "source": "_meta", "position": 0, "payload": {"generation": generation}}])
 
-        if getattr(self.view, "is_callback", False):
-            try:
+            if getattr(self.view, "is_callback", False):
                 self.register(self.view)
-            except BaseException:
-                self.close()
-                raise
+        except BaseException:
+            self._close_without_checkpoint()
+            raise
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         self.close()
+
+    @_synchronized
+    def _close_without_checkpoint(self):
+        engine, self._engine = self._engine, None
+        if engine is not None:
+            try:
+                self._execute_json(engine, '{"op":"close","checkpoint":false}')
+            except BaseException:
+                pass
 
     @_synchronized
     def close(self):
@@ -366,6 +415,10 @@ class Database:
         if self._callback_evaluating:
             raise DatabaseError("A view callback must not mutate its database")
 
+    def _has_matching_external_descriptor(self, name: str) -> bool:
+        entry = self._views.get(name)
+        return bool(entry is not None and entry.external_descriptor_matches)
+
     def _call(self, request):
         return self._call_json(_encode(request, max_depth=65))
 
@@ -382,12 +435,18 @@ class Database:
         except (ValueError, TypeError, OverflowError) as error:
             message = str(error)
             kind = DatabaseError
-            if "conflict" in message.lower():
-                kind = DocumentConflict
-            elif "cursor" in message.lower():
-                kind = CursorExpired
-            elif "source order" in message.lower() or "source positions must advance" in message.lower():
-                kind = SourceOrderError
+            if not message.startswith("View rejected operation:"):
+                lower = message.lower()
+                if "conflict" in lower:
+                    kind = DocumentConflict
+                elif (
+                    "to recover, run query() for a fresh snapshot" in lower
+                    or "cursor belongs to" in lower
+                    or "cursor is ahead" in lower
+                ):
+                    kind = CursorExpired
+                elif "source order" in lower or "source positions must advance" in lower:
+                    kind = SourceOrderError
             raise kind(message) from error
 
     @_synchronized
@@ -403,7 +462,7 @@ class Database:
             # Snapshot at each yield; the record envelope is not payload depth.
             encoded.append(_encode(record, max_depth=65))
         try:
-            regular_views = [name for name in self._views if self._view_modes[name] == "documents"]
+            regular_views = [name for name, entry in self._views.items() if entry.mode == "documents"]
             if not callbacks or not regular_views:
                 return self._call_json('{"op":"ingest","documents":[' + ",".join(encoded) + "]}")
             prepared = self._call_json('{"op":"prepare_ingest","documents":[' + ",".join(encoded) + "]}")
@@ -418,7 +477,8 @@ class Database:
             except BaseException:
                 self._call({"op": "cancel_prepared"})
                 raise
-            self._view_states.update(states)
+            for name, state in states.items():
+                self._views[name].states = state
             return result
         except DatabaseError as error:
             # The engine's limit errors are host-neutral; add the Python recovery.
@@ -470,10 +530,21 @@ class Database:
         return self._call_json(_json({"op": "canonical_key", "key": key})), key
 
     def _callback_checkpoint(self, name, state_map, sequence):
-        groups = [{"key": _copy(key), "state": _copy(state), "result": _copy(result),
-                   "sequence": row_sequence}
-                  for key, state, result, row_sequence in state_map.values()]
-        return {"format": 1, "descriptor": _copy(self._view_descriptors[name]),
+        entry = self._views[name]
+        groups = []
+        for canon_key in sorted(state_map):
+            key, state, result, row_sequence = state_map[canon_key]
+            if result is _MISSING:
+                evaluating = self._callback_evaluating
+                self._callback_evaluating = True
+                try:
+                    result = _copy(entry.view.reducer.finalize(_copy(state)))
+                finally:
+                    self._callback_evaluating = evaluating
+                state_map[canon_key] = (key, state, result, row_sequence)
+            groups.append({"key": _copy(key), "state": _copy(state),
+                           "result": _copy(result), "sequence": row_sequence})
+        return {"format": 1, "descriptor": _copy(entry.descriptor),
                 "sequence": sequence, "groups": groups}
 
     def _stage_callbacks(self, documents, sequence, names, *, initial=None):
@@ -482,8 +553,9 @@ class Database:
         self._callback_evaluating = True
         try:
             for name in names:
-                view = self._views[name]
-                state_map = dict((initial if initial is not None else self._view_states)[name])
+                entry = self._views[name]
+                view = entry.view
+                state_map = dict(initial[name] if initial is not None else entry.states)
                 emissions = {}
                 count = 0
                 for value in documents:
@@ -516,33 +588,43 @@ class Database:
     def _reduce_view_group(
         self,
         view_name: str,
-        canon_key: str,
+        canon_key: str | None,
         orig_key: Any,
         vals: list[Any],
         sequence: int,
-        *,
-        mark_dirty: bool = True,
     ) -> None:
         if not vals:
             return
         self._assert_mutable()
-        view = self._views[view_name]
-        canon_key, orig_key = self._canonical_key(orig_key)
-        state_map = self._view_states[view_name]
-        if canon_key in state_map:
-            _, cur_state, _, _ = state_map[canon_key]
-            new_state = view.reducer.add(_copy(cur_state), [_copy(value) for value in vals])
-        else:
-            new_state = view.reducer.add(view.reducer.identity(), vals)
+        entry = self._views[view_name]
+        view = entry.view
+        if canon_key is None:
+            canon_key, orig_key = self._canonical_key(orig_key)
+        state_map = entry.states
+        evaluating = self._callback_evaluating
+        self._callback_evaluating = True
+        try:
+            copied_vals = [_copy(value) for value in vals]
+            if canon_key in state_map:
+                _, cur_state, _, _ = state_map[canon_key]
+                new_state = view.reducer.add(_copy(cur_state), copied_vals)
+            else:
+                new_state = view.reducer.add(_copy(view.reducer.identity()), copied_vals)
+        finally:
+            self._callback_evaluating = evaluating
         state_map[canon_key] = (_copy(orig_key), _copy(new_state), _MISSING, sequence)
-        if mark_dirty:
-            self._view_dirty[view_name] = True
 
     def _finalize_view_group(self, view_name: str, canon_key: str):
-        orig_key, state, fin, seq = self._view_states[view_name][canon_key]
+        entry = self._views[view_name]
+        orig_key, state, fin, seq = entry.states[canon_key]
         if fin is _MISSING:
-            fin = _copy(self._views[view_name].reducer.finalize(_copy(state)))
-            self._view_states[view_name][canon_key] = (orig_key, state, fin, seq)
+            evaluating = self._callback_evaluating
+            self._callback_evaluating = True
+            try:
+                fin = _copy(entry.view.reducer.finalize(_copy(state)))
+            finally:
+                self._callback_evaluating = evaluating
+            entry.states[canon_key] = (orig_key, state, fin, seq)
         return orig_key, state, fin, seq
 
     @_synchronized
@@ -555,7 +637,7 @@ class Database:
     ) -> None:
         for canon_key, (orig_key, vals) in pending_emissions.items():
             self._reduce_view_group(
-                view_name, canon_key, orig_key, vals, checkpoint, mark_dirty=False
+                view_name, canon_key, orig_key, vals, checkpoint
             )
         records = [
             {
@@ -565,9 +647,9 @@ class Database:
                 "payload": {"cursor": replay},
             }
         ]
-        state_map = self._view_states.get(view_name, {})
+        entry = self._views[view_name]
         groups = []
-        for canon_key in list(state_map.keys()):
+        for canon_key in list(entry.states.keys()):
             k, s, fin, seq = self._finalize_view_group(view_name, canon_key)
             groups.append({"key": _copy(k), "state": _copy(s), "result": _copy(fin), "sequence": seq})
         records.append(
@@ -576,14 +658,13 @@ class Database:
                     "source": f"_view:{view_name}",
                     "position": checkpoint,
                     "payload": {
-                        "descriptor": self._view_descriptors[view_name],
+                        "descriptor": entry.descriptor,
                         "checkpoint": checkpoint,
                         "groups": groups,
                     },
                 }
             )
         self._ingest_records(records, callbacks=False)
-        self._view_dirty[view_name] = False
 
     def ingest_many(self, documents: Iterable[Document], *, batch_size=100) -> Iterator[IngestResult]:
         """Replay a larger iterable as bounded, separately committed batches."""
@@ -616,23 +697,17 @@ class Database:
         atomic progress/state record; it is not reconstructed from pointer records.
         """
         self._assert_mutable()
-        _identity(view.name, "view name")
-        _identity(view.version, "view version")
-        if not callable(view.map):
-            raise DatabaseError("View map must be callable")
-        if any(not callable(getattr(view.reducer, method, None))
-               for method in ("identity", "add", "finalize")):
-            raise DatabaseError("View reducer must implement identity, add, and finalize")
-        descriptor = _copy({"version": view.version, "references": view.references,
-                            "reducer": getattr(view.reducer, "descriptor", str(view.reducer))})
-        registered = View(view.name, version=view.version, map=view.map,
-                          reducer=view.reducer, references=descriptor["references"])
-        old = (self._views.copy(), self._view_descriptors.copy(), self._view_states.copy(),
-               self._view_modes.copy())
-        self._views[view.name] = registered
-        self._view_descriptors[view.name] = descriptor
-        self._view_states[view.name] = {}
-        self._view_modes[view.name] = "external" if _external else "documents"
+        registered, descriptor = _validate_callback_view(view)
+        previous = self._views.get(view.name)
+        if previous is not None:
+            previous = previous.copy()
+        entry = _RegisteredView(
+            view=registered,
+            descriptor=descriptor,
+            states={},
+            mode="external" if _external else "documents",
+        )
+        self._views[view.name] = entry
         try:
             if _external:
                 checkpoint = None
@@ -641,28 +716,31 @@ class Database:
                     saved = self.get(str(watermark), source=f"_view:{view.name}")
                     checkpoint = saved.payload if saved is not None else None
                 matches = checkpoint is not None and checkpoint.get("descriptor") == descriptor
-                self._external_descriptor_matches[view.name] = matches
+                entry.external_descriptor_matches = matches
                 if matches:
-                    self._view_states[view.name] = self._restore_callback_groups(checkpoint)
+                    entry.states = self._restore_callback_groups(checkpoint)
             else:
                 saved = self._call({"op": "callback_checkpoints"}).get(view.name)
                 coverage = 0
                 if saved is not None and saved.get("descriptor") == descriptor:
                     try:
-                        self._view_states[view.name] = self._restore_callback_groups(saved)
+                        entry.states = self._restore_callback_groups(saved)
                         coverage = saved["sequence"]
                         # Coverage must be a real boundary in this native generation.
                         self._call({"op": "document_batches", "since": coverage})
                     except (DatabaseError, KeyError, TypeError):
-                        self._view_states[view.name] = {}
+                        entry.states = {}
                         coverage = 0
                 states = self._replay_callbacks([view.name], coverage)
                 sequence = self.stats()["sequence"]
                 checkpoints = {view.name: self._callback_checkpoint(view.name, states[view.name], sequence)}
                 self._call_json(_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
-                self._view_states.update(states)
+                entry.states = states[view.name]
         except BaseException:
-            self._views, self._view_descriptors, self._view_states, self._view_modes = old
+            if previous is None:
+                self._views.pop(view.name, None)
+            else:
+                self._views[view.name] = previous
             raise
         return view.version
 
@@ -676,7 +754,7 @@ class Database:
         return states
 
     def _replay_callbacks(self, names, coverage=0, *, cursor=None, initial=None):
-        states = {name: dict(self._view_states[name]) for name in names} if initial is None else initial
+        states = {name: dict(self._views[name].states) for name in names} if initial is None else initial
         while True:
             request = {"op": "document_batches", "since": coverage}
             if cursor is not None:
@@ -694,19 +772,38 @@ class Database:
         return _document(result) if result else None
 
     @_synchronized
-    def query(self, name_or_key=_MISSING, *, key=_MISSING, start_key=_MISSING,
-              end_key=_MISSING, prefix=_MISSING, inclusive_start=True,
-              inclusive_end=True, limit=100, cursor=None, after=None) -> Snapshot:
+    def query(self, name_or_key=_MISSING, *, view: str | None = None, key=_MISSING,
+              start_key=_MISSING, end_key=_MISSING, prefix=_MISSING,
+              inclusive_start=True, inclusive_end=True, limit=100, cursor=None, after=None) -> Snapshot:
         """Read exact keys, an ascending key range, or a string/array prefix.
 
         Bounds are inclusive by default. Supply the same selector and both
         continuation tokens on subsequent pages; page size may change.
         """
-        name = name_or_key if isinstance(name_or_key, str) and name_or_key in self._views else None
-        if name is None and self.view.is_callback:
-            name = self.view.name
+        if view is not None:
+            if not isinstance(view, str) or view not in self._views:
+                raise DatabaseError(f"Unknown registered callback view: {view!r}")
             if name_or_key is not _MISSING:
-                key = name_or_key if key is _MISSING else key
+                if key is not _MISSING:
+                    raise DatabaseError("Cannot specify both positional key and keyword key=")
+                key = name_or_key
+            return self._query_callback(
+                view, key=key, start_key=start_key, end_key=end_key, prefix=prefix,
+                inclusive_start=inclusive_start, inclusive_end=inclusive_end,
+                limit=limit, cursor=cursor, after=after,
+            )
+
+        name = name_or_key if isinstance(name_or_key, str) and name_or_key in self._views else None
+        if name is None:
+            has_selector = any(v is not _MISSING for v in (key, start_key, end_key, prefix))
+            if name_or_key is not _MISSING and has_selector:
+                if isinstance(name_or_key, str):
+                    raise DatabaseError(f"Unknown registered callback view: {name_or_key!r}")
+                raise DatabaseError("Cannot combine a positional key with key, range, or prefix selectors")
+            if self.view.is_callback:
+                name = self.view.name
+                if name_or_key is not _MISSING:
+                    key = name_or_key
         if name is not None:
             return self._query_callback(
                 name, key=key, start_key=start_key, end_key=end_key, prefix=prefix,
@@ -750,7 +847,8 @@ class Database:
         # consume any of the supported key nesting depth.
         selected = "{" + ",".join(_json(option) + ":" + canonical[option]
                                    for option in sorted(canonical)) + "}"
-        signature = hashlib.sha256(_json([name, self._view_descriptors[name]]).encode()).hexdigest()
+        entry = self._views[name]
+        signature = hashlib.sha256(_json([name, entry.descriptor]).encode()).hexdigest()
         current = self.stats()["cursor"]
         if cursor is None:
             native_cursor = current
@@ -760,9 +858,9 @@ class Database:
                 raise CursorExpired("Callback cursor belongs to a different view descriptor; obtain a fresh query snapshot")
             native_cursor = cursor.rsplit("~", 1)[0]
             self._call({"op": "query", "cursor": native_cursor, "limit": 1})
-        state_map = self._view_states[name]
+        state_map = entry.states
         if native_cursor != current:
-            if self._view_modes[name] != "documents":
+            if entry.mode != "documents":
                 raise CursorExpired("Historical external projection snapshots are unavailable; obtain a fresh query snapshot")
             state_map = self._replay_callbacks([name], cursor=native_cursor, initial={name: {}})[name]
         after_order = None
@@ -800,18 +898,22 @@ class Database:
         continuation = None if complete else _json([QUERY_FORMAT, cursor, selected, entries[limit - 1][0]])
         return Snapshot(tuple(rows), cursor=cursor, after=continuation, complete=complete)
 
-    def rows(self, *, key=_MISSING, start_key=_MISSING, end_key=_MISSING,
-             prefix=_MISSING, inclusive_start=True, inclusive_end=True, limit=100) -> Iterator[Row]:
+    def rows(self, name_or_key=_MISSING, *, view: str | None = None, key=_MISSING,
+             start_key=_MISSING, end_key=_MISSING, prefix=_MISSING,
+             inclusive_start=True, inclusive_end=True, limit=100) -> Iterator[Row]:
         options = {"inclusive_start": inclusive_start, "inclusive_end": inclusive_end}
+        if view is not None:
+            options["view"] = view
         for option, value in (("key", key), ("start_key", start_key), ("end_key", end_key), ("prefix", prefix)):
             if value is not _MISSING:
                 options[option] = _copy(value)
-        page = self.query(limit=limit, **options)
+        args = (_copy(name_or_key),) if name_or_key is not _MISSING else ()
+        page = self.query(*args, limit=limit, **options)
         while True:
             yield from page.rows
             if page.complete:
                 return
-            page = self.query(limit=limit, cursor=page.cursor, after=page.after, **options)
+            page = self.query(*args, limit=limit, cursor=page.cursor, after=page.after, **options)
 
     def changes(self, *, since, limit=100) -> ChangePage:
         if self.view.is_callback:
@@ -839,9 +941,9 @@ class Database:
         if self._engine is None:
             return
         sequence = self.stats()["sequence"]
-        checkpoints = {name: self._callback_checkpoint(name, states, sequence)
-                       for name, states in self._view_states.items()
-                       if self._view_modes[name] == "documents"}
+        checkpoints = {name: self._callback_checkpoint(name, entry.states, sequence)
+                       for name, entry in self._views.items()
+                       if entry.mode == "documents"}
         if checkpoints:
             self._call_json(_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
 
@@ -861,10 +963,14 @@ class Database:
     def rebuild(self):
         """Reconstruct native and callback projections from original source batches."""
         self._assert_mutable()
-        names = [name for name in self._views if self._view_modes[name] == "documents"]
+        names = [name for name, entry in self._views.items() if entry.mode == "documents"]
         states = self._replay_callbacks(names, initial={name: {} for name in names}) if names else {}
-        result = self._call({"op": "rebuild"})
-        self._view_states.update(states)
-        self._flush_view_checkpoints()
-        self._call({"op": "checkpoint"})
+        request = {"op": "rebuild"}
+        if names:
+            sequence = self.stats()["sequence"]
+            request["checkpoints"] = {name: self._callback_checkpoint(name, states[name], sequence)
+                                      for name in names}
+        result = self._call_json(_json(request))
+        for name, state in states.items():
+            self._views[name].states = state
         return result

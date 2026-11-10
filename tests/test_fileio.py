@@ -39,3 +39,15 @@ def test_committed_prefix_corruption_is_visible(tmp_path, damage):
         error = PrefixMismatchError
     with pytest.raises(error):
         validate_jsonl_prefix(journal.path, **boundary)
+
+
+def test_failed_sync_marks_journal_failed(tmp_path):
+    journal = AppendJournal(tmp_path / 'documents.jsonl')
+    journal.append({'n': 1})
+    with journal.path.open('ab') as handle:
+        handle.write(b'{"external":2}\n')
+    with pytest.raises(ValueError, match='changed outside'):
+        journal.sync()
+    assert journal.failed
+    with pytest.raises(OSError, match='incomplete'):
+        journal.append({'n': 3})

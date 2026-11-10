@@ -101,3 +101,5 @@ def test_diagnostic_tail_keeps_complete_documents_within_byte_and_row_budgets(tm
     path.write_bytes(b'{broken}\n')
     with pytest.raises(ValueError, match='Corrupt complete document'):
         read_jsonl_tail(path)
+    with pytest.raises(ValueError, match='max_bytes'):
+        read_jsonl_tail(path, max_bytes=True)

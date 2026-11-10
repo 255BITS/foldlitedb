@@ -126,7 +126,7 @@ async def materialize_jsonl_view(
     """
     import asyncio
     import time
-    from .database import Database, Document, GenerationMismatch, View
+    from .database import Database, Document, GenerationMismatch, View, _copy
 
     if type(max_groups) is not int or not 1 <= max_groups <= 4095:
         raise ValueError("max_groups must be an integer in 1..4095")
@@ -152,18 +152,18 @@ async def materialize_jsonl_view(
                 return tuple(rows)
             cursor, after = page.cursor, page.after
 
-    def bounded_map(document):
+    def bounded_emissions(document):
         if time.monotonic() - started > timeout:
             raise ValueError(
                 "Historical reduction exceeded its time budget; retry with a larger explicit history budget or prepare a smaller projection"
             )
         for key, contribution in view.map(document):
-            encoded_key = database._canonical_key(key)[0]
-            if encoded_key not in known:
+            canon_key, normalized_key = database._canonical_key(key)
+            if canon_key not in known:
                 if len(known) >= max_groups:
                     raise ValueError(f"View exceeds {max_groups} groups; narrow the view")
-                known.add(encoded_key)
-            yield key, contribution
+                known.add(canon_key)
+            yield canon_key, normalized_key, _copy(contribution)
 
     await asyncio.to_thread(read_page, target_cursor, limit=1)
     try:
@@ -175,7 +175,7 @@ async def materialize_jsonl_view(
         view_with_map = View(
             view.name,
             version=view.version,
-            map=bounded_map,
+            map=view.map,
             reducer=view.reducer,
             references=view.references,
         )
@@ -183,7 +183,7 @@ async def materialize_jsonl_view(
         # Progress and aggregate state have one descriptor. An external source
         # remains authoritative, so a changed descriptor must reread its prefix.
         if (database.checkpoint("projection") is not None
-                and not database._external_descriptor_matches[view.name]):
+                and not database._has_matching_external_descriptor(view.name)):
             await asyncio.to_thread(database.close)
             database = await asyncio.to_thread(Database, path, generation=generation, reset=True)
             await asyncio.to_thread(database.register, view_with_map, _external=True)
@@ -225,10 +225,9 @@ async def materialize_jsonl_view(
                     position=position,
                     source="projection",
                 )
-                for ordinal, (key, val) in enumerate(bounded_map(doc)):
+                for ordinal, (canon_key, key, val) in enumerate(bounded_emissions(doc)):
                     if getattr(view.reducer, "positioned", True) is False and hasattr(view.reducer, "prepare"):
-                        val = view.reducer.prepare(val, doc, ordinal)
-                    canon_key, key = database._canonical_key(key)
+                        val = _copy(view.reducer.prepare(val, doc, ordinal))
                     entry = pending_emissions.get(canon_key)
                     if entry is None:
                         vals = [val]
@@ -244,7 +243,6 @@ async def materialize_jsonl_view(
                             key,
                             vals,
                             position,
-                            mark_dirty=False,
                         )
                         del pending_emissions[canon_key]
                 replay = end

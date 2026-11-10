@@ -293,7 +293,14 @@ impl Engine {
         let runtime = Runtime::new(module_bytes)?;
         let module_sha256 = format!("{:x}", Sha256::digest(module_bytes));
         let mut storage = Storage::open_with_options(path, reset, false)?;
-        let (candidate, mut cache_status, cache_bytes) = storage.load_checkpoint();
+        let (candidate, mut cache_status, cache_bytes) = if reset {
+            match &storage {
+                Storage::Disk(_) => (None, "missing".into(), 0),
+                Storage::Memory { .. } => (None, "memory".into(), 0),
+            }
+        } else {
+            storage.load_checkpoint()
+        };
         let initial_prefix = storage.initial_prefix();
         let scan = storage.scan()?;
         let mut state = State::empty();
@@ -418,9 +425,19 @@ impl Engine {
                 stats["checkpointed"] = json!(true);
                 Ok(stats)
             }
-            "rebuild" => self.rebuild(),
+            "rebuild" => self.rebuild(&request),
             "close" => {
                 self.prepared = None;
+                let write_checkpoint = match request.get("checkpoint") {
+                    None => true,
+                    Some(Value::Bool(flag)) => *flag,
+                    Some(_) => return Err("close checkpoint must be a boolean".into()),
+                };
+                if !write_checkpoint {
+                    self.checkpoint_on_drop = false;
+                    self.storage.take();
+                    return Ok(json!({"closed":true}));
+                }
                 // A failed final checkpoint is reported, but the handle and its
                 // ownership lock are released either way so the log can be reopened.
                 let checkpointed = self.checkpoint();
@@ -623,7 +640,7 @@ impl Engine {
         Ok(())
     }
 
-    fn rebuild(&mut self) -> Result<Value> {
+    fn rebuild(&mut self, request: &Value) -> Result<Value> {
         self.prepared = None;
         let scan = self.storage.as_mut().unwrap().scan()?;
         let mut rebuilt = State::empty();
@@ -641,6 +658,9 @@ impl Engine {
             }
             document_count += documents.len() as u64;
             rebuilt.publish(staged);
+        }
+        if request.get("checkpoints").is_some() {
+            rebuilt.callback_checkpoints = callback_checkpoints(request, rebuilt.sequence)?;
         }
         // A checkpoint failure leaves the current generation untouched.
         let bytes = self
