@@ -105,9 +105,10 @@ impl ReducerInstance {
             Err(e) => return Err(format!("Missing input_ptr export: {e}")),
         };
         let input_ptr = usize::try_from(input_ptr).map_err(|_| "Invalid input_ptr address")?;
-        if input_ptr.checked_add(input.len()).is_none()
-            || input_ptr + input.len() > memory.data_size(&self.store)
-        {
+        let input_end = input_ptr
+            .checked_add(262_144)
+            .ok_or("Input buffer out of bounds")?;
+        if input_end > memory.data_size(&self.store) {
             return Err("Input buffer out of bounds".into());
         }
         if let Err(e) = memory.write(&mut self.store, input_ptr, input) {
@@ -145,10 +146,15 @@ impl ReducerInstance {
             Err(e) => return Err(format!("Missing output_ptr export: {e}")),
         };
         let output_ptr = usize::try_from(output_ptr).map_err(|_| "Invalid output_ptr address")?;
-        if output_ptr.checked_add(output_len).is_none()
-            || output_ptr + output_len > memory.data_size(&self.store)
-        {
+        let output_end = output_ptr
+            .checked_add(output_len)
+            .ok_or("Output buffer out of bounds")?;
+        let mem_size = memory.data_size(&self.store);
+        if input_end > mem_size || output_end > mem_size {
             return Err("Output buffer out of bounds".into());
+        }
+        if input_ptr < output_end && output_ptr < input_end {
+            return Err("ABI buffers must not overlap".into());
         }
         let mut output = vec![0u8; output_len];
         memory

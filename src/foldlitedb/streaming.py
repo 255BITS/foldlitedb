@@ -85,6 +85,7 @@ async def stream_events(read_page, subscriber, watermarks, *, stream_id, cursor=
     The caller owns unregistration and application metadata construction.
     """
     try:
+        watermarks = dict(watermarks)
         if cursor is not None and stream_id == '*':
             raise ValueError('A replay cursor requires one explicit stream')
         if cursor is not None:
@@ -98,6 +99,10 @@ async def stream_events(read_page, subscriber, watermarks, *, stream_id, cursor=
             replay = cursor
             replay_count = 0
             while cursor_offset(replay) < target:
+                if subscriber.closed:
+                    while not subscriber.queue.empty():
+                        yield await subscriber.get()
+                    return
                 frames, cursors, page = await asyncio.to_thread(read_page, stream_id, replay)
                 if not frames:
                     raise ValueError('Replay watermark is no longer available')
@@ -111,15 +116,25 @@ async def stream_events(read_page, subscriber, watermarks, *, stream_id, cursor=
                     replay = end
                     yield sse('frame', {'stream_id': stream_id, 'cursor': end, 'frame': frame})
                 if subscriber.closed:
-                    break
+                    while not subscriber.queue.empty():
+                        yield await subscriber.get()
+                    return
             # Validate even an empty replay against the underlying file.
             await asyncio.to_thread(read_page, stream_id, replay, limit=1)
             watermarks[stream_id] = replay
+        if subscriber.closed:
+            while not subscriber.queue.empty():
+                yield await subscriber.get()
+            return
         yield sse('ready', {'streams': watermarks, metadata_key: metadata()})
         while True:
+            if subscriber.closed and subscriber.queue.empty():
+                return
             try:
                 encoded = await asyncio.wait_for(subscriber.get(), timeout=heartbeat_seconds)
             except asyncio.TimeoutError:
+                if subscriber.closed and subscriber.queue.empty():
+                    return
                 yield sse('heartbeat', {metadata_key: metadata()})
                 continue
             if encoded.startswith(b'event: frame\n'):

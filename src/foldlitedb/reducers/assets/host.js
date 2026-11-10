@@ -2,13 +2,39 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', {fatal: true});
 export class ReducerError extends Error {}
+function wellFormedString(value) {
+  if (typeof value.isWellFormed === 'function') return value.isWellFormed();
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return false;
+  }
+  return true;
+}
 function finiteJSON(value, depth = 0) {
   if (depth > 64) throw new ReducerError('JSON nesting exceeds 64');
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (value === null || typeof value === 'boolean') return;
+  if (typeof value === 'string') {
+    if (!wellFormedString(value)) throw new ReducerError('JSON strings must contain valid Unicode scalar values');
+    return;
+  }
   if (typeof value === 'number' && Number.isFinite(value)) return;
-  if (Array.isArray(value)) { value.forEach(v => finiteJSON(v, depth + 1)); return; }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (!(i in value)) throw new ReducerError('Request must contain finite JSON values');
+      finiteJSON(value[i], depth + 1);
+    }
+    return;
+  }
   if (value && Object.getPrototypeOf(value) === Object.prototype) {
-    Object.values(value).forEach(v => finiteJSON(v, depth + 1)); return;
+    for (const [key, item] of Object.entries(value)) {
+      if (!wellFormedString(key)) throw new ReducerError('JSON strings must contain valid Unicode scalar values');
+      finiteJSON(item, depth + 1);
+    }
+    return;
   }
   throw new ReducerError('Request must contain finite JSON values');
 }
@@ -91,10 +117,21 @@ export class Reducer {
     if (encoded.length > 262144) throw new ReducerError('Request exceeds 262144 bytes');
     let result;
     try {
-      new Uint8Array(this.exports.memory.buffer, this.exports.input_ptr(), encoded.length).set(encoded);
+      const inputPtr = this.exports.input_ptr();
+      if (!Number.isSafeInteger(inputPtr) || inputPtr < 0 || inputPtr + 262144 > this.exports.memory.buffer.byteLength) {
+        throw new ReducerError('Input buffer out of bounds');
+      }
+      new Uint8Array(this.exports.memory.buffer, inputPtr, encoded.length).set(encoded);
       const length = this.exports.execute(encoded.length);
       if (!(length > 0 && length <= 65536)) throw new ReducerError('Invalid reducer response length');
-      result = JSON.parse(decoder.decode(new Uint8Array(this.exports.memory.buffer, this.exports.output_ptr(), length)));
+      const outputPtr = this.exports.output_ptr();
+      if (!Number.isSafeInteger(outputPtr) || outputPtr < 0 || outputPtr + length > this.exports.memory.buffer.byteLength) {
+        throw new ReducerError('Output buffer out of bounds');
+      }
+      if (inputPtr < outputPtr + length && outputPtr < inputPtr + 262144) {
+        throw new ReducerError('ABI buffers must not overlap');
+      }
+      result = JSON.parse(decoder.decode(new Uint8Array(this.exports.memory.buffer, outputPtr, length)));
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) this.failed = true;
       throw error;

@@ -119,11 +119,15 @@ class AppendJournal:
         """Flush a committed append boundary and return its offset and digest."""
         if self.failed:
             raise OSError('Cannot commit an incomplete document write')
-        with self.path.open('r+b') as source:
-            if os.fstat(source.fileno()).st_size != self.offset:
-                raise ValueError('Document log changed outside its writer')
-            os.fsync(source.fileno())
-        sync_directory(self.path.parent)
+        try:
+            with self.path.open('r+b') as source:
+                if os.fstat(source.fileno()).st_size != self.offset:
+                    raise ValueError('Document log changed outside its writer')
+                os.fsync(source.fileno())
+            sync_directory(self.path.parent)
+        except BaseException:
+            self.failed = True
+            raise
         return {'offset': self.offset, 'sha256': self.digest.hexdigest()}
 
 
