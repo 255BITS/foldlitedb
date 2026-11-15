@@ -130,6 +130,20 @@ across successive `add` calls must produce equivalent state. Implement `merge`
 only when independently covered compatible states can be combined correctly;
 an ordered lifecycle fold need not be mergeable.
 
+A descriptor may opt in to `reduce_groups: true`. The optional operation accepts
+up to 32 independent previous-state/contribution groups and returns their new
+states and finalized results in request order. An omitted previous state asks
+for identity; null remains an ordinary state. Opt-in views must produce equivalent
+results across operation/chunk boundaries and retries, without dependence on
+other groups, hidden globals, or JSON object member enumeration order, and must
+isolate mutating finalizers from retained state. New-group responses include the
+serialized identity for host validation. Host chunks obey the existing byte,
+data-depth, memory, and fuel bounds; exact capacity signals (`{"split": true}`)
+or native fuel exhaustion split a chunk recursively, and singleton capacity
+falls back to ordinary `identity`/`add`/`finalize` operations. Other failures
+reject the staged batch atomically. Legacy descriptors retain separate
+fresh-instance calls.
+
 The exact module SHA-256 binds cached state to computation, state schema, compiler,
 and SDK runtime. Human-readable view and state versions explain changes but do
 not override a changed digest. Preserve the previous module to reproduce its
