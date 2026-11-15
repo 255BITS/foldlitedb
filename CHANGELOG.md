@@ -2,10 +2,16 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.4.1. Each version links its GitHub release;
+before moving existing databases to 0.4.2. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
+
+## [0.4.2](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.2) — 2026-11-15
+
+### Grouped portable view reduction
+
+- Add optional `reduce_groups: true` support to portable view ABI v1 across the native Rust engine (`foldlitedb-portable-engine`) and browser worker runtime (`portable_assets/host.js` and `worker.js`). Views opting in fold up to 32 groups per fresh Wasm instantiation via `{"op": "reduce_groups", "groups": [...]}` with automatic recursive binary splitting on 256 KiB ABI capacity, Wasmi fuel exhaustion, or explicit `{"ok": {"split": true}}` responses, amortizing linear-memory allocation across high-cardinality batches while preserving fresh-global isolation and identical per-key state/result checkpoints. Bundled views and existing `FOLDLOG2` / `.cache` artifacts remain unchanged.
 
 ## [0.4.1](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.1) — 2026-11-10
 
