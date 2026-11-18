@@ -7,6 +7,8 @@ the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
 
+- Publish the tested source tag to GitHub Releases after a new version's distributions reach PyPI.
+
 ## [0.4.2](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.2) — 2026-11-15
 
 ### Grouped portable view reduction
