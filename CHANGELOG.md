@@ -2,10 +2,28 @@
 
 Release dates below are UTC publication dates. See the
 [step-by-step upgrade guide](https://255bits.github.io/foldlitedb/upgrading.html)
-before moving existing databases to 0.4.2. Each version links its GitHub release;
+before moving existing databases to 0.5.0. Each version links its GitHub release;
 the 0.2.0 release also includes a receipt for its tested distributions.
 
 ## Unreleased
+
+## [0.5.0](https://github.com/255BITS/foldlitedb/releases/tag/v0.5.0) — 2026-11-22
+
+### Portable AssemblyScript SDK and bundled views
+
+- Implement optional ABI v1 `reduce_groups` in the AssemblyScript SDK (`views/assembly/sdk/index.ts`) with opt-in `reduceGroups` descriptor advertising (`"reduce_groups": true`), new-group-only `identity` emission, mutation isolation across `add()` and `finalize()`, direct `OUTPUT` buffer encoding with `{"ok": {"split": true}}` capacity fallback, and depth-0 per-group validation. Opt bundled `metrics` (with non-mutating `finalize()` and single-lookup validation) and `catalogue` into `reduce_groups: true`.
+- Collapse the SDK JSON pipeline into a single-pass strict RFC 8259 parser (`views/assembly/sdk/parse.ts`) with zero-escape string slicing, direct UTF-16 escape decoding, a stack-`u64` fast path in `number.ts`, a `hasRun`-guarded `__collect()`, and lowered initial linear memory (`--initialMemory 10`). Rebuild bundled `metrics`, `catalogue`, and `documents` Wasm assets; existing `FOLDLOG2` logs require no migration and automatically rebuild their disposable `.cache` on first open.
+
+### Native Rust engine, storage, and PyO3 bridge
+
+- Optimize native engine hot paths (`native/engine/`) with single-pass payload validation/normalization and lazy `canonical_json` on replay, typed `stage_retained` for replay/rebuild, `HashMap` indexes with borrowed lookup keys (`IdentityLookup`/`PositionLookup`), owned `map_documents` tuples, `query()` key/token reuse, direct JSON string escaping with a `< U+E000` UTF-16 sort skip in `canonical_json`, direct `Map::iter().zip` in `compare_json_keys`, and zero-copy Wasm response parsing/validation.
+- Optimize storage and warm reopen (`storage.rs`, `state.rs`) by placing `BufWriter` outside `DigestWriter` in `checkpoint`, using `<= 64 MiB` `from_slice` in `load_checkpoint`, streaming prefix verification in `Engine::open` without buffering all cached batches simultaneously, reusing frame/payload buffers in `BufReader`-backed log scanning, backfilling log headers in place on `append`, and skipping duplicate key re-parsing in `validate_and_index`. Modularize `native/engine/src/` into `json.rs`, `callback.rs`, `state.rs`, and `wasm.rs`.
+- Add a direct PyO3 value bridge (`Engine::execute`), yield-time snapshotting `NativeBatch` (`Engine::execute_batch`), and lightweight `Engine::cursor()` (`NativeEngine::current_cursor()`) while keeping `execute_json` 100% backwards-compatible.
+
+### Python API and browser worker
+
+- Speed up Python JSON validation/cloning (`_encode`, `_copy`, `_clone_trusted`), cache `_RegisteredView.signature`, add `CompiledSelector` with O(1) exact-key lookup and single `key_order` computation per key in `_query.py`/`_callbacks.py`, extract callback helpers into `_callbacks.py`, unify `_canonical_json`, and wire `Database` hot paths through the direct PyO3 bridge.
+- Replace O(N²) full-`Map` copies in `portable_assets/worker.js` with per-batch overlay staging and atomic rollback, skip redundant validation via `canonicalValidated()`, hoist `TextEncoder` in `client.js`, use binary search (`partitionPoint`) for `documents` and `changes` pagination, and deduplicate `scalarCompare` with a zero-allocation `codePointAt` implementation plus `isWellFormed()` fast path in `host.js`.
 
 ## [0.4.2](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.2) — 2026-11-15
 
