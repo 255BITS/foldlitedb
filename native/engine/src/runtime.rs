@@ -1,9 +1,14 @@
 //! Import-free ABI-v1 Wasm execution with bounded memory, input, output and fuel.
+use crate::{
+    json::integer_is_exact_double,
+    wasm::{compile_module, new_store},
+    MAX_JSON_DEPTH,
+};
+use serde::Serialize;
 use serde_json::{json, Value};
-use wasmi::{Config, Engine, ExternType, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmi::{Engine, Instance, Module};
 
 pub const BUFFER_SIZE: usize = 262_144;
-const MAX_MEMORY: usize = 16 * 1024 * 1024;
 // Wasmi 2 meters input Wasm operations, rather than interpreter bytecode. The
 // 249,882-byte/1,024-document metrics map fixture consumes 423,077,088 units;
 // 500M leaves bounded headroom for requests near the 256 KiB ABI capacity.
@@ -37,6 +42,32 @@ impl CallError {
     }
 }
 
+// Keep struct field order strictly alphabetical so serialized JSON matches
+// `serde_json::Map` key order byte-for-byte.
+#[derive(Serialize)]
+struct OpRequest {
+    op: &'static str,
+}
+
+#[derive(Serialize)]
+struct AddRequest<'a> {
+    op: &'static str,
+    state: &'a Value,
+    values: &'a Value,
+}
+
+#[derive(Serialize)]
+struct FinalizeRequest<'a> {
+    op: &'static str,
+    state: &'a Value,
+}
+
+#[derive(Serialize)]
+struct ReduceGroupsRequest<'a> {
+    groups: &'a [Value],
+    op: &'static str,
+}
+
 pub struct Runtime {
     engine: Engine,
     module: Module,
@@ -45,31 +76,16 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > 16 * 1024 * 1024 {
-            return Err("Wasm module exceeds 16 MiB".into());
-        }
-        let mut config = Config::default();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config);
-        let module =
-            Module::new(&engine, bytes).map_err(|e| format!("Invalid Wasm module: {e}"))?;
-        if module.imports().next().is_some() {
-            return Err("Portable view modules must not import host functions or memory".into());
-        }
-        let memory = module
-            .exports()
-            .find(|e| e.name() == "memory")
-            .ok_or("Wasm module must export memory")?;
-        match memory.ty() {
-            ExternType::Memory(memory) if memory.maximum().is_some_and(|n| n <= 256) => {}
-            _ => return Err("Wasm memory must declare a maximum of at most 16 MiB".into()),
-        }
+        let (engine, module) = compile_module(
+            bytes,
+            "Portable view modules must not import host functions or memory",
+        )?;
         let mut runtime = Self {
             engine,
             module,
             descriptor: Value::Null,
         };
-        let descriptor = runtime.call(json!({"op":"descriptor"}))?;
+        let descriptor = runtime.call_serialized("descriptor", &OpRequest { op: "descriptor" })?;
         if !descriptor.is_object()
             || descriptor.get("abi").and_then(Value::as_u64) != Some(1)
             || descriptor
@@ -95,17 +111,12 @@ impl Runtime {
         Ok(runtime)
     }
 
-    pub fn call(&self, request: Value) -> Result<Value, String> {
-        self.call_inner(request).map_err(CallError::message)
+    pub fn call_serialized<T: Serialize>(&self, op: &str, request: &T) -> Result<Value, String> {
+        self.call_inner(op, request).map_err(CallError::message)
     }
 
-    fn call_inner(&self, request: Value) -> Result<Value, CallError> {
-        let op = request
-            .get("op")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
-        let input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+    fn call_inner<T: Serialize>(&self, op: &str, request: &T) -> Result<Value, CallError> {
+        let input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
         if input.len() > BUFFER_SIZE {
             return Err(CallError::Capacity(format!(
                 "Wasm {op} request is {} bytes, which exceeds the {BUFFER_SIZE}-byte ABI limit \
@@ -114,16 +125,7 @@ impl Runtime {
             )));
         }
         // A fresh instance makes each operation independent of hidden guest globals.
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(MAX_MEMORY)
-            .instances(1)
-            .memories(1)
-            .tables(1)
-            .table_elements(100_000)
-            .build();
-        let mut store: Store<StoreLimits> = Store::new(&self.engine, limits);
-        store.limiter(|limits| limits);
-        store.set_fuel(CALL_FUEL).map_err(|e| e.to_string())?;
+        let mut store = new_store(&self.engine, CALL_FUEL)?;
         let instance = Instance::new(&mut store, &self.module, &[])
             .map_err(|e| format!("Wasm startup failed: {e}"))?;
         let version = instance
@@ -203,11 +205,8 @@ impl Runtime {
         {
             return Err("Wasm output buffer must be in bounds and disjoint from input".into());
         }
-        let mut output = vec![0; output_len];
-        memory
-            .read(&store, output_ptr, &mut output)
-            .map_err(|e| e.to_string())?;
-        let envelope: Value = serde_json::from_slice(&output)
+        let output = &memory.data(&store)[output_ptr..output_ptr + output_len];
+        let mut envelope: Value = serde_json::from_slice(output)
             .map_err(|e| format!("Invalid Wasm response JSON: {e}"))?;
         if op == "reduce_groups" {
             validate_group_response(&envelope)?;
@@ -215,7 +214,7 @@ impl Runtime {
             validate_response_json(&envelope, 0)?;
         }
         let object = envelope
-            .as_object()
+            .as_object_mut()
             .filter(|object| object.len() == 1)
             .ok_or("Wasm response must contain exactly one ok or error field")?;
         if let Some(error) = object.get("error") {
@@ -224,7 +223,7 @@ impl Runtime {
                 .ok_or("Wasm error envelope must contain a string")?;
             return Err(format!("View rejected operation: {message}").into());
         }
-        envelope.get("ok").cloned().ok_or_else(|| {
+        object.remove("ok").ok_or_else(|| {
             CallError::Failure("Wasm response requires an ok or error envelope".into())
         })
     }
@@ -246,12 +245,29 @@ impl Runtime {
     }
 
     fn reduce_one(&self, group: &Value) -> Result<(Value, Value), String> {
-        let state = match group.get("state") {
-            Some(state) => state.clone(),
-            None => self.call(json!({"op":"identity"}))?,
+        let owned_identity;
+        let state_ref = match group.get("state") {
+            Some(state) => state,
+            None => {
+                owned_identity = self.call_serialized("identity", &OpRequest { op: "identity" })?;
+                &owned_identity
+            }
         };
-        let state = self.call(json!({"op":"add","state":state,"values":group["values"]}))?;
-        let result = self.call(json!({"op":"finalize","state":state}))?;
+        let state = self.call_serialized(
+            "add",
+            &AddRequest {
+                op: "add",
+                state: state_ref,
+                values: &group["values"],
+            },
+        )?;
+        let result = self.call_serialized(
+            "finalize",
+            &FinalizeRequest {
+                op: "finalize",
+                state: &state,
+            },
+        )?;
         Ok((state, result))
     }
 
@@ -275,8 +291,11 @@ impl Runtime {
         groups: &[Value],
         output: &mut Vec<(Value, Value)>,
     ) -> Result<(), String> {
-        let request = json!({"op":"reduce_groups","groups":groups});
-        let response = match self.call_inner(request) {
+        let request = ReduceGroupsRequest {
+            groups,
+            op: "reduce_groups",
+        };
+        let mut response = match self.call_inner("reduce_groups", &request) {
             Ok(response) => response,
             Err(CallError::Capacity(_)) => return self.split_groups(groups, output),
             Err(error) => return Err(error.message()),
@@ -284,31 +303,35 @@ impl Runtime {
         if response == json!({"split":true}) {
             return self.split_groups(groups, output);
         }
-        let rows = response
-            .as_object()
+        let rows = match response
+            .as_object_mut()
             .filter(|object| object.len() == 1)
-            .and_then(|object| object.get("groups"))
-            .and_then(Value::as_array)
-            .filter(|rows| rows.len() == groups.len())
-            .ok_or(
-                "reduce_groups must return one state/result per group or an exact split signal",
-            )?;
-        for (row, input) in rows.iter().zip(groups) {
+            .and_then(|object| object.remove("groups"))
+        {
+            Some(Value::Array(rows)) if rows.len() == groups.len() => rows,
+            _ => {
+                return Err(
+                    "reduce_groups must return one state/result per group or an exact split signal"
+                        .into(),
+                );
+            }
+        };
+        for (mut row, input) in rows.into_iter().zip(groups) {
             let new_group = input.get("state").is_none();
             let object = row
-                .as_object()
+                .as_object_mut()
                 .filter(|object| object.len() == if new_group { 3 } else { 2 })
                 .filter(|object| object.contains_key("identity") == new_group)
                 .ok_or(
                     "A reduced group must contain state/result and identity only for a new group",
                 )?;
             let state = object
-                .get("state")
+                .remove("state")
                 .ok_or("A reduced group requires state")?;
             let result = object
-                .get("result")
+                .remove("result")
                 .ok_or("A reduced group requires result")?;
-            output.push((state.clone(), result.clone()));
+            output.push((state, result));
         }
         Ok(())
     }
@@ -317,29 +340,41 @@ impl Runtime {
 // Transport levels must not shrink the legacy per-response data depth budget.
 // Shape validation in reduce_chunk rejects any other success payload.
 fn validate_group_response(envelope: &Value) -> Result<(), String> {
-    let groups = envelope
-        .get("ok")
-        .and_then(|value| value.get("groups"))
-        .and_then(Value::as_array);
-    if let Some(groups) = groups {
-        for group in groups {
-            if let Some(identity) = group.get("identity") {
-                validate_response_json(identity, 1)?;
+    let Some(top) = envelope.as_object() else {
+        return validate_response_json(envelope, 0);
+    };
+    let Some(ok_obj) = top.get("ok").and_then(Value::as_object) else {
+        return validate_response_json(envelope, 0);
+    };
+    let Some(groups) = ok_obj.get("groups").and_then(Value::as_array) else {
+        return validate_response_json(envelope, 0);
+    };
+    for group in groups {
+        if let Some(obj) = group.as_object() {
+            for (key, value) in obj {
+                if matches!(key.as_str(), "identity" | "state" | "result") {
+                    validate_response_json(value, 1)?;
+                } else {
+                    validate_response_json(value, 3)?;
+                }
             }
-            if let Some(state) = group.get("state") {
-                validate_response_json(state, 1)?;
-            }
-            if let Some(result) = group.get("result") {
-                validate_response_json(result, 1)?;
-            }
+        } else {
+            validate_response_json(group, 3)?;
         }
-        // Validate unknown fields too, so malformed responses cannot hide values.
-        let mut shell = envelope.clone();
-        shell["ok"]["groups"] = json!([]);
-        validate_response_json(&shell, 0)
-    } else {
-        validate_response_json(envelope, 0)
     }
+    // Validate sibling/unknown fields in place so malformed responses cannot hide
+    // invalid values without cloning the entire envelope.
+    for (key, value) in top {
+        if key != "ok" {
+            validate_response_json(value, 1)?;
+        }
+    }
+    for (key, value) in ok_obj {
+        if key != "groups" {
+            validate_response_json(value, 2)?;
+        }
+    }
+    Ok(())
 }
 
 // Guests have JavaScript number semantics, and JavaScript-style serializers
@@ -349,7 +384,7 @@ fn validate_group_response(envelope: &Value) -> Result<(), String> {
 // other inexact integer, such as 9007199254740993 from 64-bit integer
 // arithmetic, cannot come from a double and would otherwise be silently rounded.
 fn guest_integer_is_double(number: &serde_json::Number) -> bool {
-    crate::integer_is_exact_double(number)
+    integer_is_exact_double(number)
         || number
             .as_f64()
             .is_some_and(|value| ryu_js::Buffer::new().format_finite(value) == number.to_string())
@@ -358,8 +393,10 @@ fn guest_integer_is_double(number: &serde_json::Number) -> bool {
 // Match the browser finiteJSON depth convention: the envelope starts at zero,
 // and every array element/object property adds one, including primitive leaves.
 fn validate_response_json(value: &Value, depth: usize) -> Result<(), String> {
-    if depth > 64 {
-        return Err("Wasm response JSON nesting exceeds 64".into());
+    if depth > MAX_JSON_DEPTH {
+        return Err(format!(
+            "Wasm response JSON nesting exceeds {MAX_JSON_DEPTH}"
+        ));
     }
     match value {
         Value::Number(number) if !number.as_f64().is_some_and(f64::is_finite) => {

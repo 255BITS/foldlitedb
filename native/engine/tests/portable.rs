@@ -737,3 +737,46 @@ fn shared_host_conformance_corpus_covers_sources_depth_and_output_buffers() {
         }
     }
 }
+
+#[test]
+fn lazy_canonical_replay_accepts_equivalent_numbers_and_rejects_conflicts() {
+    use foldlitedb_portable_engine::ErrorKind;
+
+    let mut engine = Engine::open(":memory:", METRICS).unwrap();
+    execute(
+        &mut engine,
+        json!({"op":"ingest","documents":[
+            {"id":"d1","source":"s","position":0,"payload":{"metric":"m","value":12,"zero":0,"big":9007199254740992u64}}
+        ]}),
+    );
+    // Equivalent numeric spellings (-0.0 vs 0, 12.0 vs 12, float vs exact integer > 2^53)
+    // and different key order must replay as identical.
+    let replay = execute(
+        &mut engine,
+        json!({"op":"ingest","documents":[
+            {"id":"d1","source":"s","payload":{"big":9007199254740992.0,"zero":-0.0,"value":12.0,"metric":"m"}},
+            {"source":"s","position":0,"payload":{"metric":"m","value":12.0,"zero":0.0,"big":9007199254740992.0}}
+        ]}),
+    );
+    assert_eq!(replay["inserted"], 0);
+    assert_eq!(replay["replayed"], 2);
+
+    // Conflicting payload against committed state (by id and by position).
+    for conflict_req in [
+        json!({"op":"ingest","documents":[
+            {"id":"d1","source":"s","payload":{"metric":"m","value":13,"zero":0,"big":9007199254740992u64}}
+        ]}),
+        json!({"op":"ingest","documents":[
+            {"source":"s","position":0,"payload":{"metric":"m","value":12,"zero":1,"big":9007199254740992u64}}
+        ]}),
+        // Conflicting replay within the same batch after a new insert.
+        json!({"op":"ingest","documents":[
+            {"id":"d2","source":"s","position":1,"payload":{"metric":"m","value":1}},
+            {"id":"d2","source":"s","position":1,"payload":{"metric":"m","value":2}}
+        ]}),
+    ] {
+        let err = engine.execute_typed(conflict_req).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DocumentConflict, "{}", err.message);
+    }
+    assert_eq!(execute(&mut engine, json!({"op":"stats"}))["documents"], 1);
+}

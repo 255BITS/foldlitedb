@@ -28,13 +28,13 @@ impl Engine {
             .map_err(|err| PyValueError::new_err(("DatabaseError", err)))
     }
 
-    fn execute_json(&self, py: Python<'_>, request: String) -> PyResult<String> {
+    fn execute_json(&self, py: Python<'_>, request: &str) -> PyResult<String> {
         py.detach(|| {
             if request.len() as u64 > MAX_CACHE_BYTES {
                 return Err(EngineError::database("Native request exceeds 1 GiB"));
             }
             let request =
-                serde_json::from_str(&request).map_err(|e| EngineError::database(e.to_string()))?;
+                serde_json::from_str(request).map_err(|e| EngineError::database(e.to_string()))?;
             let mut engine = self
                 .inner
                 .lock()
@@ -65,7 +65,7 @@ impl NativeReducer {
         })
     }
 
-    fn execute_json(&self, py: Python<'_>, request: String) -> PyResult<String> {
+    fn execute_json(&self, py: Python<'_>, request: &str) -> PyResult<String> {
         py.detach(|| {
             let mut reducer = self
                 .inner
