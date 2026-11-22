@@ -953,3 +953,85 @@ fn memory_enforces_log_frame_limit_and_incremental_callback_updates_merge_groups
         ])
     );
 }
+
+fn rewrite_cache(cache_path: &Path, decoded: &Value) {
+    let payload = serde_json::to_vec(decoded).unwrap();
+    let mut bytes = b"FOLDCAC1".to_vec();
+    bytes.extend((payload.len() as u64).to_le_bytes());
+    bytes.extend(Sha256::digest(&payload));
+    bytes.extend(payload);
+    fs::write(cache_path, bytes).unwrap();
+}
+
+#[test]
+fn streaming_warm_reopen_rejects_mid_prefix_tamper_excess_batches_and_corrupt_tail() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("streaming.fold");
+    let cache_path = sibling(&path, ".cache");
+    let mut owner = open(&path);
+    for batch_idx in 0..5 {
+        add(&mut owner, &format!("doc-{batch_idx}"), batch_idx + 1);
+    }
+    let expected_sum = 15;
+    drop(owner);
+    let original_cache = fs::read(&cache_path).unwrap();
+
+    // 1. Mid-prefix document payload tamper (batch 2 of 5) triggers invalid cache + full replay.
+    let mut tampered: Value = serde_json::from_slice(&original_cache[48..]).unwrap();
+    tampered["state"]["documents"][2]["payload"]["value"] = json!(999);
+    rewrite_cache(&cache_path, &tampered);
+    let mut reopened = open(&path);
+    let stats = call(&mut reopened, json!({"op":"stats"}));
+    assert_eq!(stats["cache"]["status"], "invalid");
+    assert_eq!(stats["replay"], json!({"batches":5,"documents":5}));
+    assert_eq!(
+        call(&mut reopened, json!({"op":"query"}))["rows"][0]["result"]["sum"],
+        expected_sum
+    );
+    reopened
+        .execute(json!({"op":"close","checkpoint":false}))
+        .unwrap();
+
+    // 2. Tampered prefix digest at final cached batch boundary fails streaming verification.
+    let mut bad_prefix: Value = serde_json::from_slice(&original_cache[48..]).unwrap();
+    bad_prefix["prefix"][0] = json!(bad_prefix["prefix"][0].as_u64().unwrap() ^ 1);
+    rewrite_cache(&cache_path, &bad_prefix);
+    let mut reopened = open(&path);
+    let stats = call(&mut reopened, json!({"op":"stats"}));
+    assert_eq!(stats["cache"]["status"], "invalid");
+    assert_eq!(stats["replay_batches"], 5);
+    assert_eq!(
+        call(&mut reopened, json!({"op":"query"}))["rows"][0]["result"]["sum"],
+        expected_sum
+    );
+    reopened
+        .execute(json!({"op":"close","checkpoint":false}))
+        .unwrap();
+
+    // 3. Cache claiming more batches than exist in the log is rejected cleanly.
+    let mut excess: Value = serde_json::from_slice(&original_cache[48..]).unwrap();
+    excess["batches"] = json!(6);
+    rewrite_cache(&cache_path, &excess);
+    let mut reopened = open(&path);
+    let stats = call(&mut reopened, json!({"op":"stats"}));
+    assert_eq!(stats["cache"]["status"], "invalid");
+    assert_eq!(stats["replay_batches"], 5);
+    assert_eq!(
+        call(&mut reopened, json!({"op":"query"}))["rows"][0]["result"]["sum"],
+        expected_sum
+    );
+    reopened
+        .execute(json!({"op":"close","checkpoint":false}))
+        .unwrap();
+
+    // 4. Even when the cache mismatches early (batch 0), corruption in a later
+    // log frame must still fail Engine::open rather than being skipped.
+    let mut early_mismatch: Value = serde_json::from_slice(&original_cache[48..]).unwrap();
+    early_mismatch["state"]["documents"][0]["payload"]["value"] = json!(777);
+    rewrite_cache(&cache_path, &early_mismatch);
+    let mut corrupt_log = fs::read(&path).unwrap();
+    *corrupt_log.last_mut().unwrap() ^= 1;
+    fs::write(&path, &corrupt_log).unwrap();
+    let err = Engine::open(path.to_str().unwrap(), METRICS).err().unwrap();
+    assert!(err.contains("checksum"), "{err}");
+}

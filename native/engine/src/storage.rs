@@ -1,10 +1,14 @@
 //! Immutable, checksummed batches are authoritative; checkpoints are disposable.
-use crate::{Result, RetainedDocument, State};
+use crate::{
+    state::{validate_record, IdentityKey, RetainedDocument, State},
+    Result, MAX_BATCH_DOCUMENTS,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -19,6 +23,8 @@ const HEADER_SIZE: u64 = 56;
 const FRAME_HEADER: usize = 84;
 const LEGACY_FRAME_HEADER: usize = 52;
 const CACHE_HEADER: u64 = 48;
+const IO_BUF_CAPACITY: usize = 65_536;
+const SLICE_LOAD_LIMIT: u64 = 64 * 1024 * 1024;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -28,15 +34,9 @@ pub(crate) struct Batch {
     pub documents: Vec<RetainedDocument>,
 }
 
-pub(crate) struct VerifiedBatch {
-    pub batch: Batch,
-    pub end: u64,
-    pub digest: [u8; 32],
-}
-
-pub(crate) struct Scan {
-    pub batches: Vec<VerifiedBatch>,
-    pub recovered: u64,
+#[derive(Serialize)]
+struct BatchRef<'a> {
+    documents: &'a [&'a RetainedDocument],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -468,30 +468,37 @@ impl Storage {
             return Err("Migration source must be an existing document log".into());
         }
         let mut original = Self::open_mode(source, false, false, true)?;
-        let scan = match &mut original {
-            Self::Disk(disk) => disk.scan_with_recovery(false)?,
-            Self::Memory { .. } => unreachable!(),
-        };
-        let mut identities = std::collections::BTreeSet::new();
-        let mut checkpoints = std::collections::BTreeMap::new();
-        for verified in &scan.batches {
-            for record in &verified.batch.documents {
-                crate::validate_record(record)?;
-                if !identities.insert((record.source.clone(), record.id.clone()))
-                    || checkpoints
-                        .get(&record.source)
-                        .is_some_and(|p| record.position <= *p)
-                {
-                    return Err(
-                        "Native log has invalid immutable identities or source order".into(),
-                    );
-                }
-                checkpoints.insert(record.source.clone(), record.position);
+        let mut batches = Vec::new();
+        let mut identities = HashSet::new();
+        let mut checkpoints = BTreeMap::new();
+        match &mut original {
+            Self::Disk(disk) => {
+                disk.scan_each_with_recovery(false, |_, batch, _, _| {
+                    for record in &batch.documents {
+                        validate_record(record)?;
+                        if !identities.insert(IdentityKey {
+                            source: record.source.clone(),
+                            id: record.id.clone(),
+                        }) || checkpoints
+                            .get(&record.source)
+                            .is_some_and(|p| record.position <= *p)
+                        {
+                            return Err(
+                                "Native log has invalid immutable identities or source order"
+                                    .into(),
+                            );
+                        }
+                        checkpoints.insert(record.source.clone(), record.position);
+                    }
+                    batches.push(batch);
+                    Ok(())
+                })?;
             }
+            Self::Memory { .. } => unreachable!(),
         }
         let mut copied = Self::open_with_options(destination, false, true)?;
-        for verified in scan.batches {
-            if let Err(failure) = copied.append(verified.batch) {
+        for batch in batches {
+            if let Err(failure) = copied.append(batch) {
                 // Only this call's exclusively-created destination is removed,
                 // while its stable coordination lock remains held. Never unlink
                 // source files or an existing destination supplied by a caller.
@@ -525,52 +532,58 @@ impl Storage {
         matches!(self, Self::Disk(disk) if disk.legacy)
     }
 
-    pub fn scan(&mut self) -> Result<Scan> {
+    pub fn scan_each(
+        &mut self,
+        on_batch: impl FnMut(u64, Batch, u64, [u8; 32]) -> Result<()>,
+    ) -> Result<u64> {
+        self.scan_each_mode(true, on_batch)
+    }
+
+    pub fn scan_each_no_recovery(
+        &mut self,
+        on_batch: impl FnMut(u64, Batch, u64, [u8; 32]) -> Result<()>,
+    ) -> Result<u64> {
+        self.scan_each_mode(false, on_batch)
+    }
+
+    fn scan_each_mode(
+        &mut self,
+        recover: bool,
+        mut on_batch: impl FnMut(u64, Batch, u64, [u8; 32]) -> Result<()>,
+    ) -> Result<u64> {
         match self {
-            Self::Memory { batches } => Ok(Scan {
-                batches: batches
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(index, batch)| VerifiedBatch {
-                        batch,
-                        end: index as u64 + 1,
-                        digest: [0; 32],
-                    })
-                    .collect(),
-                recovered: 0,
-            }),
-            Self::Disk(disk) => disk.scan(),
+            Self::Memory { batches } => {
+                for (index, batch) in batches.iter().cloned().enumerate() {
+                    on_batch(index as u64, batch, index as u64 + 1, [0; 32])?;
+                }
+                Ok(0)
+            }
+            Self::Disk(disk) => disk.scan_each_with_recovery(recover, on_batch),
         }
     }
 
     pub fn append(&mut self, batch: Batch) -> Result<()> {
         match self {
             Self::Memory { batches } => {
-                struct FrameLimitWriter(usize);
-                impl Write for FrameLimitWriter {
-                    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                        self.0 = self.0.saturating_add(buf.len());
-                        if self.0 > MAX_FRAME_BYTES {
-                            return Err(std::io::Error::other("exceeds MAX_FRAME_BYTES"));
-                        }
-                        Ok(buf.len())
-                    }
-                    fn flush(&mut self) -> std::io::Result<()> {
-                        Ok(())
-                    }
-                }
-                let mut counter = FrameLimitWriter(0);
-                if serde_json::to_writer(&mut counter, &batch).is_err()
-                    || counter.0 == 0
-                    || counter.0 > MAX_FRAME_BYTES
-                {
-                    return Err("Document batch exceeds native log frame limit of 8 MiB".into());
-                }
+                validate_memory_frame(&batch)?;
                 batches.push(batch);
                 Ok(())
             }
-            Self::Disk(disk) => disk.append(batch),
+            Self::Disk(disk) => disk.append_serializable(&batch),
+        }
+    }
+
+    pub fn append_records(&mut self, documents: &[&RetainedDocument]) -> Result<()> {
+        match self {
+            Self::Memory { batches } => {
+                let batch_ref = BatchRef { documents };
+                validate_memory_frame(&batch_ref)?;
+                batches.push(Batch {
+                    documents: documents.iter().map(|&doc| doc.clone()).collect(),
+                });
+                Ok(())
+            }
+            Self::Disk(disk) => disk.append_serializable(&BatchRef { documents }),
         }
     }
 
@@ -593,18 +606,28 @@ impl Storage {
             {
                 return Err("Invalid checkpoint header".into());
             }
-            let mut reader = DigestReader {
-                reader: file.take(payload_bytes),
-                digest: Sha256::new(),
-                bytes: 0,
+            let checkpoint: Checkpoint = if payload_bytes <= SLICE_LOAD_LIMIT {
+                let mut payload = vec![0u8; payload_bytes as usize];
+                file.read_exact(&mut payload).map_err(error)?;
+                if Sha256::digest(&payload)[..] != head[16..48] {
+                    return Err("Checkpoint checksum mismatch".into());
+                }
+                serde_json::from_slice(&payload).map_err(error)?
+            } else {
+                let mut reader = DigestReader {
+                    reader: file.take(payload_bytes),
+                    digest: Sha256::new(),
+                    bytes: 0,
+                };
+                let checkpoint: Checkpoint =
+                    serde_json::from_reader(BufReader::with_capacity(IO_BUF_CAPACITY, &mut reader))
+                        .map_err(error)?;
+                std::io::copy(&mut reader, &mut std::io::sink()).map_err(error)?;
+                if reader.bytes != payload_bytes || reader.digest.finalize()[..] != head[16..48] {
+                    return Err("Checkpoint checksum mismatch".into());
+                }
+                checkpoint
             };
-            let checkpoint: Checkpoint =
-                serde_json::from_reader(std::io::BufReader::with_capacity(65536, &mut reader))
-                    .map_err(error)?;
-            std::io::copy(&mut reader, &mut std::io::sink()).map_err(error)?;
-            if reader.bytes != payload_bytes || reader.digest.finalize()[..] != head[16..48] {
-                return Err("Checkpoint checksum mismatch".into());
-            }
             Ok((checkpoint, size))
         })();
         match result {
@@ -645,16 +668,20 @@ impl Storage {
                 .map_err(error)?;
             file.write_all(&[0u8; CACHE_HEADER as usize])
                 .map_err(error)?;
-            let mut writer = DigestWriter {
-                writer: std::io::BufWriter::new(&mut file),
-                digest: Sha256::new(),
-                bytes: 0,
-            };
+            // Place BufWriter outside DigestWriter so SHA-256 updates on 64 KiB
+            // chunks instead of per-token JSON writes.
+            let mut writer = BufWriter::with_capacity(
+                IO_BUF_CAPACITY,
+                DigestWriter {
+                    writer: &mut file,
+                    digest: Sha256::new(),
+                    bytes: 0,
+                },
+            );
             serde_json::to_writer(&mut writer, &checkpoint).map_err(error)?;
-            writer.flush().map_err(error)?;
-            let bytes = writer.bytes;
-            let digest = writer.digest.clone().finalize();
-            drop(writer);
+            let inner = writer.into_inner().map_err(|e| error(e.into_error()))?;
+            let bytes = inner.bytes;
+            let digest = inner.digest.finalize();
             if bytes + CACHE_HEADER > MAX_CACHE_BYTES {
                 return Err("Checkpoint exceeds 1 GiB; log remains authoritative".into());
             }
@@ -706,12 +733,36 @@ impl Storage {
     }
 }
 
-impl Disk {
-    fn scan(&mut self) -> Result<Scan> {
-        self.scan_with_recovery(true)
+fn validate_memory_frame<T: Serialize>(value: &T) -> Result<()> {
+    struct FrameLimitWriter(usize);
+    impl Write for FrameLimitWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            if self.0 > MAX_FRAME_BYTES {
+                return Err(std::io::Error::other("exceeds MAX_FRAME_BYTES"));
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
+    let mut counter = FrameLimitWriter(0);
+    if serde_json::to_writer(&mut counter, value).is_err()
+        || counter.0 == 0
+        || counter.0 > MAX_FRAME_BYTES
+    {
+        return Err("Document batch exceeds native log frame limit of 8 MiB".into());
+    }
+    Ok(())
+}
 
-    fn scan_with_recovery(&mut self, recover: bool) -> Result<Scan> {
+impl Disk {
+    fn scan_each_with_recovery(
+        &mut self,
+        recover: bool,
+        mut on_batch: impl FnMut(u64, Batch, u64, [u8; 32]) -> Result<()>,
+    ) -> Result<u64> {
         if self.poisoned {
             return Err("Native log writer is poisoned; close and reopen".into());
         }
@@ -722,7 +773,6 @@ impl Disk {
         );
         let mut offset = HEADER_SIZE;
         let mut prefix: [u8; 32] = Sha256::digest(bytes).into();
-        let mut batches = Vec::new();
         self.file.seek(SeekFrom::Start(offset)).map_err(error)?;
         let frame_header = if self.legacy {
             LEGACY_FRAME_HEADER
@@ -734,10 +784,14 @@ impl Disk {
         } else {
             FRAME_MAGIC
         };
+        let mut reader = BufReader::with_capacity(IO_BUF_CAPACITY, &mut self.file);
+        let mut head_buf = [0u8; FRAME_HEADER];
+        let mut payload = Vec::new();
+        let mut batch_count = 0u64;
         while offset < length {
             if length - offset < frame_header as u64 {
-                let mut fragment = vec![0u8; (length - offset) as usize];
-                self.file.read_exact(&mut fragment).map_err(error)?;
+                let fragment = &mut head_buf[..(length - offset) as usize];
+                reader.read_exact(fragment).map_err(error)?;
                 if fragment[..fragment.len().min(4)] != frame_magic[..fragment.len().min(4)] {
                     return Err(format!(
                         "Native log partial frame header corrupt at byte {offset}"
@@ -766,8 +820,8 @@ impl Disk {
                 }
                 break;
             }
-            let mut head = vec![0u8; frame_header];
-            self.file.read_exact(&mut head).map_err(error)?;
+            let head = &mut head_buf[..frame_header];
+            reader.read_exact(head).map_err(error)?;
             let size = u64::from_le_bytes(head[4..12].try_into().unwrap());
             let inverse = u64::from_le_bytes(head[12..20].try_into().unwrap());
             if &head[..4] != frame_magic
@@ -785,24 +839,22 @@ impl Disk {
             if length - offset - (frame_header as u64) < size {
                 break;
             }
-            let mut payload = vec![0u8; size as usize];
-            self.file.read_exact(&mut payload).map_err(error)?;
+            payload.resize(size as usize, 0);
+            reader.read_exact(&mut payload).map_err(error)?;
             if Sha256::digest(&payload)[..] != head[20..52] {
                 return Err(format!("Native log checksum mismatch at byte {offset}"));
             }
             let batch: Batch = serde_json::from_slice(&payload)
                 .map_err(|e| format!("Native log invalid batch at byte {offset}: {e}"))?;
-            if batch.documents.is_empty() || batch.documents.len() > 1024 {
+            if batch.documents.is_empty() || batch.documents.len() > MAX_BATCH_DOCUMENTS {
                 return Err("Native log batch document count is corrupt".into());
             }
-            prefix = chained_parts(&prefix, &head, &payload);
+            prefix = chained_parts(&prefix, head, &payload);
             offset += (head.len() + payload.len()) as u64;
-            batches.push(VerifiedBatch {
-                batch,
-                end: offset,
-                digest: prefix,
-            });
+            on_batch(batch_count, batch, offset, prefix)?;
+            batch_count += 1;
         }
+        drop(reader);
         let recovered = length - offset;
         if recovered > 0 {
             if !recover && !self.legacy {
@@ -816,28 +868,31 @@ impl Disk {
         self.file.seek(SeekFrom::Start(offset)).map_err(error)?;
         self.offset = offset;
         self.prefix = prefix;
-        self.batches = batches.len() as u64;
-        Ok(Scan { batches, recovered })
+        self.batches = batch_count;
+        Ok(recovered)
     }
 
-    fn append(&mut self, batch: Batch) -> Result<()> {
+    fn append_serializable<T: Serialize>(&mut self, payload_value: &T) -> Result<()> {
         if self.poisoned {
             return Err("Native log writer is poisoned; close and reopen".into());
         }
         if self.legacy {
             return Err("Legacy FOLDLOG1 is read-only; copy it with Database.migrate(source, destination) before appending".into());
         }
-        let payload = serde_json::to_vec(&batch).map_err(error)?;
-        if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
+        let mut frame = Vec::with_capacity(FRAME_HEADER + 256);
+        frame.resize(FRAME_HEADER, 0);
+        serde_json::to_writer(&mut frame, payload_value).map_err(error)?;
+        let payload_len = frame.len() - FRAME_HEADER;
+        if payload_len == 0 || payload_len > MAX_FRAME_BYTES {
             return Err("Document batch exceeds native log frame limit of 8 MiB".into());
         }
-        let size = payload.len() as u64;
-        let mut frame = FRAME_MAGIC.to_vec();
-        frame.extend(size.to_le_bytes());
-        frame.extend((!size).to_le_bytes());
-        frame.extend(Sha256::digest(&payload));
-        frame.extend(self.prefix);
-        frame.extend(payload);
+        let size = payload_len as u64;
+        let checksum: [u8; 32] = Sha256::digest(&frame[FRAME_HEADER..]).into();
+        frame[0..4].copy_from_slice(FRAME_MAGIC);
+        frame[4..12].copy_from_slice(&size.to_le_bytes());
+        frame[12..20].copy_from_slice(&(!size).to_le_bytes());
+        frame[20..52].copy_from_slice(&checksum);
+        frame[52..84].copy_from_slice(&self.prefix);
         let result = (|| -> Result<()> {
             if self.file.metadata().map_err(error)?.len() != self.offset {
                 return Err("Native log changed outside the active writer".into());

@@ -1,5 +1,8 @@
 //! Portable JSON collation and selector-bound query pagination.
-use crate::{canonical_json, validate_exact_integers, validate_json, Result};
+use crate::{
+    json::{canonical_json, validate_exact_integers, validate_json},
+    Result,
+};
 use serde_json::{json, Map, Value};
 use std::{cmp::Ordering, ops::Bound};
 
@@ -40,12 +43,9 @@ pub fn compare_json_keys(left: &Value, right: &Value) -> Ordering {
             left.len().cmp(&right.len())
         }
         (Value::Object(left), Value::Object(right)) => {
-            let mut left_members: Vec<_> = left.iter().collect();
-            let mut right_members: Vec<_> = right.iter().collect();
-            left_members.sort_by(|a, b| a.0.cmp(b.0));
-            right_members.sort_by(|a, b| a.0.cmp(b.0));
-            for ((left_name, left), (right_name, right)) in left_members.iter().zip(&right_members)
-            {
+            // `serde_json::Map` without `preserve_order` is a `BTreeMap`
+            // already sorted by `String::cmp` (Unicode scalar order).
+            for ((left_name, left), (right_name, right)) in left.iter().zip(right.iter()) {
                 let order = left_name
                     .cmp(right_name)
                     .then_with(|| compare_json_keys(left, right));
@@ -304,5 +304,59 @@ mod tests {
             .is_ok());
         key = json!([key]);
         assert!(Selector::parse(&json!({"start_key":key})).is_err());
+    }
+
+    #[test]
+    fn serde_json_map_iterates_in_unicode_scalar_order_for_compare_json_keys() {
+        let mut map = Map::new();
+        for key in [
+            "\u{10ffff}",
+            "\u{10000}",
+            "\u{e000}",
+            "\u{d7ff}",
+            "z",
+            "a",
+            "",
+        ] {
+            map.insert(key.into(), json!(1));
+        }
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        let mut expected = keys.clone();
+        expected.sort();
+        assert_eq!(
+            keys, expected,
+            "serde_json::Map must iterate in String::cmp order without preserve_order"
+        );
+        assert_eq!(
+            keys,
+            vec![
+                "",
+                "a",
+                "z",
+                "\u{d7ff}",
+                "\u{e000}",
+                "\u{10000}",
+                "\u{10ffff}"
+            ]
+        );
+
+        // Scalar order places U+E000 before U+10000 (unlike UTF-16 canonical_json).
+        assert_eq!(
+            compare_json_keys(&json!({"\u{e000}": 1}), &json!({"\u{10000}": 1})),
+            Ordering::Less
+        );
+        // Insertion order does not affect object equality or member-value comparison.
+        assert_eq!(
+            compare_json_keys(&json!({"b": 1, "a": 2}), &json!({"a": 2.0, "b": 1.0})),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_json_keys(&json!({"a": 1}), &json!({"a": 1, "b": 0})),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_json_keys(&json!({"a": 1, "c": 0}), &json!({"a": 1, "b": 999})),
+            Ordering::Greater
+        );
     }
 }

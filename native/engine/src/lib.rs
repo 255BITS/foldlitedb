@@ -1,17 +1,33 @@
 //! An immutable native document log with disposable portable Wasm view caches.
+mod callback;
+mod json;
 mod query;
 pub mod reducer;
 mod runtime;
+mod state;
 mod storage;
+mod wasm;
 
+pub use json::canonical_json;
 pub use query::compare_json_keys;
-use query::{QueryKey, Selector};
 pub use reducer::ReducerInstance;
+
+use callback::{apply_callback_updates, callback_checkpoints, callback_updates};
+use json::{
+    next_sequence, normalize_canonical_numbers, normalize_json_numbers, optional_string_remove,
+    page_limit, parse_after, safe_integer, validate_and_normalize_payload, validate_exact_integers,
+    validate_json,
+};
+use query::{QueryKey, Selector};
 use runtime::Runtime;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde::Serialize;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use state::{
+    document_value, get_identity, get_position, version_value, version_value_with_key, Document,
+    IdentityKey, PositionKey, RetainedDocument, Stage, State, Version,
+};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap};
 use storage::{Batch, Storage};
 use uuid::Uuid;
 
@@ -123,287 +139,58 @@ impl From<&str> for EngineError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RetainedDocument {
-    id: String,
-    source: String,
-    position: u64,
-    payload: Value,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Document {
-    #[serde(flatten)]
-    record: RetainedDocument,
-    sequence: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Version {
-    key: String,
-    state: Value,
-    result: Value,
-    sequence: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BatchBoundary {
-    documents: usize,
-    sequence: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CallbackGroup {
-    key: Value,
-    state: Value,
-    result: Value,
-    sequence: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCallbackCheckpoint {
-    format: u64,
-    descriptor: Value,
-    sequence: u64,
-    groups: Vec<CallbackGroup>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct CallbackCheckpoint {
-    format: u64,
-    descriptor: Value,
-    sequence: u64,
-    groups: BTreeMap<String, CallbackGroup>,
-}
-
-impl Serialize for CallbackCheckpoint {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Encoded<'a> {
-            format: u64,
-            descriptor: &'a Value,
-            sequence: u64,
-            groups: Vec<&'a CallbackGroup>,
-        }
-        Encoded {
-            format: self.format,
-            descriptor: &self.descriptor,
-            sequence: self.sequence,
-            groups: self.groups.values().collect(),
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for CallbackCheckpoint {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let raw = RawCallbackCheckpoint::deserialize(deserializer)?;
-        let mut groups = BTreeMap::new();
-        for group in raw.groups {
-            validate_json(&group.key, 0).map_err(serde::de::Error::custom)?;
-            validate_exact_integers(&group.key).map_err(serde::de::Error::custom)?;
-            let encoded = canonical_json(&group.key).map_err(serde::de::Error::custom)?;
-            if groups.insert(encoded, group).is_some() {
-                return Err(serde::de::Error::custom(
-                    "Duplicate canonical key in callback checkpoint",
-                ));
-            }
-        }
-        Ok(Self {
-            format: raw.format,
-            descriptor: raw.descriptor,
-            sequence: raw.sequence,
-            groups,
-        })
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct State {
-    generation: String,
-    sequence: u64,
-    documents: Vec<Document>,
-    history: Vec<Version>,
-    #[serde(default)]
-    batches: Vec<BatchBoundary>,
-    #[serde(default)]
-    callback_checkpoints: BTreeMap<String, CallbackCheckpoint>,
-    #[serde(skip)]
-    identities: BTreeMap<(String, String), usize>,
-    #[serde(skip)]
-    positions: BTreeMap<(String, u64), usize>,
-    #[serde(skip)]
-    checkpoints: BTreeMap<String, u64>,
-    #[serde(skip)]
-    versions: BTreeMap<String, Vec<usize>>,
-    #[serde(skip)]
-    query_keys: BTreeMap<QueryKey, String>,
-}
-
-impl State {
-    fn empty() -> Self {
-        Self {
-            generation: Uuid::new_v4().to_string(),
-            sequence: 0,
-            documents: Vec::new(),
-            history: Vec::new(),
-            batches: Vec::new(),
-            callback_checkpoints: BTreeMap::new(),
-            identities: BTreeMap::new(),
-            positions: BTreeMap::new(),
-            checkpoints: BTreeMap::new(),
-            versions: BTreeMap::new(),
-            query_keys: BTreeMap::new(),
-        }
-    }
-
-    // Checkpoint data is never authoritative. Validate every structural invariant
-    // before rebuilding its indexes; the verified log separately proves provenance.
-    fn validate_and_index(&mut self) -> Result<()> {
-        if Uuid::parse_str(&self.generation).is_err()
-            || self.sequence > MAX_SAFE_SEQUENCE
-            || self.sequence != (self.documents.len() + self.history.len()) as u64
-        {
-            return Err("Invalid cached generation or sequence".into());
-        }
-        let mut document_sequence = 0;
-        for (index, document) in self.documents.iter().enumerate() {
-            validate_record(&document.record)?;
-            if document.sequence <= document_sequence || document.sequence > self.sequence {
-                return Err("Invalid cached document sequence".into());
-            }
-            document_sequence = document.sequence;
-            let record = &document.record;
-            if self
-                .identities
-                .insert((record.source.clone(), record.id.clone()), index)
-                .is_some()
-                || self
-                    .positions
-                    .insert((record.source.clone(), record.position), index)
-                    .is_some()
-                || self
-                    .checkpoints
-                    .get(&record.source)
-                    .is_some_and(|p| record.position <= *p)
-            {
-                return Err("Invalid cached immutable document identity".into());
-            }
-            self.checkpoints
-                .insert(record.source.clone(), record.position);
-        }
-        let mut version_sequence = 0;
-        for (index, version) in self.history.iter().enumerate() {
-            let key: Value =
-                serde_json::from_str(&version.key).map_err(|_| "Invalid cached key")?;
-            validate_json(&key, 0)?;
-            validate_json(&version.state, 0)?;
-            validate_json(&version.result, 0)?;
-            if version.sequence <= version_sequence
-                || version.sequence > self.sequence
-                || canonical_json(&key)? != version.key
-            {
-                return Err("Invalid cached version sequence or key".into());
-            }
-            version_sequence = version.sequence;
-            self.versions
-                .entry(version.key.clone())
-                .or_default()
-                .push(index);
-            self.query_keys.insert(QueryKey(key), version.key.clone());
-        }
-        // The two sorted streams must partition the complete sequence domain.
-        let mut documents = self.documents.iter().peekable();
-        let mut versions = self.history.iter().peekable();
-        for expected in 1..=self.sequence {
-            if documents.peek().is_some_and(|doc| doc.sequence == expected) {
-                documents.next();
-            } else if versions.peek().is_some_and(|row| row.sequence == expected) {
-                versions.next();
-            } else {
-                return Err("Cached history has a duplicate or missing sequence".into());
-            }
-        }
-        if documents.next().is_some() || versions.next().is_some() {
-            return Err("Cached history has duplicate sequences".into());
-        }
-        let mut documents = 0;
-        let mut sequence = 0;
-        for batch in &self.batches {
-            if batch.documents <= documents
-                || batch.documents > self.documents.len()
-                || batch.documents - documents > MAX_BATCH_DOCUMENTS
-                || batch.sequence <= sequence
-                || batch.sequence > self.sequence
-                || self.documents[batch.documents - 1].sequence > batch.sequence
-            {
-                return Err("Invalid cached document batch boundaries".into());
-            }
-            documents = batch.documents;
-            sequence = batch.sequence;
-        }
-        if documents != self.documents.len() || sequence != self.sequence {
-            return Err("Cached document batches do not cover the log".into());
-        }
-        validate_callback_checkpoints(&self.callback_checkpoints, self.sequence)?;
-        Ok(())
-    }
-
-    fn publish(&mut self, stage: Stage) {
-        let appended = !stage.documents.is_empty();
-        self.query_keys.extend(stage.query_keys);
-        for document in stage.documents {
-            let record = &document.record;
-            let index = self.documents.len();
-            self.identities
-                .insert((record.source.clone(), record.id.clone()), index);
-            self.positions
-                .insert((record.source.clone(), record.position), index);
-            self.checkpoints
-                .insert(record.source.clone(), record.position);
-            self.documents.push(document);
-        }
-        for version in stage.versions {
-            self.versions
-                .entry(version.key.clone())
-                .or_default()
-                .push(self.history.len());
-            self.history.push(version);
-        }
-        self.sequence = stage.sequence;
-        if appended {
-            self.batches.push(BatchBoundary {
-                documents: self.documents.len(),
-                sequence: self.sequence,
-            });
-        }
-    }
-}
-
-struct Stage {
-    documents: Vec<Document>,
-    versions: Vec<Version>,
-    sequence: u64,
-    resolved: Vec<Value>,
-    replayed: usize,
-    query_keys: BTreeMap<QueryKey, String>,
-}
-
 struct Prepared {
     token: String,
     stage: Stage,
+}
+
+/// Stream-verifies cached prefix batches against `checkpoint.state.documents`
+/// without retaining all prefix batches in memory simultaneously.
+struct PrefixVerifier {
+    checkpoint: storage::Checkpoint,
+    doc_cursor: usize,
+}
+
+impl PrefixVerifier {
+    fn verify_batch(
+        &mut self,
+        batch_index: u64,
+        batch: &Batch,
+        end: u64,
+        digest: [u8; 32],
+    ) -> bool {
+        let Some(boundary) = self.checkpoint.state.batches.get(batch_index as usize) else {
+            return false;
+        };
+        let new_doc_count = self.doc_cursor + batch.documents.len();
+        if boundary.documents != new_doc_count {
+            return false;
+        }
+        let Some(slice) = self
+            .checkpoint
+            .state
+            .documents
+            .get(self.doc_cursor..new_doc_count)
+        else {
+            return false;
+        };
+        let mut previous = None;
+        for (record, document) in batch.documents.iter().zip(slice) {
+            if document.record != *record
+                || previous.is_some_and(|sequence| document.sequence != sequence + 1)
+            {
+                return false;
+            }
+            previous = Some(document.sequence);
+        }
+        self.doc_cursor = new_doc_count;
+        if batch_index + 1 == self.checkpoint.batches
+            && (end != self.checkpoint.offset || digest != self.checkpoint.prefix)
+        {
+            return false;
+        }
+        true
+    }
 }
 
 /// One open document log (or `:memory:` database) with its Wasm view.
@@ -448,42 +235,95 @@ impl Engine {
             storage.load_checkpoint()
         };
         let initial_prefix = storage.initial_prefix();
-        let scan = storage.scan()?;
         let mut state = State::empty();
-        let mut skip = 0;
         let mut cache_offset = 0;
+        let mut replay_batches = 0u64;
+        let mut replay_documents = 0u64;
+        let mut active_cache: Option<PrefixVerifier> = None;
+
         if let Some(mut cache) = candidate {
             let identity = match &storage {
                 Storage::Disk(disk) => disk.database_id.as_str(),
                 _ => "",
             };
-            let boundary = if cache.batches == 0 {
-                Some(initial_prefix)
-            } else {
-                scan.batches
-                    .get(cache.batches.saturating_sub(1) as usize)
-                    .map(|batch| (batch.end, batch.digest))
-            };
             if cache.module_sha256 != module_sha256 {
                 cache_status = "module-mismatch".into();
             } else if cache.format == 1
                 && cache.database_id == identity
-                && boundary == Some((cache.offset, cache.prefix))
+                && cache.state.batches.len() as u64 == cache.batches
                 && cache.state.validate_and_index().is_ok()
-                && checkpoint_matches_log(
-                    &cache.state,
-                    &scan.batches[..cache.batches.min(scan.batches.len() as u64) as usize],
-                )
             {
-                skip = cache.batches as usize;
-                cache_offset = cache.offset;
-                state = cache.state;
-                cache_status = "loaded".into();
+                if cache.batches == 0 {
+                    if (cache.offset, cache.prefix) == initial_prefix
+                        && cache.state.documents.is_empty()
+                    {
+                        cache_offset = cache.offset;
+                        state = cache.state;
+                        cache_status = "loaded".into();
+                    } else {
+                        cache_status = "invalid".into();
+                    }
+                } else {
+                    active_cache = Some(PrefixVerifier {
+                        checkpoint: cache,
+                        doc_cursor: 0,
+                    });
+                }
             } else {
                 cache_status = "invalid".into();
             }
         }
-        let mut engine = Self {
+
+        let mut cache_mismatched = false;
+        let recovered_tail_bytes = storage.scan_each(|batch_index, batch, end, digest| {
+            if let Some(verifier) = active_cache.as_mut() {
+                if verifier.verify_batch(batch_index, &batch, end, digest) {
+                    if batch_index + 1 == verifier.checkpoint.batches {
+                        let done = active_cache.take().unwrap();
+                        if done.doc_cursor == done.checkpoint.state.documents.len() {
+                            cache_offset = done.checkpoint.offset;
+                            state = done.checkpoint.state;
+                            cache_status = "loaded".into();
+                        } else {
+                            cache_status = "invalid".into();
+                            cache_mismatched = true;
+                        }
+                    }
+                    return Ok(());
+                }
+                // Drop the mismatched cache immediately and finish verifying the
+                // complete log before replaying from batch 0 in a streaming pass.
+                active_cache = None;
+                cache_status = "invalid".into();
+                cache_mismatched = true;
+                return Ok(());
+            }
+            if cache_mismatched {
+                return Ok(());
+            }
+            let count = batch.documents.len() as u64;
+            replay_batch_into(&runtime, &mut state, batch)?;
+            replay_batches += 1;
+            replay_documents += count;
+            Ok(())
+        })?;
+
+        if active_cache.take().is_some() {
+            // Log had fewer batches than the checkpoint claimed.
+            cache_status = "invalid".into();
+            cache_mismatched = true;
+        }
+        if cache_mismatched {
+            storage.scan_each_no_recovery(|_, batch, _, _| {
+                let count = batch.documents.len() as u64;
+                replay_batch_into(&runtime, &mut state, batch)?;
+                replay_batches += 1;
+                replay_documents += count;
+                Ok(())
+            })?;
+        }
+
+        Ok(Self {
             storage: Some(storage),
             runtime,
             module_sha256,
@@ -491,20 +331,12 @@ impl Engine {
             cache_status,
             cache_bytes,
             cache_offset,
-            replay_batches: 0,
-            replay_documents: 0,
-            recovered_tail_bytes: scan.recovered,
-            checkpoint_on_drop: false,
+            replay_batches,
+            replay_documents,
+            recovered_tail_bytes,
+            checkpoint_on_drop: true,
             prepared: None,
-        };
-        for verified in scan.batches.into_iter().skip(skip) {
-            let count = verified.batch.documents.len() as u64;
-            engine.replay_batch(verified.batch)?;
-            engine.replay_batches += 1;
-            engine.replay_documents += count;
-        }
-        engine.checkpoint_on_drop = true;
-        Ok(engine)
+        })
     }
 
     /// Copy a verified log into a new v2 log, preserving original batch order.
@@ -537,13 +369,13 @@ impl Engine {
         if !request.is_object() {
             return Err(EngineError::database("Request must be a JSON object"));
         }
-        match request
+        let op = request
             .get("op")
             .and_then(Value::as_str)
-            .ok_or_else(|| EngineError::database("Request requires an op string"))?
-        {
-            "ingest" => self.ingest(&request),
-            "prepare_ingest" => self.prepare_ingest(&request),
+            .ok_or_else(|| EngineError::database("Request requires an op string"))?;
+        match op {
+            "ingest" => self.ingest(request),
+            "prepare_ingest" => self.prepare_ingest(request),
             "commit_prepared" => self.commit_prepared(&request).map_err(Into::into),
             "cancel_prepared" => {
                 self.prepared = None;
@@ -559,7 +391,7 @@ impl Engine {
                 apply_callback_updates(&mut self.state.callback_checkpoints, updates);
                 Ok(json!({"updated":true}))
             }
-            "preview" => self.preview(&request).map_err(Into::into),
+            "preview" => self.preview(request).map_err(Into::into),
             "canonical_key" => {
                 let key = request
                     .get("key")
@@ -647,6 +479,14 @@ impl Engine {
         self.storage.as_ref().is_some_and(|s| !s.legacy_read_only()) && !self.writer_poisoned()
     }
 
+    /// Return the current snapshot cursor without assembling full `stats()` metadata.
+    pub fn current_cursor(&self) -> Result<String> {
+        if self.storage.is_none() {
+            return Err("Database is closed".into());
+        }
+        Ok(self.cursor(self.state.sequence))
+    }
+
     fn cursor(&self, sequence: u64) -> String {
         format!(
             "{}:{}:{sequence}",
@@ -687,42 +527,60 @@ impl Engine {
         }
     }
 
-    fn preview(&self, request: &Value) -> Result<Value> {
-        let payload = request.get("payload").ok_or("preview requires a payload")?;
-        let (_, payload) = canonical_payload(payload)?;
-        let mut mapped = map_documents(&self.runtime, vec![payload])?;
-        let mut emissions = Value::Array(mapped.remove(0));
+    fn preview(&self, mut request: Value) -> Result<Value> {
+        let mut payload = request
+            .as_object_mut()
+            .and_then(|object| object.remove("payload"))
+            .ok_or("preview requires a payload")?;
+        validate_and_normalize_payload(&mut payload)?;
+        let mut mapped = map_documents(&self.runtime, &[&payload])?;
+        let mut emissions = Value::Array(
+            mapped
+                .remove(0)
+                .into_iter()
+                .map(|(key, value)| json!({"key": key, "value": value}))
+                .collect(),
+        );
         normalize_json_numbers(&mut emissions);
         Ok(emissions)
     }
 
-    fn ingest(&mut self, request: &Value) -> TypedResult<Value> {
+    fn ingest(&mut self, mut request: Value) -> TypedResult<Value> {
         self.prepared = None;
-        let documents = request
-            .get("documents")
-            .and_then(Value::as_array)
-            .ok_or_else(|| EngineError::database("ingest requires a documents array"))?;
-        let stage = stage(&mut self.runtime, &self.state, documents)?;
+        let documents = match request
+            .as_object_mut()
+            .and_then(|object| object.remove("documents"))
+        {
+            Some(Value::Array(documents)) => documents,
+            _ => return Err(EngineError::database("ingest requires a documents array")),
+        };
+        let stage = stage(&self.runtime, &self.state, documents)?;
         let response = json!({"documents":stage.resolved,"inserted":stage.documents.len(),
             "replayed":stage.replayed,"sequence":stage.sequence,"cursor":self.cursor(stage.sequence)});
         if !stage.documents.is_empty() {
-            let batch = Batch {
-                documents: stage.documents.iter().map(|d| d.record.clone()).collect(),
-            };
-            self.storage.as_mut().unwrap().append(batch)?;
+            let records: Vec<&RetainedDocument> =
+                stage.documents.iter().map(|d| &d.record).collect();
+            self.storage.as_mut().unwrap().append_records(&records)?;
             // All fallible validation and Wasm work precedes the durable append.
             self.state.publish(stage);
         }
         Ok(response)
     }
 
-    fn prepare_ingest(&mut self, request: &Value) -> TypedResult<Value> {
+    fn prepare_ingest(&mut self, mut request: Value) -> TypedResult<Value> {
         self.prepared = None;
-        let documents = request
-            .get("documents")
-            .and_then(Value::as_array)
-            .ok_or_else(|| EngineError::database("prepare_ingest requires a documents array"))?;
-        let stage = stage(&mut self.runtime, &self.state, documents)?;
+        let documents = match request
+            .as_object_mut()
+            .and_then(|object| object.remove("documents"))
+        {
+            Some(Value::Array(documents)) => documents,
+            _ => {
+                return Err(EngineError::database(
+                    "prepare_ingest requires a documents array",
+                ))
+            }
+        };
+        let stage = stage(&self.runtime, &self.state, documents)?;
         let token = Uuid::new_v4().to_string();
         let response = json!({"token":token,"documents":stage.resolved,
             "new_documents":stage.documents.iter().map(document_value).collect::<Vec<_>>(),
@@ -746,13 +604,9 @@ impl Engine {
         let response = json!({"documents":stage.resolved,"inserted":stage.documents.len(),
             "replayed":stage.replayed,"sequence":stage.sequence,"cursor":self.cursor(stage.sequence)});
         if !stage.documents.is_empty() {
-            self.storage.as_mut().unwrap().append(Batch {
-                documents: stage
-                    .documents
-                    .iter()
-                    .map(|doc| doc.record.clone())
-                    .collect(),
-            })?;
+            let records: Vec<&RetainedDocument> =
+                stage.documents.iter().map(|doc| &doc.record).collect();
+            self.storage.as_mut().unwrap().append_records(&records)?;
             self.state.publish(stage);
         }
         self.state.callback_checkpoints.extend(checkpoints);
@@ -807,20 +661,6 @@ impl Engine {
         )
     }
 
-    fn replay_batch(&mut self, batch: Batch) -> Result<()> {
-        let documents = batch
-            .documents
-            .iter()
-            .map(|d| serde_json::to_value(d).expect("serializable record"))
-            .collect::<Vec<_>>();
-        let stage = stage(&mut self.runtime, &self.state, &documents).map_err(|e| e.message)?;
-        if stage.replayed != 0 || stage.documents.len() != documents.len() {
-            return Err("Native log contains duplicate immutable documents".into());
-        }
-        self.state.publish(stage);
-        Ok(())
-    }
-
     fn checkpoint(&mut self) -> Result<()> {
         self.cache_bytes = self
             .storage
@@ -835,25 +675,17 @@ impl Engine {
 
     fn rebuild(&mut self, request: &Value) -> TypedResult<Value> {
         self.prepared = None;
-        let scan = self.storage.as_mut().unwrap().scan()?;
         let mut rebuilt = State::empty();
-        let mut document_count = 0;
-        for batch in &scan.batches {
-            let documents: Vec<Value> = batch
-                .batch
-                .documents
-                .iter()
-                .map(|d| serde_json::to_value(d).expect("serializable record"))
-                .collect();
-            let staged = stage(&mut self.runtime, &rebuilt, &documents)?;
-            if staged.replayed != 0 {
-                return Err(EngineError::database(
-                    "Native log contains duplicate immutable documents",
-                ));
-            }
-            document_count += documents.len() as u64;
-            rebuilt.publish(staged);
-        }
+        let mut batch_count = 0u64;
+        let mut document_count = 0u64;
+        let runtime = &self.runtime;
+        let recovered = self.storage.as_mut().unwrap().scan_each(|_, batch, _, _| {
+            let count = batch.documents.len() as u64;
+            replay_batch_into(runtime, &mut rebuilt, batch)?;
+            batch_count += 1;
+            document_count += count;
+            Ok(())
+        })?;
         if request.get("checkpoints").is_some() {
             rebuilt.callback_checkpoints = callback_checkpoints(request, rebuilt.sequence)?;
         }
@@ -865,16 +697,12 @@ impl Engine {
             .checkpoint(&rebuilt, &self.module_sha256)?;
         self.state = rebuilt;
         self.cache_bytes = bytes;
-        self.cache_offset = self.storage.as_ref().unwrap().metadata().1;
-        self.cache_status = if self.storage.as_ref().unwrap().metadata().0 {
-            "checkpointed"
-        } else {
-            "memory"
-        }
-        .into();
-        self.replay_batches = scan.batches.len() as u64;
+        let (disk, offset, _) = self.storage.as_ref().unwrap().metadata();
+        self.cache_offset = offset;
+        self.cache_status = if disk { "checkpointed" } else { "memory" }.into();
+        self.replay_batches = batch_count;
         self.replay_documents = document_count;
-        self.recovered_tail_bytes += scan.recovered;
+        self.recovered_tail_bytes += recovered;
         let mut stats = self.stats()?;
         stats["rebuilt"] = json!(true);
         Ok(stats)
@@ -887,6 +715,8 @@ impl Engine {
         let selector = Selector::parse(request)?;
         let after = selector.after(request, &cursor)?;
         let mut rows = Vec::new();
+        let mut complete = true;
+        let mut last_canonical_key = None;
         if let Some(bounds) = selector.bounds(after) {
             for (ordered_key, canonical_key) in self.state.query_keys.range(bounds) {
                 // Prefix matches form one contiguous interval after their lower
@@ -898,19 +728,22 @@ impl Engine {
                 let count = indices
                     .partition_point(|&index| self.state.history[index].sequence <= snapshot);
                 if count > 0 {
-                    rows.push(version_value(&self.state.history[indices[count - 1]])?);
-                    if rows.len() > limit {
+                    if rows.len() == limit {
+                        complete = false;
                         break;
                     }
+                    rows.push(version_value_with_key(
+                        &ordered_key.0,
+                        &self.state.history[indices[count - 1]],
+                    ));
+                    last_canonical_key = Some(canonical_key.as_str());
                 }
             }
         }
-        let complete = rows.len() <= limit;
-        rows.truncate(limit);
         let after = if complete {
             None
         } else {
-            Some(selector.token(&cursor, &canonical_json(&rows.last().unwrap()["key"])?))
+            Some(selector.token(&cursor, last_canonical_key.unwrap()))
         };
         Ok(json!({"rows":rows,"cursor":cursor,"after":after,"complete":complete}))
     }
@@ -985,17 +818,11 @@ impl Engine {
             Some(value) => Some(safe_integer(value, "position")?),
         };
         match (id, position) {
-            (Some(id), None) => Ok(self
-                .state
-                .identities
-                .get(&(source.to_owned(), id.to_owned()))
-                .map(|&index| document_value(&self.state.documents[index]))
+            (Some(id), None) => Ok(get_identity(&self.state.identities, source, id)
+                .map(|index| document_value(&self.state.documents[index]))
                 .unwrap_or(Value::Null)),
-            (None, Some(position)) => Ok(self
-                .state
-                .positions
-                .get(&(source.to_owned(), position))
-                .map(|&index| document_value(&self.state.documents[index]))
+            (None, Some(position)) => Ok(get_position(&self.state.positions, source, position)
+                .map(|index| document_value(&self.state.documents[index]))
                 .unwrap_or(Value::Null)),
             (None, None) => Err("get requires either id or position".into()),
             (Some(_), Some(_)) => Err("get accepts either id or position, not both".into()),
@@ -1034,7 +861,13 @@ impl Drop for Engine {
     }
 }
 
-fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> TypedResult<Stage> {
+fn replay_batch_into(runtime: &Runtime, state: &mut State, batch: Batch) -> Result<()> {
+    let staged = stage_retained(runtime, state, batch.documents).map_err(|e| e.message)?;
+    state.publish(staged);
+    Ok(())
+}
+
+fn stage(runtime: &Runtime, state: &State, documents: Vec<Value>) -> TypedResult<Stage> {
     if documents.len() > MAX_BATCH_DOCUMENTS {
         return Err(EngineError::database(format!(
             "An ingest batch may contain at most {MAX_BATCH_DOCUMENTS} documents \
@@ -1043,44 +876,42 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> TypedResu
         )));
     }
     let mut staged = Stage {
-        documents: Vec::new(),
+        documents: Vec::with_capacity(documents.len()),
         versions: Vec::new(),
         sequence: state.sequence,
-        resolved: Vec::new(),
+        resolved: Vec::with_capacity(documents.len()),
         replayed: 0,
         query_keys: BTreeMap::new(),
     };
     // Only this batch's identities/checkpoints are staged; previously retained
     // documents, history, and indexes are never copied on the ingest path.
-    let mut identities = BTreeMap::new();
-    let mut positions = BTreeMap::new();
-    let mut checkpoints = BTreeMap::new();
+    let mut identities: HashMap<IdentityKey, usize> = HashMap::with_capacity(documents.len());
+    let mut positions: HashMap<PositionKey, usize> = HashMap::with_capacity(documents.len());
+    let mut checkpoints: HashMap<String, u64> = HashMap::new();
     for document in documents {
-        let object = document.as_object().ok_or_else(|| {
-            EngineError::database("Each document must be an object with a payload")
-        })?;
-        let payload = object
-            .get("payload")
+        let Value::Object(mut object) = document else {
+            return Err(EngineError::database(
+                "Each document must be an object with a payload",
+            ));
+        };
+        let mut payload = object
+            .remove("payload")
             .ok_or_else(|| EngineError::database("Each document requires a payload"))?;
-        let (payload_text, payload) = canonical_payload(payload)?;
-        let requested_id = optional_string(object, "id")?;
-        let source = optional_string(object, "source")?.unwrap_or_else(|| "default".into());
+        validate_and_normalize_payload(&mut payload)?;
+        let requested_id = optional_string_remove(&mut object, "id")?;
+        let source =
+            optional_string_remove(&mut object, "source")?.unwrap_or_else(|| "default".into());
         let requested_position = object
             .get("position")
             .map(|v| safe_integer(v, "position"))
             .transpose()?;
-        let get_identity = |id: &str| -> Option<&Document> {
-            identities
-                .get(&(source.clone(), id.to_owned()))
-                .map(|&i: &usize| &staged.documents[i])
+        let existing_id = requested_id.as_deref().and_then(|id| {
+            get_identity(&identities, &source, id)
+                .map(|i| &staged.documents[i])
                 .or_else(|| {
-                    state
-                        .identities
-                        .get(&(source.clone(), id.to_owned()))
-                        .map(|&i| &state.documents[i])
+                    get_identity(&state.identities, &source, id).map(|i| &state.documents[i])
                 })
-        };
-        let existing_id = requested_id.as_deref().and_then(get_identity);
+        });
         let last = checkpoints
             .get(&source)
             .or_else(|| state.checkpoints.get(&source))
@@ -1092,21 +923,17 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> TypedResu
                 None => last.map(next_sequence).transpose()?.unwrap_or(0),
             },
         };
-        let existing_position = positions
-            .get(&(source.clone(), position))
-            .map(|&i: &usize| &staged.documents[i])
+        let existing_position = get_position(&positions, &source, position)
+            .map(|i| &staged.documents[i])
             .or_else(|| {
-                state
-                    .positions
-                    .get(&(source.clone(), position))
-                    .map(|&i| &state.documents[i])
+                get_position(&state.positions, &source, position).map(|i| &state.documents[i])
             });
         if let Some(existing) = existing_id.or(existing_position) {
             let record = &existing.record;
             if record.source != source
                 || record.position != position
-                || canonical_json(&record.payload)? != payload_text
                 || requested_id.as_ref().is_some_and(|id| record.id != *id)
+                || canonical_json(&record.payload)? != canonical_json(&payload)?
             {
                 return Err(EngineError::conflict(
                     "Document replay conflicts with an immutable id or source position",
@@ -1132,106 +959,227 @@ fn stage(runtime: &mut Runtime, state: &State, documents: &[Value]) -> TypedResu
             },
             sequence: staged.sequence,
         };
-        identities.insert((source.clone(), id), staged.documents.len());
-        positions.insert((source.clone(), position), staged.documents.len());
+        let doc_index = staged.documents.len();
+        identities.insert(
+            IdentityKey {
+                source: source.clone(),
+                id,
+            },
+            doc_index,
+        );
+        positions.insert(
+            PositionKey {
+                source: source.clone(),
+                position,
+            },
+            doc_index,
+        );
         checkpoints.insert(source, position);
         staged.resolved.push(document_value(&document));
         staged.documents.push(document);
     }
-    let payloads: Vec<_> = staged
+    stage_views(runtime, state, &mut staged)?;
+    Ok(staged)
+}
+
+fn stage_retained(
+    runtime: &Runtime,
+    state: &State,
+    records: Vec<RetainedDocument>,
+) -> TypedResult<Stage> {
+    if records.len() > MAX_BATCH_DOCUMENTS {
+        return Err(EngineError::database(format!(
+            "An ingest batch may contain at most {MAX_BATCH_DOCUMENTS} documents \
+             (MAX_BATCH_DOCUMENTS); this batch has {}. Split it into smaller batches.",
+            records.len()
+        )));
+    }
+    let mut staged = Stage {
+        documents: Vec::with_capacity(records.len()),
+        versions: Vec::new(),
+        sequence: state.sequence,
+        resolved: Vec::new(),
+        replayed: 0,
+        query_keys: BTreeMap::new(),
+    };
+    let mut identities: HashMap<IdentityKey, usize> = HashMap::with_capacity(records.len());
+    let mut positions: HashMap<PositionKey, usize> = HashMap::with_capacity(records.len());
+    let mut checkpoints: HashMap<String, u64> = HashMap::new();
+    for mut record in records {
+        if record.id.is_empty()
+            || record.id.len() > 4096
+            || record.source.is_empty()
+            || record.source.len() > 4096
+            || record.position > MAX_SAFE_SEQUENCE
+        {
+            return Err(EngineError::database(
+                "Invalid retained document identity or source position",
+            ));
+        }
+        validate_and_normalize_payload(&mut record.payload)?;
+        let existing_id = get_identity(&identities, &record.source, &record.id)
+            .map(|i| &staged.documents[i])
+            .or_else(|| {
+                get_identity(&state.identities, &record.source, &record.id)
+                    .map(|i| &state.documents[i])
+            });
+        let existing_position = get_position(&positions, &record.source, record.position)
+            .map(|i| &staged.documents[i])
+            .or_else(|| {
+                get_position(&state.positions, &record.source, record.position)
+                    .map(|i| &state.documents[i])
+            });
+        if let Some(existing) = existing_id.or(existing_position) {
+            let existing_record = &existing.record;
+            if existing_record.source != record.source
+                || existing_record.position != record.position
+                || existing_record.id != record.id
+                || canonical_json(&existing_record.payload)? != canonical_json(&record.payload)?
+            {
+                return Err(EngineError::conflict(
+                    "Document replay conflicts with an immutable id or source position",
+                ));
+            }
+            return Err(EngineError::database(
+                "Native log contains duplicate immutable documents",
+            ));
+        }
+        let last = checkpoints
+            .get(&record.source)
+            .or_else(|| state.checkpoints.get(&record.source))
+            .copied();
+        if last.is_some_and(|last| record.position <= last) {
+            return Err(EngineError::source_order(
+                "New source positions must advance the retained checkpoint",
+            ));
+        }
+        staged.sequence = next_sequence(staged.sequence)?;
+        let doc_index = staged.documents.len();
+        identities.insert(
+            IdentityKey {
+                source: record.source.clone(),
+                id: record.id.clone(),
+            },
+            doc_index,
+        );
+        positions.insert(
+            PositionKey {
+                source: record.source.clone(),
+                position: record.position,
+            },
+            doc_index,
+        );
+        checkpoints.insert(record.source.clone(), record.position);
+        staged.documents.push(Document {
+            record,
+            sequence: staged.sequence,
+        });
+    }
+    stage_views(runtime, state, &mut staged)?;
+    Ok(staged)
+}
+
+fn stage_views(runtime: &Runtime, state: &State, staged: &mut Stage) -> TypedResult<()> {
+    let payloads: Vec<&Value> = staged
         .documents
         .iter()
         .filter(|doc| !doc.record.source.starts_with('_'))
-        .map(|doc| doc.record.payload.clone())
+        .map(|doc| &doc.record.payload)
         .collect();
-    if !payloads.is_empty() {
-        let mapped = map_documents(runtime, payloads)?;
-        let mut grouped: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        for emissions in mapped {
-            for emission in emissions {
-                grouped
-                    .entry(canonical_json(&emission["key"])?)
-                    .or_default()
-                    .push(emission["value"].clone());
+    if payloads.is_empty() {
+        return Ok(());
+    }
+    let mapped = map_documents(runtime, &payloads)?;
+    let mut grouped: BTreeMap<String, (Value, Vec<Value>)> = BTreeMap::new();
+    for emissions in mapped {
+        for (key, value) in emissions {
+            let canonical = canonical_json(&key)?;
+            match grouped.entry(canonical) {
+                Entry::Occupied(mut entry) => entry.get_mut().1.push(value),
+                Entry::Vacant(entry) => {
+                    entry.insert((key, vec![value]));
+                }
             }
-        }
-        let mut keys = Vec::with_capacity(grouped.len());
-        let mut inputs = Vec::with_capacity(grouped.len());
-        for (key, values) in grouped {
-            let previous = state
-                .versions
-                .get(&key)
-                .and_then(|indices| indices.last())
-                .map(|&i| &state.history[i].state);
-            let mut input = json!({"values":values});
-            if let Some(previous) = previous {
-                input["state"] = previous.clone();
-            } else {
-                staged.query_keys.insert(
-                    QueryKey(
-                        serde_json::from_str(&key)
-                            .map_err(|_| EngineError::database("Invalid mapped key"))?,
-                    ),
-                    key.clone(),
-                );
-            }
-            keys.push(key);
-            inputs.push(input);
-        }
-        for (key, (mut new_state, mut result)) in
-            keys.into_iter().zip(runtime.reduce_groups(&inputs)?)
-        {
-            normalize_json_numbers(&mut new_state);
-            normalize_json_numbers(&mut result);
-            staged.sequence = next_sequence(staged.sequence)?;
-            staged.versions.push(Version {
-                key,
-                state: new_state,
-                result,
-                sequence: staged.sequence,
-            });
         }
     }
-    Ok(staged)
+    let mut keys = Vec::with_capacity(grouped.len());
+    let mut inputs = Vec::with_capacity(grouped.len());
+    for (canonical_key, (mut key_value, values)) in grouped {
+        let previous = state
+            .versions
+            .get(&canonical_key)
+            .and_then(|indices| indices.last())
+            .map(|&i| &state.history[i].state);
+        let mut input = json!({"values":values});
+        if let Some(previous) = previous {
+            input["state"] = previous.clone();
+        } else {
+            normalize_canonical_numbers(&mut key_value);
+            staged
+                .query_keys
+                .insert(QueryKey(key_value), canonical_key.clone());
+        }
+        keys.push(canonical_key);
+        inputs.push(input);
+    }
+    for (key, (mut new_state, mut result)) in keys.into_iter().zip(runtime.reduce_groups(&inputs)?)
+    {
+        normalize_json_numbers(&mut new_state);
+        normalize_json_numbers(&mut result);
+        staged.sequence = next_sequence(staged.sequence)?;
+        staged.versions.push(Version {
+            key,
+            state: new_state,
+            result,
+            sequence: staged.sequence,
+        });
+    }
+    Ok(())
 }
 
 fn cursor_error(message: &str) -> String {
     format!("{message}. {CURSOR_RECOVERY}")
 }
 
-fn canonical_payload(payload: &Value) -> Result<(String, Value)> {
-    validate_json(payload, 0)?;
-    validate_exact_integers(payload)?;
-    let text = canonical_json(payload)?;
-    let mut payload = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    normalize_json_numbers(&mut payload);
-    Ok((text, payload))
+// Keep struct field order strictly alphabetical so serialized JSON matches
+// `serde_json::Map` key order byte-for-byte.
+#[derive(Serialize)]
+struct MapRequest<'a> {
+    documents: &'a [&'a Value],
+    op: &'static str,
 }
 
 // Mapping diagnostics and ingestion deliberately share the complete contract.
 // Reducers run only after this helper returns during normal ingestion.
-fn map_documents(runtime: &Runtime, payloads: Vec<Value>) -> Result<Vec<Vec<Value>>> {
+fn map_documents(runtime: &Runtime, payloads: &[&Value]) -> Result<Vec<Vec<(Value, Value)>>> {
     let count = payloads.len();
-    let mapped = runtime.call(json!({"op":"map","documents":payloads}))?;
-    let mapped = mapped
-        .as_array()
-        .ok_or("map must return one contribution array per document")?;
+    let mapped = runtime.call_serialized(
+        "map",
+        &MapRequest {
+            documents: payloads,
+            op: "map",
+        },
+    )?;
+    let Value::Array(mapped) = mapped else {
+        return Err("map must return one contribution array per document".into());
+    };
     if mapped.len() != count {
         return Err("map returned the wrong number of document results".into());
     }
     let mut output = Vec::with_capacity(count);
     let mut contributions = 0;
     for emissions in mapped {
-        let emissions = emissions
-            .as_array()
-            .ok_or("Each map result must be an array")?;
+        let Value::Array(emissions) = emissions else {
+            return Err("Each map result must be an array".into());
+        };
         let mut normalized = Vec::with_capacity(emissions.len());
         for emission in emissions {
-            let key = emission
-                .get("key")
-                .ok_or("A map contribution requires key")?;
-            let value = emission
-                .get("value")
+            let Value::Object(mut obj) = emission else {
+                return Err("A map contribution requires key".into());
+            };
+            let key = obj.remove("key").ok_or("A map contribution requires key")?;
+            let value = obj
+                .remove("value")
                 .ok_or("A map contribution requires value")?;
             contributions += 1;
             if contributions > MAX_BATCH_EMISSIONS {
@@ -1240,393 +1188,13 @@ fn map_documents(runtime: &Runtime, payloads: Vec<Value>) -> Result<Vec<Vec<Valu
                      (MAX_BATCH_EMISSIONS). Split it into smaller batches."
                 ));
             }
-            validate_json(key, 0)?;
-            validate_json(value, 0)?;
+            validate_json(&key, 0)?;
+            validate_json(&value, 0)?;
             // Preserve the guest's contribution values, including signed zero.
             // Re-encoding through canonical JSON would change reducer inputs.
-            normalized.push(json!({"key":key.clone(),"value":value.clone()}));
+            normalized.push((key, value));
         }
         output.push(normalized);
     }
     Ok(output)
-}
-
-fn checkpoint_matches_log(state: &State, batches: &[storage::VerifiedBatch]) -> bool {
-    if state.batches.len() != batches.len() {
-        return false;
-    }
-    let mut documents = state.documents.iter();
-    let mut document_count = 0;
-    for (batch, boundary) in batches.iter().zip(&state.batches) {
-        document_count += batch.batch.documents.len();
-        if boundary.documents != document_count {
-            return false;
-        }
-        let mut previous = None;
-        for record in &batch.batch.documents {
-            let Some(document) = documents.next() else {
-                return false;
-            };
-            if document.record != *record
-                || previous.is_some_and(|sequence| document.sequence != sequence + 1)
-            {
-                return false;
-            }
-            previous = Some(document.sequence);
-        }
-    }
-    documents.next().is_none()
-}
-
-fn callback_checkpoints(
-    request: &Value,
-    sequence: u64,
-) -> Result<BTreeMap<String, CallbackCheckpoint>> {
-    parse_callback_checkpoint_map(request, "checkpoints", sequence)
-}
-
-fn callback_updates(
-    request: &Value,
-    sequence: u64,
-) -> Result<BTreeMap<String, CallbackCheckpoint>> {
-    parse_callback_checkpoint_map(request, "callback_updates", sequence)
-}
-
-fn apply_callback_updates(
-    target: &mut BTreeMap<String, CallbackCheckpoint>,
-    updates: BTreeMap<String, CallbackCheckpoint>,
-) {
-    for (name, delta) in updates {
-        match target.get_mut(&name) {
-            Some(existing)
-                if existing.format == delta.format && existing.descriptor == delta.descriptor =>
-            {
-                existing.sequence = delta.sequence;
-                existing.groups.extend(delta.groups);
-            }
-            _ => {
-                target.insert(name, delta);
-            }
-        }
-    }
-}
-
-fn parse_callback_checkpoint_map(
-    request: &Value,
-    field: &str,
-    sequence: u64,
-) -> Result<BTreeMap<String, CallbackCheckpoint>> {
-    let Some(raw) = request.get(field) else {
-        return Ok(BTreeMap::new());
-    };
-    let entries = raw
-        .as_object()
-        .ok_or("Callback checkpoints must be an object")?;
-    let mut parsed = BTreeMap::new();
-    for (name, checkpoint) in entries {
-        let checkpoint_obj = checkpoint
-            .as_object()
-            .ok_or("Invalid callback checkpoint name or format")?;
-        if name.is_empty()
-            || name.len() > 4096
-            || checkpoint_obj.get("format").and_then(Value::as_u64) != Some(1)
-            || !checkpoint_obj
-                .keys()
-                .all(|k| matches!(k.as_str(), "format" | "descriptor" | "sequence" | "groups"))
-        {
-            return Err("Invalid callback checkpoint name or format".into());
-        }
-        let coverage = safe_integer(
-            checkpoint_obj
-                .get("sequence")
-                .ok_or("Callback checkpoint requires coverage")?,
-            "callback coverage",
-        )?;
-        if coverage > sequence {
-            return Err("Callback checkpoint is ahead of the committed log".into());
-        }
-        let descriptor = checkpoint_obj
-            .get("descriptor")
-            .ok_or("Callback checkpoint requires descriptor")?;
-        validate_json(descriptor, 0)?;
-        let raw_groups = checkpoint_obj
-            .get("groups")
-            .and_then(Value::as_array)
-            .ok_or("Callback checkpoint requires groups")?;
-        let mut groups = BTreeMap::new();
-        for group in raw_groups {
-            let group_obj = group
-                .as_object()
-                .ok_or("Callback group requires key, state and result")?;
-            if !group_obj
-                .keys()
-                .all(|k| matches!(k.as_str(), "key" | "state" | "result" | "sequence"))
-            {
-                return Err("Callback group contains unknown fields".into());
-            }
-            let key = group_obj
-                .get("key")
-                .ok_or("Callback group requires key, state and result")?;
-            let state = group_obj
-                .get("state")
-                .ok_or("Callback group requires key, state and result")?;
-            let result = group_obj
-                .get("result")
-                .ok_or("Callback group requires key, state and result")?;
-            for value in [key, state, result] {
-                validate_json(value, 0)?;
-                validate_exact_integers(value)?;
-            }
-            let group_sequence = safe_integer(
-                group_obj
-                    .get("sequence")
-                    .ok_or("Callback group requires sequence")?,
-                "callback group sequence",
-            )?;
-            if group_sequence > coverage {
-                return Err("Callback group is ahead of its checkpoint".into());
-            }
-            let canonical_key = canonical_json(key)?;
-            if groups
-                .insert(
-                    canonical_key,
-                    CallbackGroup {
-                        key: key.clone(),
-                        state: state.clone(),
-                        result: result.clone(),
-                        sequence: group_sequence,
-                    },
-                )
-                .is_some()
-            {
-                return Err("Duplicate canonical key in callback checkpoint".into());
-            }
-        }
-        parsed.insert(
-            name.clone(),
-            CallbackCheckpoint {
-                format: 1,
-                descriptor: descriptor.clone(),
-                sequence: coverage,
-                groups,
-            },
-        );
-    }
-    Ok(parsed)
-}
-
-fn validate_callback_checkpoints(
-    checkpoints: &BTreeMap<String, CallbackCheckpoint>,
-    sequence: u64,
-) -> Result<()> {
-    for (name, checkpoint) in checkpoints {
-        if name.is_empty() || name.len() > 4096 || checkpoint.format != 1 {
-            return Err("Invalid callback checkpoint name or format".into());
-        }
-        if checkpoint.sequence > MAX_SAFE_SEQUENCE || checkpoint.sequence > sequence {
-            return Err("Callback checkpoint is ahead of the committed log".into());
-        }
-        validate_json(&checkpoint.descriptor, 0)?;
-        for (canonical_key, group) in &checkpoint.groups {
-            for value in [&group.key, &group.state, &group.result] {
-                validate_json(value, 0)?;
-                validate_exact_integers(value)?;
-            }
-            if canonical_json(&group.key)? != *canonical_key {
-                return Err("Invalid canonical key in callback checkpoint".into());
-            }
-            if group.sequence > MAX_SAFE_SEQUENCE || group.sequence > checkpoint.sequence {
-                return Err("Callback group is ahead of its checkpoint".into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn document_value(document: &Document) -> Value {
-    let record = &document.record;
-    json!({"id":record.id,"source":record.source,"position":record.position,"payload":record.payload,"sequence":document.sequence})
-}
-fn version_value(version: &Version) -> Result<Value> {
-    let mut key: Value = serde_json::from_str(&version.key).map_err(|_| "Invalid retained key")?;
-    normalize_json_numbers(&mut key);
-    Ok(json!({"key":key,"state":version.state,"result":version.result,"sequence":version.sequence}))
-}
-fn validate_record(record: &RetainedDocument) -> Result<()> {
-    if record.id.is_empty()
-        || record.id.len() > 4096
-        || record.source.is_empty()
-        || record.source.len() > 4096
-        || record.position > MAX_SAFE_SEQUENCE
-    {
-        return Err("Invalid retained document identity or source position".into());
-    }
-    validate_json(&record.payload, 0)
-}
-fn validate_json(value: &Value, depth: usize) -> Result<()> {
-    if depth > MAX_JSON_DEPTH {
-        return Err(format!("JSON nesting exceeds {MAX_JSON_DEPTH}"));
-    }
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                validate_json(value, depth + 1)?;
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values() {
-                validate_json(value, depth + 1)?;
-            }
-        }
-        Value::Number(n) if n.as_f64().is_none_or(|v| !v.is_finite()) => {
-            return Err("JSON numbers must be finite".into())
-        }
-        _ => {}
-    }
-    Ok(())
-}
-/// The Python host's rule, `int(float(n)) == n`: an integer is accepted only
-/// when converting it to the nearest IEEE-754 double loses nothing. Floating
-/// JSON numbers are doubles by definition. Integer literals outside the 64-bit
-/// range are already parsed as doubles by `serde_json`.
-pub(crate) fn integer_is_exact_double(number: &serde_json::Number) -> bool {
-    if let Some(value) = number.as_u64() {
-        (value as f64) as u128 == u128::from(value)
-    } else if let Some(value) = number.as_i64() {
-        (value as f64) as i128 == i128::from(value)
-    } else {
-        true
-    }
-}
-/// Rejects host-supplied integers that a double cannot represent exactly,
-/// before any mapping or durable write, rather than silently rounding them.
-fn validate_exact_integers(value: &Value) -> Result<()> {
-    match value {
-        Value::Number(number) if !integer_is_exact_double(number) => Err(format!(
-            "JSON integer {number} is not exactly representable as an IEEE-754 double \
-             (nearest is {}); encode larger identifiers as strings",
-            ryu_js::Buffer::new().format_finite(number.as_f64().unwrap_or(0.0))
-        )),
-        Value::Array(values) => values.iter().try_for_each(validate_exact_integers),
-        Value::Object(values) => values.values().try_for_each(validate_exact_integers),
-        _ => Ok(()),
-    }
-}
-fn next_sequence(sequence: u64) -> Result<u64> {
-    sequence
-        .checked_add(1)
-        .filter(|n| *n <= MAX_SAFE_SEQUENCE)
-        .ok_or_else(|| "JavaScript-safe sequence limit reached".into())
-}
-fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<String>> {
-    match object.get(key) {
-        None => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() && value.len() <= 4096 => {
-            Ok(Some(value.clone()))
-        }
-        _ => Err(format!(
-            "{key} must be a nonempty string of at most 4096 bytes"
-        )),
-    }
-}
-fn safe_integer(value: &Value, field: &str) -> Result<u64> {
-    value
-        .as_u64()
-        .filter(|v| *v <= MAX_SAFE_SEQUENCE)
-        .ok_or_else(|| format!("{field} must be a nonnegative JavaScript-safe integer"))
-}
-fn page_limit(request: &Value) -> Result<usize> {
-    match request.get("limit") {
-        None => Ok(100),
-        Some(value) => value
-            .as_u64()
-            .filter(|n| *n > 0 && *n <= MAX_PAGE as u64)
-            .map(|n| n as usize)
-            .ok_or_else(|| "limit must be between 1 and 1024".into()),
-    }
-}
-fn parse_after(request: &Value, cursor: &str) -> Result<Option<Value>> {
-    match request.get("after") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(token)) => {
-            let parsed: Value = serde_json::from_str(token).map_err(|_| "Invalid after token")?;
-            let array = parsed
-                .as_array()
-                .filter(|v| v.len() == 2)
-                .ok_or("Invalid after token")?;
-            if array[0].as_str() != Some(cursor) {
-                return Err("After token belongs to a different snapshot".into());
-            }
-            Ok(Some(array[1].clone()))
-        }
-        _ => Err("after must be an opaque pagination string".into()),
-    }
-}
-/// Canonical JSON keys use JavaScript numeric formatting and UTF-16 property order.
-/// This makes compound keys equal across Rust, Python and browser hosts.
-pub fn canonical_json(value: &Value) -> Result<String> {
-    fn write(value: &Value, output: &mut String) -> Result<()> {
-        match value {
-            Value::Null => output.push_str("null"),
-            Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
-            Value::Number(value) => {
-                let number = value
-                    .as_f64()
-                    .filter(|v| v.is_finite())
-                    .ok_or("JSON numbers must be finite")?;
-                output.push_str(ryu_js::Buffer::new().format_finite(number));
-            }
-            Value::String(value) => {
-                output.push_str(&serde_json::to_string(value).map_err(|e| e.to_string())?)
-            }
-            Value::Array(values) => {
-                output.push('[');
-                for (index, value) in values.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    write(value, output)?;
-                }
-                output.push(']');
-            }
-            Value::Object(values) => {
-                let mut keys: Vec<_> = values.keys().collect();
-                keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
-                output.push('{');
-                for (index, key) in keys.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    output.push_str(&serde_json::to_string(key).map_err(|e| e.to_string())?);
-                    output.push(':');
-                    write(&values[*key], output)?;
-                }
-                output.push('}');
-            }
-        }
-        Ok(())
-    }
-    let mut output = String::new();
-    write(value, &mut output)?;
-    Ok(output)
-}
-
-// Portable JSON wire numbers have JavaScript/IEEE-754 semantics. Preserve small
-// integer variants for convenient API replies; use floating variants for large
-// numbers so a Python JSON decoder cannot mistake a shortest decimal spelling
-// (e.g.1000000000000000100) for an exact arbitrary-precision integer.
-// Source positions and engine sequences never pass through this function.
-fn normalize_json_numbers(value: &mut Value) {
-    match value {
-        Value::Number(number) => {
-            if let Some(float) = number.as_f64() {
-                if float.abs() > MAX_SAFE_SEQUENCE as f64 {
-                    *number = serde_json::Number::from_f64(float).expect("JSON numbers are finite");
-                }
-            }
-        }
-        Value::Array(values) => values.iter_mut().for_each(normalize_json_numbers),
-        Value::Object(values) => values.values_mut().for_each(normalize_json_numbers),
-        _ => {}
-    }
 }

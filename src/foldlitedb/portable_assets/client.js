@@ -26,6 +26,8 @@ import {databaseRequestJSON} from './host.js';
 import {DatabaseError, deserializeError} from './errors.js';
 export {DatabaseError, DocumentConflict, SourceOrderError, CursorExpired} from './errors.js';
 
+const encoder = new TextEncoder();
+
 export class BrowserDatabase {
   static async connect(options = {}) {
     const database = new BrowserDatabase(options);
@@ -69,7 +71,7 @@ export class BrowserDatabase {
   request(request) {
     try {
       databaseRequestJSON(request);
-      if (new TextEncoder().encode(JSON.stringify(request)).length > 4 * 1024 * 1024) throw new DatabaseError('Browser request exceeds 4 MiB');
+      if (encoder.encode(JSON.stringify(request)).length > 4 * 1024 * 1024) throw new DatabaseError('Browser request exceeds 4 MiB');
     } catch (error) { return Promise.reject(error instanceof DatabaseError ? error : new DatabaseError(error.message)); }
     return this._call(structuredClone(request));
   }

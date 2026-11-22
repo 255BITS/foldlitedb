@@ -26,17 +26,17 @@
 
 <h2 id="publish">Publish a new version</h2>
 <p>Merge the complete release source into <code>master</code>, including the native code, bundled Wasm assets, and version metadata. Monitor <a href="https://github.com/255BITS/foldlitedb/actions/workflows/release.yml">the release workflow</a>. After PyPI publishes, the source release job confirms that every PyPI file has the same hash as the tested distributions from that run. It then publishes <code>v&lt;version&gt;</code> at the tested commit and links to the packages and changelog.</p>
-<p>If the source release job fails after PyPI succeeds, rerun the failed job in the original workflow run. A manually published GitHub release against a verified commit remains available for release recovery. The 0.4.2 release used this command.</p>
+<p>If the source release job fails after PyPI succeeds, rerun the failed job in the original workflow run. A manually published GitHub release against a verified commit remains available for release recovery. For example, for 0.5.0:</p>
 <pre><code>RELEASE_SHA=$(git rev-parse HEAD)
-gh release create v0.4.2 --repo 255BITS/foldlitedb \
-  --target "$RELEASE_SHA" --title "Foldlite DB 0.4.2" \
-  --notes-file /tmp/foldlitedb-0.4.2-release-notes.txt</code></pre>
+gh release create v0.5.0 --repo 255BITS/foldlitedb \
+  --target "$RELEASE_SHA" --title "Foldlite DB 0.5.0" \
+  --notes-file /tmp/foldlitedb-0.5.0-release-notes.txt</code></pre>
 <p>Write the release notes file before running this command. A matching GitHub release also lets operators rerun the test and publish jobs for a version with a partial upload.</p>
 
 <h2 id="verify">Verify the published package</h2>
-<p>Confirm version <code>0.4.2</code> and distribution hashes on <a href="https://pypi.org/project/foldlitedb/0.4.2/">PyPI</a>, then install in a fresh environment outside the checkout. Supported wheel platforms need Python 3.11+ and no Rust compiler. Building the source archive requires Rust/Cargo 1.90+ and a C compiler and linker.</p>
+<p>Confirm version <code>0.5.0</code> and distribution hashes on <a href="https://pypi.org/project/foldlitedb/0.5.0/">PyPI</a>, then install in a fresh environment outside the checkout. Supported wheel platforms need Python 3.11+ and no Rust compiler. Building the source archive requires Rust/Cargo 1.90+ and a C compiler and linker.</p>
 <pre><code>python -m venv /tmp/foldlitedb-release-smoke
-/tmp/foldlitedb-release-smoke/bin/python -m pip install --only-binary=:all: foldlitedb==0.4.2
+/tmp/foldlitedb-release-smoke/bin/python -m pip install --only-binary=:all: foldlitedb==0.5.0
 cd /tmp
-/tmp/foldlitedb-release-smoke/bin/python -I -c 'from importlib.metadata import version; from foldlitedb import Database, View; assert version("foldlitedb") == "0.4.2"; db = Database(":memory:", View.bundled("metrics")); db.add_many([{"metric": "loss", "value": 4}, {"metric": "loss", "value": 8}]); assert next(db.rows()).result["mean"] == 6; db.rebuild(); assert next(db.rows()).result["sum"] == 12; db.close()'</code></pre>
+/tmp/foldlitedb-release-smoke/bin/python -I -c 'from importlib.metadata import version; from foldlitedb import Database, View; assert version("foldlitedb") == "0.5.0"; db = Database(":memory:", View.bundled("metrics")); db.add_many([{"metric": "loss", "value": 4}, {"metric": "loss", "value": 8}]); assert next(db.rows()).result["mean"] == 6; db.rebuild(); assert next(db.rows()).result["sum"] == 12; db.close()'</code></pre>
 <p>On Windows, use the virtual environment's <code>Scripts\python.exe</code>. Retain the GitHub Actions run and artifact hashes as the release receipt.</p>

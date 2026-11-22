@@ -1,5 +1,4 @@
 import { JSON } from "json-as";
-import { validateJSON } from "json-as/assembly/util/validateJson";
 import { Parser } from "./parse";
 
 export { JSON };
@@ -8,6 +7,7 @@ export { JSON };
 const CAPACITY: i32 = 262144;
 const INPUT: usize = memory.data(CAPACITY);
 const OUTPUT: usize = memory.data(CAPACITY);
+let hasRun: bool = false;
 
 export function abi_version(): i32 { return 1; }
 export function input_ptr(): i32 { return <i32>INPUT; }
@@ -30,6 +30,7 @@ export abstract class View {
     public mergeable: bool = false,
     public version: string = "1",
     public stateVersion: string = "1",
+    public reduceGroups: bool = false,
   ) {}
   abstract map(document: JSON.Value): Emission[];
   abstract identity(): JSON.Value;
@@ -94,15 +95,34 @@ function validUTF8(length: i32): bool {
   return true;
 }
 
-/** Restrict ABI values to finite, ordinary JSON with bounded nesting. */
+/** Check per-datum nesting depth for parsed inputs that exceeded 64 transport levels. */
+function withinDepth(value: JSON.Value, depth: i32 = 0): bool {
+  if (depth > 64) return false;
+  if (value.type == JSON.Types.Object) {
+    const vals = value.get<JSON.Obj>().values();
+    for (let i = 0; i < vals.length; i++) {
+      if (!withinDepth(vals[i], depth + 1)) return false;
+    }
+    return true;
+  }
+  if (value.type == JSON.Types.Array) {
+    const arr = value.get<JSON.Arr>();
+    for (let i = 0; i < arr.length; i++) {
+      if (!withinDepth(arr.at(i), depth + 1)) return false;
+    }
+    return true;
+  }
+  return true;
+}
+
+/** Restrict ABI output values to finite, ordinary JSON with bounded nesting. */
 function finiteJSON(value: JSON.Value, depth: i32 = 0): bool {
   if (depth > 64) return false;
   if (numeric(value)) return isFinite(number(value));
   if (value.type == JSON.Types.Object) {
-    const obj = value.get<JSON.Obj>();
-    const keys = obj.keys();
-    for (let i = 0; i < keys.length; i++) {
-      if (!finiteJSON(obj.get(keys[i])!, depth + 1)) return false;
+    const vals = value.get<JSON.Obj>().values();
+    for (let i = 0; i < vals.length; i++) {
+      if (!finiteJSON(vals[i], depth + 1)) return false;
     }
     return true;
   }
@@ -116,6 +136,21 @@ function finiteJSON(value: JSON.Value, depth: i32 = 0): bool {
   return value.type == JSON.Types.Null || value.type == JSON.Types.String || value.type == JSON.Types.Bool;
 }
 
+function writeAscii(offset: i32, text: string): i32 {
+  const ptr = changetype<usize>(text);
+  for (let i = 0; i < text.length; i++) {
+    store<u8>(OUTPUT + offset + i, <u8>load<u16>(ptr + ((<usize>i) << 1)));
+  }
+  return offset + text.length;
+}
+
+function writeUTF8(offset: i32, text: string, byteLength: i32): i32 {
+  if (text.length > 0) {
+    String.UTF8.encodeUnsafe(changetype<usize>(text), text.length, OUTPUT + offset);
+  }
+  return offset + byteLength;
+}
+
 function write(text: string): i32 {
   const length = String.UTF8.byteLength(text);
   if (length > CAPACITY) return write('{"error":"Response exceeds ABI byte capacity"}');
@@ -123,42 +158,80 @@ function write(text: string): i32 {
   return <i32>length;
 }
 
+function writeOk(body: string): i32 {
+  const bodyBytes = <i32>String.UTF8.byteLength(body);
+  if (bodyBytes + 7 > CAPACITY) return write('{"error":"Response exceeds ABI byte capacity"}');
+  let offset = writeAscii(0, '{"ok":');
+  offset = writeUTF8(offset, body, bodyBytes);
+  store<u8>(OUTPUT + offset++, 125);
+  return offset;
+}
+
 function failure(message: string): i32 {
   return write('{"error":' + JSON.stringify<string>(message) + '}');
 }
 
 export function dispatch(view: View, length: i32): i32 {
-  // The previous call's temporary objects are unreachable here. This explicit
-  // collection plus the incremental runtime bounds memory across long sessions.
-  __collect();
+  if (hasRun) {
+    // The previous call's temporary objects are unreachable here. This explicit
+    // collection plus the incremental runtime bounds memory across long sessions.
+    __collect();
+  } else {
+    hasRun = true;
+  }
   view.error = "";
   if (length < 0 || length > CAPACITY) return failure("Invalid request byte length");
   if (!validUTF8(length)) return failure("Request is not valid UTF-8");
   const text = String.UTF8.decodeUnsafe(INPUT, <usize>length);
-  if (!validateJSON(text)) return failure("Request is not valid JSON");
   const parser = new Parser(text);
   const requestValue = parser.value();
   if (parser.error.length > 0) return failure(parser.error);
   parser.whitespace();
   if (parser.cursor != text.length) return failure("Request is not valid JSON");
-  // Validate each explicit datum at depth zero, not its ABI wrapper.
-  if (!finiteJSON(requestValue, -2)) return failure("Request must contain finite JSON within 64 data nesting levels");
   const request = object(requestValue);
   if (request == null) return failure("Request must be an object");
-  const fields = request.keys();
-  for (let i = 0; i < fields.length; i++) {
-    const field = fields[i];
-    const child = request.get(field)!;
-    if ((field == "documents" || field == "values") && child.type == JSON.Types.Array) {
-      const elements = child.get<JSON.Arr>();
-      for (let j = 0; j < elements.length; j++) {
-        if (!finiteJSON(elements.at(j))) return failure("Request data exceeds 64 nesting levels");
-      }
-    } else if (!finiteJSON(child)) return failure("Request data exceeds 64 nesting levels");
-  }
   const operation = request.get("op");
   if (operation == null || operation.type != JSON.Types.String) return failure("Request requires a string op");
   const op = operation.get<string>();
+  // Validate each explicit datum at depth zero only when transport nesting exceeded 64.
+  if (parser.maxDepth > 64) {
+    const fields = request.keys();
+    for (let i = 0; i < fields.length; i++) {
+      const field = fields[i];
+      const child = request.get(field)!;
+      if (field == "groups" && op == "reduce_groups" && child.type == JSON.Types.Array) {
+        const groups = child.get<JSON.Arr>();
+        for (let j = 0; j < groups.length; j++) {
+          const entry = groups.at(j);
+          const groupObj = object(entry);
+          if (groupObj == null) {
+            if (!withinDepth(entry)) return failure("Request data exceeds 64 nesting levels");
+            continue;
+          }
+          const gFields = groupObj.keys();
+          for (let k = 0; k < gFields.length; k++) {
+            const gField = gFields[k];
+            const gChild = groupObj.get(gField)!;
+            if (gField == "values" && gChild.type == JSON.Types.Array) {
+              const vals = gChild.get<JSON.Arr>();
+              for (let m = 0; m < vals.length; m++) {
+                if (!withinDepth(vals.at(m))) return failure("Request data exceeds 64 nesting levels");
+              }
+            } else if (!withinDepth(gChild)) {
+              return failure("Request data exceeds 64 nesting levels");
+            }
+          }
+        }
+      } else if ((field == "documents" || field == "values") && child.type == JSON.Types.Array) {
+        const elements = child.get<JSON.Arr>();
+        for (let j = 0; j < elements.length; j++) {
+          if (!withinDepth(elements.at(j))) return failure("Request data exceeds 64 nesting levels");
+        }
+      } else if (!withinDepth(child)) {
+        return failure("Request data exceeds 64 nesting levels");
+      }
+    }
+  }
   let result = JSON.Value.empty();
   if (op == "descriptor") {
     const descriptor = new JSON.Obj();
@@ -167,6 +240,7 @@ export function dispatch(view: View, length: i32): i32 {
     descriptor.set<string>("version", view.version);
     descriptor.set<string>("state_version", view.stateVersion);
     descriptor.set<bool>("mergeable", view.mergeable);
+    if (view.reduceGroups) descriptor.set<bool>("reduce_groups", true);
     result = JSON.Value.from(descriptor);
   } else if (op == "map") {
     const documents = request.get("documents");
@@ -202,8 +276,77 @@ export function dispatch(view: View, length: i32): i32 {
     const right = request.get("right");
     if (left == null || right == null) return failure("Merge requires left and right states");
     result = view.merge(left, right);
+  } else if (op == "reduce_groups") {
+    if (!view.reduceGroups) return failure("Unsupported operation: " + op);
+    const groupsVal = request.get("groups");
+    if (groupsVal == null || groupsVal.type != JSON.Types.Array) {
+      return failure("reduce_groups requires a groups array");
+    }
+    const groups = groupsVal.get<JSON.Arr>();
+    let offset = writeAscii(0, '{"ok":{"groups":[');
+    const limit = CAPACITY - 3; // Reserve 3 bytes for ']}}'
+    for (let i = 0; i < groups.length; i++) {
+      const groupObj = object(groups.at(i));
+      if (groupObj == null) return failure("Each reduce_groups entry must be an object");
+      const valuesVal = groupObj.get("values");
+      if (valuesVal == null || valuesVal.type != JSON.Types.Array) {
+        return failure("Each reduce_groups entry requires a values array");
+      }
+      const existingState = groupObj.get("state");
+      const isNew = existingState == null;
+      let identityStr = "";
+      let initialState: JSON.Value;
+      if (isNew) {
+        const identityVal = view.identity();
+        if (view.error.length > 0) return failure(view.error);
+        if (!finiteJSON(identityVal)) return failure("View returned invalid or nonfinite JSON");
+        // Serialize before add() in case add() mutates state in place.
+        identityStr = JSON.stringify<JSON.Value>(identityVal);
+        initialState = identityVal;
+      } else {
+        initialState = existingState!;
+      }
+      const nextState = view.add(initialState, valuesVal.get<JSON.Arr>());
+      if (view.error.length > 0) return failure(view.error);
+      if (!finiteJSON(nextState)) return failure("View returned invalid or nonfinite JSON");
+      // Serialize before finalize() so mutating finalizers cannot corrupt retained state.
+      const stateStr = JSON.stringify<JSON.Value>(nextState);
+      const resultVal = view.finalize(nextState);
+      if (view.error.length > 0) return failure(view.error);
+      if (!finiteJSON(resultVal)) return failure("View returned invalid or nonfinite JSON");
+      const resultStr = JSON.stringify<JSON.Value>(resultVal);
+
+      const commaBytes: i32 = i > 0 ? 1 : 0;
+      const stateBytes = <i32>String.UTF8.byteLength(stateStr);
+      const resultBytes = <i32>String.UTF8.byteLength(resultStr);
+      if (isNew) {
+        const identityBytes = <i32>String.UTF8.byteLength(identityStr);
+        // '{"identity":' (12) + ',"state":' (9) + ',"result":' (10) + '}' (1) = 32
+        const needed = commaBytes + 32 + identityBytes + stateBytes + resultBytes;
+        if (offset + needed > limit) return write('{"ok":{"split":true}}');
+        if (i > 0) store<u8>(OUTPUT + offset++, 44);
+        offset = writeAscii(offset, '{"identity":');
+        offset = writeUTF8(offset, identityStr, identityBytes);
+        offset = writeAscii(offset, ',"state":');
+        offset = writeUTF8(offset, stateStr, stateBytes);
+        offset = writeAscii(offset, ',"result":');
+        offset = writeUTF8(offset, resultStr, resultBytes);
+        store<u8>(OUTPUT + offset++, 125);
+      } else {
+        // '{"state":' (9) + ',"result":' (10) + '}' (1) = 20
+        const needed = commaBytes + 20 + stateBytes + resultBytes;
+        if (offset + needed > limit) return write('{"ok":{"split":true}}');
+        if (i > 0) store<u8>(OUTPUT + offset++, 44);
+        offset = writeAscii(offset, '{"state":');
+        offset = writeUTF8(offset, stateStr, stateBytes);
+        offset = writeAscii(offset, ',"result":');
+        offset = writeUTF8(offset, resultStr, resultBytes);
+        store<u8>(OUTPUT + offset++, 125);
+      }
+    }
+    return writeAscii(offset, ']}}');
   } else return failure("Unsupported operation: " + op);
   if (view.error.length > 0) return failure(view.error);
   if (!finiteJSON(result)) return failure("View returned invalid or nonfinite JSON");
-  return write('{"ok":' + JSON.stringify<JSON.Value>(result) + '}');
+  return writeOk(JSON.stringify<JSON.Value>(result));
 }

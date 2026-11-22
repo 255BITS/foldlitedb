@@ -243,3 +243,139 @@ test('both modules declare a maximum of 16 MiB', async () => {
     assert.throws(() => api.memory.grow(1), RangeError);
   }
 });
+
+test('reduce_groups descriptor opt-in, new/existing groups, and state isolation', async () => {
+  const metrics = await load('metrics');
+  assert.equal(metrics.manifest.descriptor.reduce_groups, true);
+  assert.equal(metrics.call({ op: 'descriptor' }).reduce_groups, true);
+
+  const catalogue = await load('catalogue');
+  assert.equal(catalogue.manifest.descriptor.reduce_groups, true);
+
+  const documents = await load('documents');
+  assert.equal(Object.hasOwn(documents.manifest.descriptor, 'reduce_groups'), false);
+  assert.match(documents.raw(encoder.encode(JSON.stringify({ op: 'reduce_groups', groups: [] }))).error, /Unsupported/);
+
+  // Metrics: empty, new, and existing groups in one request; retained state must not carry mean.
+  assert.deepEqual(metrics.call({ op: 'reduce_groups', groups: [] }), { groups: [] });
+  const existing = { count: 2, sum: 7.5, min: 2, max: 5.5 };
+  const reduced = metrics.call({
+    op: 'reduce_groups',
+    groups: [
+      { values: [1, 3, 5] },
+      { state: existing, values: [-3] },
+      { values: [] },
+    ],
+  });
+  assert.equal(reduced.groups.length, 3);
+  assert.deepEqual(reduced.groups[0], {
+    identity: { count: 0, sum: 0, min: null, max: null },
+    state: { count: 3, sum: 9, min: 1, max: 5 },
+    result: { count: 3, sum: 9, min: 1, max: 5, mean: 3 },
+  });
+  assert.equal(Object.hasOwn(reduced.groups[1], 'identity'), false);
+  assert.deepEqual(reduced.groups[1], {
+    state: { count: 3, sum: 4.5, min: -3, max: 5.5 },
+    result: { count: 3, sum: 4.5, min: -3, max: 5.5, mean: 1.5 },
+  });
+  assert.deepEqual(reduced.groups[2], {
+    identity: { count: 0, sum: 0, min: null, max: null },
+    state: { count: 0, sum: 0, min: null, max: null },
+    result: { count: 0, sum: 0, min: null, max: null, mean: null },
+  });
+
+  // Catalogue: add() mutates state in place, so new-group identity must still serialize as {}.
+  const catReduced = catalogue.call({
+    op: 'reduce_groups',
+    groups: [
+      { values: [{ id: 'a', title: 'Alpha', deleted: false }, { id: 'b', title: 'Beta', deleted: false }] },
+      { state: { a: 'Old', keep: 'Yes' }, values: [{ id: 'a', title: null, deleted: true }] },
+    ],
+  });
+  assert.deepEqual(catReduced, {
+    groups: [
+      {
+        identity: {},
+        state: { a: 'Alpha', b: 'Beta' },
+        result: { count: 2, items: { a: 'Alpha', b: 'Beta' } },
+      },
+      {
+        state: { keep: 'Yes' },
+        result: { count: 1, items: { keep: 'Yes' } },
+      },
+    ],
+  });
+
+  // Capacity split fallback when combined reduce_groups response would exceed 262144 bytes.
+  const largeTitle = 'x'.repeat(60000);
+  const splitResponse = catalogue.call({
+    op: 'reduce_groups',
+    groups: [
+      { values: [{ id: 'k1', title: largeTitle, deleted: false }] },
+      { values: [{ id: 'k2', title: largeTitle, deleted: false }] },
+      { values: [{ id: 'k3', title: largeTitle, deleted: false }] },
+    ],
+  });
+  assert.deepEqual(splitResponse, { split: true });
+
+  // Invalid shapes and errors inside reduce_groups reject cleanly.
+  for (const bad of [
+    { op: 'reduce_groups' },
+    { op: 'reduce_groups', groups: {} },
+    { op: 'reduce_groups', groups: [null] },
+    { op: 'reduce_groups', groups: [{}] },
+    { op: 'reduce_groups', groups: [{ values: 'bad' }] },
+    { op: 'reduce_groups', groups: [{ state: null, values: [1] }] },
+    { op: 'reduce_groups', groups: [{ values: [1] }, { values: ['bad'] }] },
+  ]) {
+    assert.equal(typeof metrics.raw(encoder.encode(JSON.stringify(bad))).error, 'string');
+  }
+});
+
+test('parser strict syntax, escapes, and number fast-path boundaries', async () => {
+  const { raw } = await load();
+  for (const text of [
+    '   ', '{"op":"map","documents":[+1]}', '{"op":"map","documents":[.5]}',
+    '{"op":"map","documents":[-.5]}', '{"op":"map","documents":[-01]}',
+    '{"op":"map","documents":[00]}', '{"op":"map","documents":[-]}',
+    '{"op":"map","documents":[1e+]}', '{"op":"map","documents":[1e-]}',
+    '{"op":"map","documents":[1.e5]}', '{"op":"map","documents":[NaN]}',
+    '{"op":"map","documents":[Infinity]}', '{"op":"map","documents":[-Infinity]}',
+    '{"op":"map","documents":[1 2]}', '{"op":"map","documents":[1,]}',
+    '{"op":"map" "documents":[]}', '{"op":}', '{"op"}', '{1:2}',
+    '{"op":"map","documents":[tru]}', '{"op":"map","documents":[truee]}',
+    '{"op":"map","documents":[fals]}', '{"op":"map","documents":[nul]}',
+    '{"op":"map","documents":["\\u123"]}', '{"op":"map","documents":["\\u123g"]}',
+    '{"op":"map","documents":["unterminated', '{"op":"map","documents":["trailing\\',
+    '{"op":"map","documents":["a\tb"]}', '{"op":"map","documents":["a\nb"]}',
+  ]) assert.match(raw(encoder.encode(text)).error, /JSON/, text);
+
+  for (const text of [
+    '{"op":"map","documents":["\\ud800\\u0041"]}',
+    '{"op":"map","documents":["\\ud800\\n"]}',
+    '{"op":"map","documents":["\\ud800\\ud83d\\ude80"]}',
+    '{"op":"map","documents":["prefix\\udc00suffix"]}',
+  ]) assert.match(raw(encoder.encode(text)).error, /Unicode/, text);
+
+  // Valid escapes (every RFC 8259 escape, mixed with literal non-ASCII).
+  const esc = raw(encoder.encode('{"op":"map","documents":[{"metric":"café\\b\\f\\n\\r\\t\\/\\"\\\\\\u0041\\uD83D\\uDE80","value":1}]}'));
+  assert.deepEqual(esc, { ok: [[{ key: 'café\b\f\n\r\t/"\\A🚀', value: 1 }]] });
+
+  // Number fast-path and fallback boundaries: 18/19/20 digits, 2^53 +/- 1, exp +/- 22..38, underflow/overflow.
+  for (const token of [
+    '0', '-0', '0.0000', '0e99999999',
+    '9007199254740992', '9007199254740993', '9007199254740994', '9007199254740995',
+    '999999999999999999', '1000000000000000100', '12345678901234567890',
+    '1.23456789012345678901e-5', '9007199254740993e1', '9007199254740993e-1',
+    '1e22', '1e-22', '1e23', '1e-23', '1e25', '1e37', '1e38',
+    '9007199254740992e22', '9007199254740992e-22', '9007199254740992e23',
+    '1e-400', '-1e-400', '2.2250738585072014e-308', '2.225073858507201e-308',
+  ]) {
+    const res = raw(encoder.encode(`{"op":"map","documents":[{"metric":"n","value":${token}}]}`));
+    assert.equal(res.error, undefined, `${token}: ${res.error}`);
+    assert.equal(res.ok[0][0].value, JSON.parse(JSON.stringify(JSON.parse(token))), token);
+  }
+  for (const token of ['1e400', '-1e400', '1.8e308', '-1.8e308']) {
+    assert.match(raw(encoder.encode(`{"op":"map","documents":[{"metric":"n","value":${token}}]}`)).error, /finite/, token);
+  }
+});
