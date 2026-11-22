@@ -68,6 +68,18 @@ def site_files(site):
     return result
 
 
+def legacy_pages_state(endpoint):
+    state = subprocess.run(["gh", "api", endpoint], text=True, capture_output=True)
+    if state.returncode:
+        if "404" not in state.stderr:
+            raise RuntimeError(state.stderr.strip())
+        return None
+    current = json.loads(state.stdout)
+    if current.get("build_type") == "workflow":
+        raise ValueError("This site uses GitHub Actions. Run docs.yml on the default branch to publish it.")
+    return current
+
+
 def publish(site, repository, message):
     site = site.resolve()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
@@ -79,6 +91,8 @@ def publish(site, repository, message):
     for name in generated:
         if not (site / name).is_file() or (site / name).is_symlink():
             raise ValueError(f"Only regular static files can be published: {name}")
+    endpoint = f"repos/{repository}/pages"
+    legacy_pages_state(endpoint)
     remote = f"https://github.com/{repository}.git"
     branch = "gh-pages"
     existing = subprocess.run([*GIT, "ls-remote", "--exit-code", "--heads", remote, branch],
@@ -117,12 +131,9 @@ def publish(site, repository, message):
             command(["git", "commit", "-m", message], cwd=checkout)
             command([*GIT, "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=checkout)
         commit = command(["git", "rev-parse", "HEAD"], cwd=checkout, capture=True).stdout.strip()
-    endpoint = f"repos/{repository}/pages"
-    state = subprocess.run(["gh", "api", endpoint], text=True, capture_output=True)
-    if state.returncode and "404" not in state.stderr:
-        raise RuntimeError(state.stderr.strip())
-    method = "PUT" if state.returncode == 0 else "POST"
-    current = json.loads(state.stdout) if state.returncode == 0 else {}
+    state = legacy_pages_state(endpoint)
+    method = "PUT" if state is not None else "POST"
+    current = state or {}
     if current.get("build_type") != "legacy" or current.get("source") != {"branch": branch, "path": "/"}:
         command(["gh", "api", "--method", method, endpoint, "-f", "build_type=legacy",
                  "-f", f"source[branch]={branch}", "-f", "source[path]=/"])

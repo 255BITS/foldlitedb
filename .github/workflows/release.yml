@@ -1,15 +1,13 @@
 name: Publish to PyPI
 
 on:
+  push:
+    branches: [master]
   release:
     types: [published]
 
 permissions:
   contents: read
-
-concurrency:
-  group: pypi-${{ github.event.release.tag_name }}
-  cancel-in-progress: false
 
 jobs:
   validate-release:
@@ -19,33 +17,69 @@ jobs:
     timeout-minutes: 5
     outputs:
       source_sha: ${{ steps.package.outputs.source_sha }}
+      version: ${{ steps.package.outputs.version }}
+      publish: ${{ steps.package.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Require a tag matching the Python and Rust versions
+      - name: Validate matching package versions and check PyPI
         id: package
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python scripts/check_release_metadata.py --tag "$RELEASE_TAG"
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            python scripts/check_release_metadata.py --tag "$RELEASE_TAG"
+          else
+            python scripts/check_release_metadata.py
+          fi
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import urlopen
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          publish = True
+          if os.environ["GITHUB_EVENT_NAME"] == "push":
+              try:
+                  with urlopen(f"https://pypi.org/pypi/foldlitedb/{quote(version, safe='')}/json", timeout=15) as response:
+                      published = json.load(response)
+              except HTTPError as error:
+                  if error.code != 404:
+                      raise
+              else:
+                  if published["info"]["name"].lower() != "foldlitedb":
+                      raise SystemExit("PyPI returned a different project")
+                  publish = not published["urls"]
+          print(f"version={version}")
+          print(f"publish={str(publish).lower()}")
+          PY
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   checks:
     name: Test and build release
     needs: validate-release
+    if: needs.validate-release.outputs.publish == 'true'
     uses: ./.github/workflows/wheels.yml
     with:
       source_ref: ${{ needs.validate-release.outputs.source_sha }}
 
   publish:
     name: Publish tested distributions
-    needs: checks
+    needs: [validate-release, checks]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: pypi-${{ needs.validate-release.outputs.version }}
+      cancel-in-progress: false
     environment:
       name: pypi
       url: https://pypi.org/project/foldlitedb/
@@ -58,3 +92,33 @@ jobs:
           path: dist/
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  github-release:
+    name: Publish tested source to GitHub
+    if: github.repository == '255BITS/foldlitedb' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [validate-release, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: github-release-${{ needs.validate-release.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Verify PyPI and publish the source release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/publish_github_source.py publish

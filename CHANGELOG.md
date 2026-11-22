@@ -25,6 +25,10 @@ the 0.2.0 release also includes a receipt for its tested distributions.
 - Speed up Python JSON validation/cloning (`_encode`, `_copy`, `_clone_trusted`), cache `_RegisteredView.signature`, add `CompiledSelector` with O(1) exact-key lookup and single `key_order` computation per key in `_query.py`/`_callbacks.py`, extract callback helpers into `_callbacks.py`, unify `_canonical_json`, and wire `Database` hot paths through the direct PyO3 bridge.
 - Replace O(N²) full-`Map` copies in `portable_assets/worker.js` with per-batch overlay staging and atomic rollback, skip redundant validation via `canonicalValidated()`, hoist `TextEncoder` in `client.js`, use binary search (`partitionPoint`) for `documents` and `changes` pagination, and deduplicate `scalarCompare` with a zero-allocation `codePointAt` implementation plus `isWellFormed()` fast path in `host.js`.
 
+### Release automation
+
+- Publish new versions to PyPI and publish the tested source tag to GitHub Releases automatically on `master` merges, and deploy documentation on `master` merges.
+
 ## [0.4.2](https://github.com/255BITS/foldlitedb/releases/tag/v0.4.2) — 2026-11-15
 
 ### Grouped portable view reduction
