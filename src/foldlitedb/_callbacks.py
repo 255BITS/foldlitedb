@@ -17,7 +17,6 @@ from .types import (
     _clone_trusted,
     _copy,
     _json,
-    _transport_json,
 )
 
 _MISSING = object()
@@ -359,7 +358,7 @@ def query_callback(
                                for option in sorted(canonical)) + "}"
     entry = db._views[name]
     signature = entry.signature
-    current = db.stats()["cursor"]
+    current = db._cursor()
     if cursor is None:
         native_cursor = current
         cursor = current + "~" + signature
@@ -477,6 +476,6 @@ def flush_view_checkpoints(db: Any) -> None:
         name: db._callback_checkpoint(name, db._views[name].states, sequence)
         for name in dirty_views
     }
-    db._call_json(_transport_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
+    db._call({"op": "set_callback_checkpoints", "checkpoints": checkpoints})
     for name in dirty_views:
         db._views[name].dirty = False

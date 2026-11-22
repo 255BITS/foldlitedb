@@ -479,6 +479,14 @@ impl Engine {
         self.storage.as_ref().is_some_and(|s| !s.legacy_read_only()) && !self.writer_poisoned()
     }
 
+    /// Return the current snapshot cursor without assembling full `stats()` metadata.
+    pub fn current_cursor(&self) -> Result<String> {
+        if self.storage.is_none() {
+            return Err("Database is closed".into());
+        }
+        Ok(self.cursor(self.state.sequence))
+    }
+
     fn cursor(&self, sequence: u64) -> String {
         format!(
             "{}:{}:{sequence}",

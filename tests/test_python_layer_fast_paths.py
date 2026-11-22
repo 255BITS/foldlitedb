@@ -5,7 +5,16 @@ import math
 
 import pytest
 
-from foldlitedb import Database, DatabaseError, Document, OrderedFold, View
+from foldlitedb import (
+    CursorExpired,
+    Database,
+    DatabaseError,
+    Document,
+    DocumentConflict,
+    OrderedFold,
+    SourceOrderError,
+    View,
+)
 from foldlitedb._query import compile_selector, key_order, matches_selector
 from foldlitedb.database import _RegisteredView, _copy, _encode
 from foldlitedb.projection import json_bytes
@@ -312,3 +321,135 @@ def test_unified_canonical_json_preserves_error_types():
     assert _json({"b": 1, "a": "☃"}) == '{"a":"☃","b":1}'
     with pytest.raises(DatabaseError):
         _json({1: "bad"})
+
+
+def test_pyo3_direct_bridge_types_errors_and_cursor_fast_path(monkeypatch):
+    with Database(":memory:") as db:
+        # Lightweight cursor matches stats()["cursor"] and updates on ingest.
+        c0 = db._cursor()
+        assert c0 == db.stats()["cursor"]
+
+        # Types round-trip cleanly: bool vs int, exact large ints, floats, tuples, enums, Unicode.
+        doc = db.add(
+            {
+                "metric": "m",
+                "value": 10,
+                "flags": (True, False, None, 0, 1, -0.0),
+                "big_exact": [2**53, -(2**53), 10**20],
+                _SampleStrEnum.KEY: _SampleIntEnum.ONE,
+                "unicode": "café ☃ 🚀",
+            },
+            id="typed-1",
+            source="s",
+            position=5,
+        )
+        assert db._cursor() == db.stats()["cursor"]
+        assert db._cursor() != c0
+
+        fetched = db.get("typed-1", source="s")
+        assert fetched == doc
+        assert type(fetched.payload["flags"][0]) is bool and fetched.payload["flags"][0] is True
+        assert type(fetched.payload["flags"][1]) is bool and fetched.payload["flags"][1] is False
+        assert fetched.payload["flags"][2] is None
+        assert type(fetched.payload["flags"][3]) is int and fetched.payload["flags"][3] == 0
+        assert type(fetched.payload["flags"][4]) is int and fetched.payload["flags"][4] == 1
+        assert fetched.payload["big_exact"] == [float(2**53), float(-(2**53)), float(10**20)]
+        assert fetched.payload["enum_key"] == 1
+        assert fetched.payload["unicode"] == "café ☃ 🚀"
+
+        # Structured error classes preserved across direct execute / execute_batch.
+        with pytest.raises(DocumentConflict):
+            db.add({"metric": "m", "value": 999}, id="typed-1", source="s", position=5)
+        with pytest.raises(SourceOrderError):
+            db.add({"metric": "m", "value": 1}, id="typed-2", source="s", position=3)
+        with pytest.raises(CursorExpired):
+            db.changes(since="foreign:deadbeef:1")
+
+        # Invalid inputs rejected directly in PyO3 converter before engine lock.
+        for bad in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            2**53 + 1,
+            -(2**53 + 1),
+            10**100 + 1,
+            10**400,
+            -(10**400),
+            "\ud800",
+            {"\udfff": 1},
+            {1: "non-str-key"},
+            {True: "bool-key"},
+            b"bytes",
+            object(),
+        ):
+            with pytest.raises(DatabaseError):
+                db.add(bad)
+            with pytest.raises(DatabaseError):
+                db.query(key=bad)
+            with pytest.raises(DatabaseError):
+                db.preview(bad)
+
+        # Depth 64 allowed vs depth 65 rejected on add, preview, and query.
+        deep_ok = _nest_list(1, 64)
+        deep_bad = _nest_list(1, 65)
+        assert db.add(deep_ok, id="deep-ok").payload == deep_ok
+        assert db.preview(deep_ok) == []
+        assert db.query(key=deep_ok).rows == ()
+        for fn in (db.add, db.preview, lambda v: db.query(key=v)):
+            with pytest.raises(DatabaseError, match="nesting"):
+                fn(deep_bad)
+
+        # Cyclic containers rejected cleanly without RecursionError.
+        cyc_list: list = []
+        cyc_list.append(cyc_list)
+        cyc_dict: dict = {}
+        cyc_dict["self"] = cyc_dict
+        for cyc in (cyc_list, cyc_dict):
+            with pytest.raises(DatabaseError, match="nesting"):
+                db.add(cyc)
+            with pytest.raises(DatabaseError, match="nesting"):
+                db.query(key=cyc)
+
+        # add_many snapshots mutable payloads at yield time and stops after 1024 items.
+        reused = {"metric": "snap", "value": 0}
+
+        def mutating_payloads():
+            for i in range(4):
+                reused["value"] = i
+                yield reused
+
+        docs = db.add_many(mutating_payloads())
+        assert [d.payload["value"] for d in docs] == [0, 1, 2, 3]
+
+        yielded = 0
+
+        def too_many():
+            nonlocal yielded
+            for i in range(2000):
+                yielded += 1
+                yield {"metric": "x", "value": i}
+
+        with pytest.raises(DatabaseError, match="1024"):
+            db.add_many(too_many())
+        assert yielded == 1025
+
+        # execute_json remains 100% backwards-compatible on the native engine.
+        raw_stats = db._call_json('{"op":"stats"}')
+        assert raw_stats["cursor"] == db._cursor()
+
+    # Closed engine reports DatabaseError from _cursor() and _call().
+    with pytest.raises(DatabaseError, match="closed"):
+        db._cursor()
+
+    # Callback query uses lightweight _cursor() without calling stats().
+    view = View(
+        "fast_cb",
+        version="1",
+        map=lambda d: [(d.payload["k"], d.payload["v"])],
+        reducer=OrderedFold(0, lambda s, v: s + v, version="1"),
+    )
+    with Database(":memory:", view) as cb_db:
+        cb_db.add({"k": "a", "v": 7})
+        monkeypatch.setattr(cb_db, "stats", lambda: (_ for _ in ()).throw(AssertionError("stats() must not be called")))
+        snap = cb_db.query(key="a")
+        assert len(snap.rows) == 1 and snap.rows[0].result == 7
