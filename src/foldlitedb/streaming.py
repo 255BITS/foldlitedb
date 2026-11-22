@@ -4,9 +4,11 @@ import base64
 from dataclasses import dataclass
 import json
 
+from .types import _canonical_json
+
 
 def _json(value):
-    return json.dumps(value, allow_nan=False, sort_keys=True, separators=(',', ':'))
+    return _canonical_json(value, ensure_ascii=True)
 
 
 def cursor_offset(cursor):

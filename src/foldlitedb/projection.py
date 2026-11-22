@@ -6,11 +6,12 @@ import math
 import os
 from pathlib import Path
 
+from .types import _canonical_json
+
 
 def json_bytes(value):
     try:
-        return json.dumps(value, allow_nan=False, sort_keys=True,
-                          separators=(',', ':')).encode('utf-8')
+        return _canonical_json(value, ensure_ascii=True).encode('utf-8')
     except (ValueError, TypeError, RecursionError) as exc:
         raise ValueError(f'Expected finite JSON: {exc}') from exc
 
