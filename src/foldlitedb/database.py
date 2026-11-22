@@ -42,9 +42,8 @@ from .types import (
     Snapshot,
     SourceOrderError,
     _copy,
-    _encode,
+    _encode,  # noqa: F401 - re-exported for tests/helpers
     _json,
-    _transport_json,
 )
 
 
@@ -314,13 +313,14 @@ class Database:
         self._views: dict[str, _RegisteredView] = {}
 
         try:
-            from ._native import Engine
+            from ._native import Engine, NativeBatch
         except ImportError as error:
             raise RuntimeError(
                 "Database requires the native Foldlite DB extension. "
                 "Install a built foldlitedb wheel, or build this checkout with "
                 "python -m pip install . (requires Rust when building from source)."
             ) from error
+        self._batch_cls = NativeBatch
         try:
             self._engine = (Engine(path_str, self.view.module, reset=True) if reset
                             else Engine(path_str, self.view.module))
@@ -402,8 +402,35 @@ class Database:
         entry = self._views.get(name)
         return bool(entry is not None and entry.external_descriptor_matches)
 
+    @_synchronized
     def _call(self, request):
-        return self._call_json(_encode(request, max_depth=65, sort_keys=False))
+        engine = self._engine
+        if engine is None:
+            raise DatabaseError("Database is closed")
+        try:
+            return engine.execute(request)
+        except (ValueError, TypeError, OverflowError) as error:
+            raise _native_error(error) from error
+
+    @_synchronized
+    def _cursor(self) -> str:
+        engine = self._engine
+        if engine is None:
+            raise DatabaseError("Database is closed")
+        try:
+            return engine.cursor()
+        except (ValueError, TypeError, OverflowError) as error:
+            raise _native_error(error) from error
+
+    @_synchronized
+    def _execute_batch(self, op: str, batch):
+        engine = self._engine
+        if engine is None:
+            raise DatabaseError("Database is closed")
+        try:
+            return engine.execute_batch(op, batch)
+        except (ValueError, TypeError, OverflowError) as error:
+            raise _native_error(error) from error
 
     @_synchronized
     def _call_json(self, request):
@@ -419,23 +446,23 @@ class Database:
             raise _native_error(error) from error
 
     @_synchronized
-    def _ingest_encoded(self, encoded: list[str], *, callbacks: bool = True):
+    def _ingest_batch(self, batch, *, callbacks: bool = True):
         self._assert_mutable()
         try:
             regular_views = [name for name, entry in self._views.items() if entry.mode == "documents"]
             if not callbacks or not regular_views:
-                return self._call_json('{"op":"ingest","documents":[' + ",".join(encoded) + "]}")
-            prepared = self._call_json('{"op":"prepare_ingest","documents":[' + ",".join(encoded) + "]}")
+                return self._execute_batch("ingest", batch)
+            prepared = self._execute_batch("prepare_ingest", batch)
             try:
                 if not prepared["new_documents"]:
-                    return self._call_json(_transport_json({"op": "commit_prepared", "token": prepared["token"]}))
+                    return self._call({"op": "commit_prepared", "token": prepared["token"]})
                 deltas = self._stage_callback_deltas(
                     prepared["new_documents"], prepared["sequence"], regular_views
                 )
                 updates = {name: self._callback_checkpoint(name, delta, prepared["sequence"])
                            for name, delta in deltas.items()}
-                result = self._call_json(_transport_json({"op": "commit_prepared", "token": prepared["token"],
-                                                          "callback_updates": updates}))
+                result = self._call({"op": "commit_prepared", "token": prepared["token"],
+                                     "callback_updates": updates})
             except BaseException:
                 self._call({"op": "cancel_prepared"})
                 raise
@@ -454,7 +481,7 @@ class Database:
     @_synchronized
     def _ingest_records(self, records, *, callbacks=True):
         self._assert_mutable()
-        encoded = []
+        batch = self._batch_cls()
         for index, record in enumerate(records):
             if index >= 1024:
                 raise DatabaseError(
@@ -462,8 +489,11 @@ class Database:
                     "db.ingest_many(..., batch_size=...) with a smaller batch_size."
                 )
             # Snapshot at each yield; the record envelope is not payload depth.
-            encoded.append(_encode(record, max_depth=65, sort_keys=False))
-        return self._ingest_encoded(encoded, callbacks=callbacks)
+            try:
+                batch.push(record)
+            except (ValueError, TypeError, OverflowError) as error:
+                raise _native_error(error) from error
+        return self._ingest_batch(batch, callbacks=callbacks)
 
     def add(self, payload: Any, *, id=None, source="default", position=None) -> Document:
         record = {"payload": payload, "source": source}
@@ -502,27 +532,29 @@ class Database:
         """Replay a larger iterable as bounded, separately committed batches."""
         if type(batch_size) is not int or not 1 <= batch_size <= 1024:
             raise DatabaseError("batch_size must be between 1 and 1024")
-        encoded = []
+        batch = self._batch_cls()
         for document in documents:
             if not isinstance(document, Document):
                 raise DatabaseError("ingest expects Document instances")
             record = {"id": document.id, "payload": document.payload, "source": document.source}
             if document.position is not None:
                 record["position"] = document.position
-            # Snapshot directly to JSON once per yield, avoiding encode -> decode -> encode.
-            encoded.append(_encode(record, max_depth=65, sort_keys=False))
-            if len(encoded) == batch_size:
-                result = self._ingest_encoded(encoded)
+            # Snapshot directly into native Value once per yield without JSON encoding.
+            try:
+                batch.push(record)
+            except (ValueError, TypeError, OverflowError) as error:
+                raise _native_error(error) from error
+            if len(batch) == batch_size:
+                result = self._ingest_batch(batch)
                 yield IngestResult(result["inserted"], result["replayed"], result["sequence"])
-                encoded = []
-        if encoded:
-            result = self._ingest_encoded(encoded)
+        if len(batch):
+            result = self._ingest_batch(batch)
             yield IngestResult(result["inserted"], result["replayed"], result["sequence"])
 
     def _canonical_key(self, key):
         key = _copy(key)
         # Validate from the key itself, independently of the transport envelope.
-        return self._call_json(_transport_json({"op": "canonical_key", "key": key})), key
+        return self._call({"op": "canonical_key", "key": key}), key
 
     def _canonical_keys(self, keys: list[Any]) -> list[tuple[str, Any]]:
         if not keys:
@@ -531,7 +563,7 @@ class Database:
         results: list[tuple[str, Any]] = []
         for offset in range(0, len(copied), 4096):
             chunk = copied[offset:offset + 4096]
-            encoded = self._call_json(_transport_json({"op": "canonical_keys", "keys": chunk}))
+            encoded = self._call({"op": "canonical_keys", "keys": chunk})
             results.extend(zip(encoded, chunk, strict=True))
         return results
 
@@ -631,7 +663,7 @@ class Database:
                 if not loaded_warm or coverage != sequence:
                     states = self._replay_callbacks([view.name], coverage)
                     checkpoints = {view.name: self._callback_checkpoint(view.name, states[view.name], sequence)}
-                    self._call_json(_transport_json({"op": "set_callback_checkpoints", "checkpoints": checkpoints}))
+                    self._call({"op": "set_callback_checkpoints", "checkpoints": checkpoints})
                     entry.states = states[view.name]
                 entry.dirty = False
         except BaseException:
@@ -699,16 +731,16 @@ class Database:
         request = {"op": "query", "limit": limit,
                    "inclusive_start": inclusive_start, "inclusive_end": inclusive_end}
         if key is not _MISSING:
-            request["key"] = _copy(key)
+            request["key"] = key
         for option, value in (("start_key", start_key), ("end_key", end_key), ("prefix", prefix)):
             if value is not _MISSING:
-                request[option] = _copy(value)
+                request[option] = value
         if cursor is not None:
             request["cursor"] = cursor
         if after is not None:
             request["after"] = after
-        # Keys have their own JSON depth budget, without counting this envelope.
-        result = self._call_json(_transport_json(request))
+        # Keys have their own JSON depth budget, validated per-field by the native engine.
+        result = self._call(request)
         return Snapshot(_rows(result["rows"]), result["cursor"], result.get("after"), result["complete"])
 
     def _query_callback(self, name, *, key, start_key, end_key, prefix,
@@ -792,7 +824,7 @@ class Database:
             sequence = self.stats()["sequence"]
             request["checkpoints"] = {name: self._callback_checkpoint(name, states[name], sequence)
                                       for name in names}
-        result = self._call_json(_transport_json(request))
+        result = self._call(request)
         for name, state in states.items():
             self._views[name].states = state
             self._views[name].dirty = False
