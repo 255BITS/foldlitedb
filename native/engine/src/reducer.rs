@@ -1,12 +1,15 @@
 //! Embedded wasmi-backed execution of ABI-v1 reducer kernels.
+use crate::wasm::{compile_module, new_store};
 use sha2::{Digest, Sha256};
-use wasmi::{Config, Engine, ExternType, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmi::{Instance, Store, StoreLimits};
+
+const STARTUP_FUEL: u64 = 50_000_000;
+const INPUT_CAPACITY: usize = 262_144;
+const OUTPUT_CAPACITY: usize = 65_536;
 
 pub struct ReducerInstance {
-    #[allow(dead_code)]
-    engine: Engine,
     store: Store<StoreLimits>,
-    instance: wasmi::Instance,
+    instance: Instance,
     fuel: u64,
     failed: bool,
     module_sha256: String,
@@ -14,37 +17,13 @@ pub struct ReducerInstance {
 
 impl ReducerInstance {
     pub fn new(module_bytes: &[u8], fuel: u64) -> Result<Self, String> {
-        if module_bytes.len() > 16 * 1024 * 1024 {
-            return Err("Wasm module exceeds 16 MiB".into());
-        }
+        let (engine, module) = compile_module(
+            module_bytes,
+            "Wasm module must not import host functions or memory",
+        )?;
         let module_sha256 = format!("{:x}", Sha256::digest(module_bytes));
-        let mut config = Config::default();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config);
-        let module =
-            Module::new(&engine, module_bytes).map_err(|e| format!("Invalid Wasm module: {e}"))?;
-        if module.imports().next().is_some() {
-            return Err("Wasm module must not import host functions or memory".into());
-        }
-        let memory = module
-            .exports()
-            .find(|e| e.name() == "memory")
-            .ok_or("Wasm module must export memory")?;
-        match memory.ty() {
-            ExternType::Memory(memory) if memory.maximum().is_some_and(|n| n <= 256) => {}
-            _ => return Err("Wasm memory must declare a maximum of at most 16 MiB".into()),
-        }
 
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(16 * 1024 * 1024)
-            .instances(1)
-            .memories(1)
-            .tables(1)
-            .table_elements(100_000)
-            .build();
-        let mut store: Store<StoreLimits> = Store::new(&engine, limits);
-        store.limiter(|limits| limits);
-        store.set_fuel(50_000_000).map_err(|e| e.to_string())?;
+        let mut store = new_store(&engine, STARTUP_FUEL)?;
 
         let instance = Instance::new(&mut store, &module, &[])
             .map_err(|e| format!("Wasm startup failed: {e}"))?;
@@ -63,12 +42,11 @@ impl ReducerInstance {
             .map_err(|e| format!("Missing input_capacity: {e}"))?
             .call(&mut store, ())
             .map_err(|e| e.to_string())?;
-        if input_capacity != 262_144 {
-            return Err("ABI input capacity must be 262144".into());
+        if input_capacity != INPUT_CAPACITY as i32 {
+            return Err(format!("ABI input capacity must be {INPUT_CAPACITY}"));
         }
 
         Ok(Self {
-            engine,
             store,
             instance,
             fuel,
@@ -81,8 +59,8 @@ impl ReducerInstance {
         if self.failed {
             return Err("Reducer instance trapped; create a new instance".into());
         }
-        if input.len() > 262_144 {
-            return Err("Request exceeds 262144 bytes".into());
+        if input.len() > INPUT_CAPACITY {
+            return Err(format!("Request exceeds {INPUT_CAPACITY} bytes"));
         }
         if let Err(e) = self.store.set_fuel(self.fuel) {
             self.failed = true;
@@ -111,7 +89,7 @@ impl ReducerInstance {
         };
         let input_ptr = usize::try_from(input_ptr).map_err(|_| "Invalid input_ptr address")?;
         let input_end = input_ptr
-            .checked_add(262_144)
+            .checked_add(INPUT_CAPACITY)
             .ok_or("Input buffer out of bounds")?;
         if input_end > memory.data_size(&self.store) {
             return Err("Input buffer out of bounds".into());
@@ -134,7 +112,7 @@ impl ReducerInstance {
         let pre_output_ptr =
             usize::try_from(pre_output_ptr).map_err(|_| "Invalid output_ptr address")?;
         let pre_output_end = pre_output_ptr
-            .checked_add(65_536)
+            .checked_add(OUTPUT_CAPACITY)
             .ok_or("Output buffer out of bounds")?;
         if pre_output_end > memory.data_size(&self.store) {
             return Err("Output buffer out of bounds".into());
@@ -169,7 +147,7 @@ impl ReducerInstance {
                 ));
             }
         };
-        if output_len <= 0 || output_len > 65_536 {
+        if output_len <= 0 || output_len > OUTPUT_CAPACITY as i32 {
             self.failed = true;
             return Err("Invalid reducer response length".into());
         }
@@ -210,12 +188,7 @@ impl ReducerInstance {
             self.failed = true;
             return Err("ABI buffers must not overlap".into());
         }
-        let mut output = vec![0u8; output_len];
-        if let Err(e) = memory.read(&self.store, output_ptr, &mut output) {
-            self.failed = true;
-            return Err(e.to_string());
-        }
-        Ok(output)
+        Ok(memory.data(&self.store)[output_ptr..output_end].to_vec())
     }
 
     pub fn memory_bytes(&self) -> usize {
