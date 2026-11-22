@@ -134,3 +134,94 @@ test('custom build diagnoses invocation, paths, missing compiler, and protected 
   assert.doesNotMatch(missingCompiler.stderr, /\n\s+at /);
   assert.deepEqual(compilerEnvironment({ JSON_MODE: 'simd', JSON_DEBUG: 'true', NODE_OPTIONS: 'anything', NODE_PATH: 'anything', PATH: '/example' }), { PATH: '/example', JSON_MODE: 'naive' });
 });
+
+test('custom opt-in reduce_groups view isolates mutating finalize, preserves null state, and checks depth', async (t) => {
+  await mkdir(join(viewsRoot, '.build'), { recursive: true });
+  const fixture = await mkdtemp(join(viewsRoot, '.build/reduce-groups-test-'));
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  const source = join(fixture, 'mutating-null.ts');
+  const output = join(fixture, 'output');
+  const sdk = relative(fixture, join(viewsRoot, 'assembly/sdk')).replaceAll('\\', '/');
+  const sourceText = `import {JSON, View, Emission, object, dispatch} from ${JSON.stringify(sdk)};
+export {abi_version, input_ptr, input_capacity, output_ptr} from ${JSON.stringify(sdk)};
+class MutatingNullView extends View {
+  constructor() { super("mutating-null", false, "1", "1", true); }
+  map(value: JSON.Value): Emission[] { return []; }
+  identity(): JSON.Value {
+    const o = new JSON.Obj();
+    o.set<string>("tag", "id");
+    return JSON.Value.from(o);
+  }
+  add(state: JSON.Value, values: JSON.Arr): JSON.Value {
+    if (state.type == JSON.Types.Null) {
+      const o = new JSON.Obj();
+      o.set<string>("from", "null");
+      o.set<i32>("n", values.length);
+      return JSON.Value.from(o);
+    }
+    const o = object(state);
+    if (o == null) return this.fail("bad state");
+    o.set<i32>("n", values.length);
+    return state;
+  }
+  finalize(state: JSON.Value): JSON.Value {
+    const o = object(state);
+    if (o != null) o.set<bool>("mutated_by_finalize", true);
+    return state;
+  }
+}
+const view = new MutatingNullView();
+export function execute(length: i32): i32 { return dispatch(view, length); }
+`;
+  await writeFile(source, sourceText);
+  const built = run([relative(viewsRoot, source), '--out-dir', relative(viewsRoot, output)]);
+  assert.equal(built.status, 0, built.stdout + built.stderr);
+  const bytes = await readFile(join(output, 'mutating-null.wasm'));
+  const manifest = JSON.parse(await readFile(join(output, 'mutating-null.json'), 'utf8'));
+  assert.equal(manifest.descriptor.reduce_groups, true);
+
+  const { exports: api } = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+  const raw = request => {
+    const input = new TextEncoder().encode(typeof request === 'string' ? request : JSON.stringify(request));
+    new Uint8Array(api.memory.buffer).set(input, api.input_ptr());
+    const length = api.execute(input.length);
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(api.memory.buffer, api.output_ptr(), length)));
+  };
+
+  // 1. New group (missing state): identity serialized before add(), state serialized before mutating finalize().
+  // 2. Existing null state: identity omitted, null passed through to add() instead of calling identity().
+  const res = raw({
+    op: 'reduce_groups',
+    groups: [
+      { values: [1, 2] },
+      { state: null, values: [3] },
+    ],
+  });
+  assert.deepEqual(res, {
+    ok: {
+      groups: [
+        {
+          identity: { tag: 'id' },
+          state: { tag: 'id', n: 2 },
+          result: { tag: 'id', n: 2, mutated_by_finalize: true },
+        },
+        {
+          state: { from: 'null', n: 1 },
+          result: { from: 'null', n: 1, mutated_by_finalize: true },
+        },
+      ],
+    },
+  });
+
+  // Depth validation at depth 0 for each group's values and state: 64 accepted, 65 rejected.
+  const nested64 = '['.repeat(64) + '0' + ']'.repeat(64);
+  const nested65 = '['.repeat(65) + '0' + ']'.repeat(65);
+  const ok64 = raw(`{"op":"reduce_groups","groups":[{"state":null,"values":[${nested64}]}]}`);
+  assert.equal(ok64.error, undefined, ok64.error);
+  const bad65Val = raw(`{"op":"reduce_groups","groups":[{"state":null,"values":[${nested65}]}]}`);
+  assert.match(bad65Val.error, /nesting/);
+  const ok64State = raw(`{"op":"reduce_groups","groups":[{"state":{"deep":${'['.repeat(63) + '0' + ']'.repeat(63)}},"values":[]}]}`);
+  assert.equal(ok64State.error, undefined, ok64State.error);
+  const bad65State = raw(`{"op":"reduce_groups","groups":[{"state":{"deep":${nested64}},"values":[]}]}`);
+  assert.match(bad65State.error, /nesting/);
+});

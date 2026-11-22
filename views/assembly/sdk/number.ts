@@ -85,25 +85,38 @@ const POWERS10: usize = memory.data<f64>([
 ]);
 
 const MAX_SIGNIFICANT_DIGITS: i32 = 768;
+const MAX_U64_DIGITS: i32 = 19; // 10^19 - 1 < 2^64 - 1
 
-export function parseNumber(text: string): f64 {
-  const negative = text.charCodeAt(0) == 45;
-  let cursor = negative ? 1 : 0;
-  const numerator = new Natural();
+export function parseNumber(text: string, start: i32 = 0, end: i32 = text.length): f64 {
+  const base = changetype<usize>(text);
+  const negative = load<u16>(base + ((<usize>start) << 1)) == 45;
+  let cursor = negative ? start + 1 : start;
+  let mantissa: u64 = 0;
+  let numerator: Natural | null = null;
   let fractionalDigits = 0, significantDigits = 0, droppedIntegerDigits = 0;
   let pointed = false, started = false, stickyNonZero = false;
-  for (; cursor < text.length; cursor++) {
-    const code = text.charCodeAt(cursor);
+  for (; cursor < end; cursor++) {
+    const code = load<u16>(base + ((<usize>cursor) << 1));
     if (code == 46) { pointed = true; continue; }
     if (code == 101 || code == 69) break;
-    const digit = code - 48;
+    const digit = <u32>(code - 48);
     if (!started && digit == 0) {
       if (pointed) fractionalDigits++;
       continue;
     }
     started = true;
-    if (significantDigits < MAX_SIGNIFICANT_DIGITS) {
+    if (significantDigits < MAX_U64_DIGITS) {
       if (pointed) fractionalDigits++;
+      significantDigits++;
+      mantissa = mantissa * 10 + digit;
+    } else if (significantDigits < MAX_SIGNIFICANT_DIGITS) {
+      if (pointed) fractionalDigits++;
+      if (numerator == null) {
+        numerator = new Natural();
+        numerator.words[0] = <u32>mantissa;
+        const high = <u32>(mantissa >> 32);
+        if (high != 0) numerator.words.push(high);
+      }
       significantDigits++;
       numerator.multiply(10, digit);
     } else {
@@ -112,34 +125,57 @@ export function parseNumber(text: string): f64 {
     }
   }
   let exponent = 0;
-  if (cursor < text.length) {
+  if (cursor < end) {
     cursor++;
-    const exponentNegative = text.charCodeAt(cursor) == 45;
-    if (exponentNegative || text.charCodeAt(cursor) == 43) cursor++;
-    for (; cursor < text.length; cursor++) exponent = min(10000000, exponent * 10 + text.charCodeAt(cursor) - 48);
+    const signCode = load<u16>(base + ((<usize>cursor) << 1));
+    const exponentNegative = signCode == 45;
+    if (exponentNegative || signCode == 43) cursor++;
+    for (; cursor < end; cursor++) {
+      exponent = min(10000000, exponent * 10 + <i32>load<u16>(base + ((<usize>cursor) << 1)) - 48);
+    }
     if (exponentNegative) exponent = -exponent;
   }
   exponent += droppedIntegerDigits - fractionalDigits;
   if (!started) return negative ? -0.0 : 0.0;
-  if (stickyNonZero) {
-    numerator.multiply(10, 1);
-    significantDigits++;
-    exponent--;
-  }
-  if (numerator.words.length <= 2) {
-    const integer = <u64>numerator.words[0] | (numerator.words.length == 2 ? <u64>numerator.words[1] << 32 : 0);
+  if (numerator == null) {
     // Integer casts round once. Powers 10^0..10^22 and integers <=2^53 are
     // exact doubles, so one multiply/divide also rounds exactly once.
-    if (exponent == 0) return negative ? -<f64>integer : <f64>integer;
-    if (integer <= 9007199254740992 && abs(exponent) <= 22) {
-      const power = load<f64>(POWERS10 + (<usize>abs(exponent) << 3));
-      const value = exponent > 0 ? <f64>integer * power : <f64>integer / power;
-      return negative ? -value : value;
+    if (exponent == 0) return negative ? -<f64>mantissa : <f64>mantissa;
+    if (mantissa <= 9007199254740992) {
+      if (abs(exponent) <= 22) {
+        const power = load<f64>(POWERS10 + (<usize>abs(exponent) << 3));
+        const value = exponent > 0 ? <f64>mantissa * power : <f64>mantissa / power;
+        return negative ? -value : value;
+      }
+      if (exponent > 22 && exponent <= 37) {
+        let m = mantissa;
+        let e = exponent;
+        while (e > 22 && m <= 900719925474099) {
+          m *= 10;
+          e--;
+        }
+        if (e <= 22) {
+          const value = <f64>m * load<f64>(POWERS10 + (<usize>e << 3));
+          return negative ? -value : value;
+        }
+      }
     }
+  }
+  if (stickyNonZero) {
+    numerator!.multiply(10, 1);
+    significantDigits++;
+    exponent--;
   }
   const decimalOrder = significantDigits + exponent - 1;
   if (decimalOrder > 309) return negative ? -Infinity : Infinity;
   if (decimalOrder < -325) return negative ? -0.0 : 0.0;
+
+  if (numerator == null) {
+    numerator = new Natural();
+    numerator.words[0] = <u32>mantissa;
+    const high = <u32>(mantissa >> 32);
+    if (high != 0) numerator.words.push(high);
+  }
 
   const denominator = new Natural();
   denominator.words[0] = 1;

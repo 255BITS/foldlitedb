@@ -3,7 +3,7 @@ export { abi_version, input_ptr, input_capacity, output_ptr } from "../sdk";
 
 /** Ordered latest-event fold: {category,id,title,deleted?} updates a catalogue. */
 class Catalogue extends View {
-  constructor() { super("catalogue", false); }
+  constructor() { super("catalogue", false, "1", "1", true); }
 
   map(document: JSON.Value): Emission[] {
     const doc = object(document);
@@ -29,9 +29,9 @@ class Catalogue extends View {
   add(value: JSON.Value, values: JSON.Arr): JSON.Value {
     const items = object(value);
     if (items == null) return this.fail("Catalogue state must be an object");
-    const keys = items.keys();
-    for (let i = 0; i < keys.length; i++) {
-      if (items.get(keys[i])!.type != JSON.Types.String) return this.fail("Catalogue state entries must be strings");
+    const vals = items.values();
+    for (let i = 0; i < vals.length; i++) {
+      if (vals[i].type != JSON.Types.String) return this.fail("Catalogue state entries must be strings");
     }
     for (let i = 0; i < values.length; i++) {
       const event = object(values.at(i));
@@ -54,9 +54,9 @@ class Catalogue extends View {
   finalize(value: JSON.Value): JSON.Value {
     const items = object(value);
     if (items == null) return this.fail("Catalogue state must be an object");
-    const keys = items.keys();
-    for (let i = 0; i < keys.length; i++) {
-      if (items.get(keys[i])!.type != JSON.Types.String) return this.fail("Catalogue state entries must be strings");
+    const vals = items.values();
+    for (let i = 0; i < vals.length; i++) {
+      if (vals[i].type != JSON.Types.String) return this.fail("Catalogue state entries must be strings");
     }
     const result = new JSON.Obj();
     result.set<i32>("count", items.size);

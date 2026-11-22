@@ -24,7 +24,7 @@ export async function compileView(source) {
     const result = spawnSync(process.execPath, [
       'node_modules/assemblyscript/bin/asc.js', relative(viewsRoot, source),
       '--outFile', output, '--transform', 'json-as', '--runtime', 'incremental',
-      '--maximumMemory', '256', '--initialMemory', '16', '--stackSize', '32768',
+      '--maximumMemory', '256', '--initialMemory', '10', '--stackSize', '32768',
       '--use', 'abort=assembly/sdk/index/abort',
       '--optimizeLevel', '3', '--shrinkLevel', '1',
     ], { cwd: viewsRoot, env: compilerEnvironment(), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
