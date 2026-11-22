@@ -6,6 +6,10 @@ class ViewCapacityError extends ViewError {}
 export const MAX_REQUEST_BYTES = 262144;
 export const MAX_MEMORY_BYTES = 16 * 1024 * 1024;
 function unicode(value) {
+  if (typeof value.isWellFormed === 'function') {
+    if (!value.isWellFormed()) throw new ViewError('JSON strings must contain well-formed Unicode');
+    return;
+  }
   for (let i = 0; i < value.length; i++) {
     const unit = value.charCodeAt(i);
     if (unit >= 0xd800 && unit <= 0xdbff) {
@@ -27,7 +31,8 @@ export function finiteJSON(value, depth = 0) {
     return;
   }
   if (value && Object.getPrototypeOf(value) === Object.prototype) {
-    Object.entries(value).forEach(([key, v]) => { unicode(key); finiteJSON(v, depth + 1); }); return;
+    for (const key of Object.keys(value)) { unicode(key); finiteJSON(value[key], depth + 1); }
+    return;
   }
   throw new ViewError('Expected finite JSON values');
 }
@@ -35,7 +40,7 @@ export function finiteJSON(value, depth = 0) {
 // transport's request, document-record, and batch-array wrappers.
 function jsonFields(value, visit) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype) throw new ViewError('Expected a JSON request object');
-  for (const [key, child] of Object.entries(value)) { unicode(key); visit(key, child); }
+  for (const key of Object.keys(value)) { unicode(key); visit(key, value[key]); }
 }
 function jsonElements(value, visit) {
   if (!Array.isArray(value)) { finiteJSON(value); return; }
@@ -61,24 +66,32 @@ export function databaseRequestJSON(request) {
     else finiteJSON(value);
   });
 }
+export function canonicalValidated(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonicalValidated).join(',') + ']';
+  if (value !== null && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonicalValidated(value[k])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
 export function canonical(value) {
   finiteJSON(value);
-  const encode = v => Array.isArray(v) ? '[' + v.map(encode).join(',') + ']'
-    : v !== null && typeof v === 'object' ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + encode(v[k])).join(',') + '}'
-    : JSON.stringify(v);
-  return encode(value);
+  return canonicalValidated(value);
 }
 
 // Query order is distinct from canonical JSON identity. Keep strings in Unicode
 // scalar order in both hosts; JavaScript's default string order uses UTF-16.
-function scalarCompare(left, right) {
-  const a = left[Symbol.iterator](), b = right[Symbol.iterator]();
-  while (true) {
-    const x = a.next(), y = b.next();
-    if (x.done || y.done) return x.done ? (y.done ? 0 : -1) : 1;
-    const difference = x.value.codePointAt(0) - y.value.codePointAt(0);
-    if (difference) return difference;
+export function scalarCompare(left, right) {
+  if (left === right) return 0;
+  let i = 0, j = 0;
+  const leftLen = left.length, rightLen = right.length;
+  while (i < leftLen && j < rightLen) {
+    const a = left.codePointAt(i), b = right.codePointAt(j);
+    if (a !== b) return a - b;
+    const step = a > 0xffff ? 2 : 1;
+    i += step;
+    j += step;
   }
+  return i < leftLen ? 1 : j < rightLen ? -1 : 0;
 }
 function keyType(value) {
   if (value === null) return 0;

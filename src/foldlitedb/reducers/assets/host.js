@@ -30,9 +30,9 @@ function finiteJSON(value, depth = 0) {
     return;
   }
   if (value && Object.getPrototypeOf(value) === Object.prototype) {
-    for (const [key, item] of Object.entries(value)) {
+    for (const key of Object.keys(value)) {
       if (!wellFormedString(key)) throw new ReducerError('JSON strings must contain valid Unicode scalar values');
-      finiteJSON(item, depth + 1);
+      finiteJSON(value[key], depth + 1);
     }
     return;
   }
