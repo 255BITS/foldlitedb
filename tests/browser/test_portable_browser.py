@@ -774,3 +774,310 @@ def test_browser_guest_inexact_integers_negative_zero_keys_and_cursor_error_type
         {"isExpired": False, "isDbError": True},
         {"isExpired": True, "isDbError": True},
     ]
+
+
+def test_browser_overlay_staging_atomic_multi_batch_rollback(portable_page, tmp_path):
+    result = portable_page.evaluate("""async () => {
+      const {BrowserDatabase, DatabaseError, DocumentConflict, SourceOrderError} = await import('./portable/client.js');
+      const db = await BrowserDatabase.connect();
+      const failures = [];
+      async function expectFail(batch, Type) {
+        try {
+          await db.ingest(batch);
+          throw new Error('expected batch failure');
+        } catch (err) {
+          failures.push({typed: err instanceof Type, code: err.code, message: err.message});
+        }
+      }
+      try {
+        // Batch 1: commit initial state across two sources plus intra-batch replay.
+        const first = await db.ingest([
+          {id: 'a0', source: 'events', position: 0, payload: {metric: 'alpha', value: 10}},
+          {id: 'a0', source: 'events', position: 0, payload: {value: 10, metric: 'alpha'}},
+          {id: 'b0', source: 'other', position: 0, payload: {metric: 'beta', value: 5}},
+        ]);
+        const before = {
+          stats: await db.stats(),
+          rows: await db.rows(),
+          documents: await db.export(),
+          changes: (await db.changes(0, {limit: 100})).rows,
+        };
+
+        // 1. Mid-batch intra-batch identity conflict after staging a new doc & new source.
+        await expectFail([
+          {id: 'a1', source: 'events', position: 1, payload: {metric: 'alpha', value: 20}},
+          {id: 'f0', source: 'fresh', position: 0, payload: {metric: 'gamma', value: 1}},
+          {id: 'a1', source: 'events', position: 1, payload: {metric: 'alpha', value: 999}},
+        ], DocumentConflict);
+
+        // 2. Mid-batch cross-batch position conflict against committed 'other' pos 0.
+        await expectFail([
+          {id: 'a1', source: 'events', position: 1, payload: {metric: 'alpha', value: 20}},
+          {id: 'b-conflict', source: 'other', position: 0, payload: {metric: 'beta', value: 99}},
+        ], DocumentConflict);
+
+        // 3. Mid-batch intra-batch SourceOrderError against staged checkpoint (pos 5 then pos 4).
+        await expectFail([
+          {id: 'a5', source: 'events', position: 5, payload: {metric: 'alpha', value: 20}},
+          {id: 'a4', source: 'events', position: 4, payload: {metric: 'alpha', value: 21}},
+        ], SourceOrderError);
+
+        // 4. Mid-batch document byte limit error after staging a valid doc.
+        await expectFail([
+          {id: 'a1', source: 'events', position: 1, payload: {metric: 'alpha', value: 20}},
+          {id: 'huge', source: 'events', position: 2, payload: {metric: 'alpha', value: 1, pad: 'x'.repeat(262145)}},
+        ], DatabaseError);
+
+        // 5. Wasm reduction overflow failure AFTER staging documents, checkpoints, and new sources.
+        await expectFail([
+          {id: 'a1', source: 'events', position: 1, payload: {metric: 'alpha', value: 20}},
+          {id: 'f0', source: 'fresh', position: 0, payload: {metric: 'overflow', value: 1e308}},
+          {id: 'f1', source: 'fresh', position: 1, payload: {metric: 'overflow', value: 1e308}},
+        ], DatabaseError);
+
+        const afterFailures = {
+          stats: await db.stats(),
+          rows: await db.rows(),
+          documents: await db.export(),
+          changes: (await db.changes(0, {limit: 100})).rows,
+        };
+
+        // Batch 2: reuse the exact ids/positions/sources that rolled back.
+        const second = await db.ingest([
+          {id: 'a1', source: 'events', position: 1, payload: {metric: 'alpha', value: 20}},
+          {id: 'f0', source: 'fresh', position: 0, payload: {metric: 'gamma', value: 7}},
+        ]);
+        const finalRows = await db.rows();
+        const finalStats = await db.stats();
+        const replay = await db.replay();
+        return {first, before, afterFailures, failures, second, finalRows, finalStats, replay};
+      } finally {
+        db.close();
+      }
+    }""")
+    assert result["first"]["inserted"] == 2
+    assert result["first"]["replayed"] == 1
+    assert len(result["failures"]) == 5
+    assert all(f["typed"] for f in result["failures"])
+    assert [f["code"] for f in result["failures"]] == [
+        "DocumentConflict", "DocumentConflict", "SourceOrderError", "DatabaseError", "DatabaseError",
+    ]
+    assert result["before"] == result["afterFailures"]
+    assert result["second"]["inserted"] == 2
+    assert result["second"]["replayed"] == 0
+    assert result["finalStats"]["checkpoints"] == {"events": 1, "other": 0, "fresh": 0}
+    assert result["replay"]["equivalent"] is True
+    with PortableDatabase(tmp_path / "overlay-native.db") as native:
+        native._call({"op": "ingest", "documents": [
+            {"id": "a0", "source": "events", "position": 0, "payload": {"metric": "alpha", "value": 10}},
+            {"id": "b0", "source": "other", "position": 0, "payload": {"metric": "beta", "value": 5}},
+        ]})
+        native._call({"op": "ingest", "documents": [
+            {"id": "a1", "source": "events", "position": 1, "payload": {"metric": "alpha", "value": 20}},
+            {"id": "f0", "source": "fresh", "position": 0, "payload": {"metric": "gamma", "value": 7}},
+        ]})
+        assert result["finalRows"] == native._call({"op": "query", "limit": 100})["rows"]
+
+
+def test_browser_binary_search_documents_and_changes_boundaries(portable_page, tmp_path):
+    batches = [
+        [
+            {"id": "d0", "source": "s", "position": 0, "payload": {"metric": "m1", "value": 1}},
+            {"id": "d1", "source": "s", "position": 1, "payload": {"metric": "m2", "value": 2}},
+            {"id": "d2", "source": "_meta", "position": 0, "payload": {"note": "internal"}},
+        ],
+        [
+            {"id": "d3", "source": "s", "position": 2, "payload": {"metric": "m1", "value": 3}},
+            {"id": "d4", "source": "s", "position": 3, "payload": {"metric": "ignored", "value": "bad"}},
+            {"id": "d5", "source": "s", "position": 4, "payload": {"metric": "m3", "value": 4}},
+        ],
+        [
+            {"id": "d6", "source": "s", "position": 5, "payload": {"metric": "ignored", "value": "tail"}},
+        ],
+    ]
+    with PortableDatabase(tmp_path / "pages-native.db") as native:
+        n_cursors = [native.stats()["cursor"]]
+        for batch in batches:
+            native._call({"op": "ingest", "documents": batch})
+            n_cursors.append(native.stats()["cursor"])
+        expected_docs_all = native._call({"op": "documents", "limit": 100})["documents"]
+        expected_docs_c1 = native._call({"op": "documents", "cursor": n_cursors[1], "limit": 100})["documents"]
+        expected_changes_all = native._call({"op": "changes", "since": 0, "limit": 100})["rows"]
+        expected_changes_c1 = native._call({"op": "changes", "since": n_cursors[1], "limit": 100})["rows"]
+
+    result = portable_page.evaluate("""async batches => {
+      const {BrowserDatabase} = await import('./portable/client.js');
+      const db = await BrowserDatabase.connect();
+      async function drainDocs(cursor, limit) {
+        const docs = [], pages = [];
+        let page = await db.request({op: 'documents', cursor, limit});
+        pages.push({count: page.documents.length, complete: page.complete, hasAfter: page.after !== null});
+        docs.push(...page.documents);
+        while (!page.complete) {
+          page = await db.request({op: 'documents', cursor, after: page.after, limit});
+          pages.push({count: page.documents.length, complete: page.complete, hasAfter: page.after !== null});
+          docs.push(...page.documents);
+        }
+        return {docs, pages};
+      }
+      async function drainChanges(since, limit) {
+        const rows = [], pages = [];
+        let page = await db.changes(since, {limit});
+        pages.push({count: page.rows.length, complete: page.complete, cursor: page.cursor});
+        rows.push(...page.rows);
+        while (!page.complete) {
+          page = await db.changes(page.cursor, {limit});
+          pages.push({count: page.rows.length, complete: page.complete, cursor: page.cursor});
+          rows.push(...page.rows);
+        }
+        return {rows, pages, endCursor: page.cursor};
+      }
+      try {
+        const emptyDocs = await db.request({op: 'documents', limit: 1});
+        const emptyChanges = await db.changes(0, {limit: 1});
+        const cursors = [(await db.stats()).cursor];
+        for (const batch of batches) {
+          await db.ingest(batch);
+          cursors.push((await db.stats()).cursor);
+        }
+        const finalCursor = cursors[3];
+        // Test empty snapshot cursor after later writes, exact-fit limits, limit-1, limit=1, and past-end after token.
+        const docsAtC0 = await drainDocs(cursors[0], 1);
+        const docsAtC1Lim1 = await drainDocs(cursors[1], 1);
+        const docsAtC1Exact = await drainDocs(cursors[1], 3);
+        const docsAtC1Lim2 = await drainDocs(cursors[1], 2);
+        const docsAllLim1 = await drainDocs(finalCursor, 1);
+        const docsAllLim6 = await drainDocs(finalCursor, 6);
+        const docsAllExact = await drainDocs(finalCursor, 7);
+        const docsAllOver = await drainDocs(finalCursor, 20);
+        // Continuation token whose sequence equals snapshot (a history/tail sequence).
+        const snapSeq = Number(cursors[1].slice(cursors[1].lastIndexOf(':') + 1));
+        const docsAtSnapEnd = await db.request({
+          op: 'documents', cursor: cursors[1], after: JSON.stringify([cursors[1], snapSeq]), limit: 2,
+        });
+
+        // Changes boundaries: total history rows = 4 (m1, m2 in batch 1; m1, m3 in batch 2; 0 in batch 3).
+        const chAllLim1 = await drainChanges(0, 1);
+        const chAllLim3 = await drainChanges(0, 3);
+        const chAllExact = await drainChanges(0, 4);
+        const chAllOver = await drainChanges(0, 10);
+        const chFromC1Lim1 = await drainChanges(cursors[1], 1);
+        const chFromC1Exact = await drainChanges(cursors[1], 2);
+        const chFromC2 = await drainChanges(cursors[2], 1);
+        const chFromC3 = await drainChanges(cursors[3], 1);
+
+        return {
+          emptyDocs, emptyChanges, finalCursor,
+          docsAtC0, docsAtC1Lim1, docsAtC1Exact, docsAtC1Lim2,
+          docsAllLim1, docsAllLim6, docsAllExact, docsAllOver, docsAtSnapEnd,
+          chAllLim1, chAllLim3, chAllExact, chAllOver,
+          chFromC1Lim1, chFromC1Exact, chFromC2, chFromC3,
+        };
+      } finally {
+        db.close();
+      }
+    }""", batches)
+
+    assert result["emptyDocs"]["documents"] == [] and result["emptyDocs"]["complete"] is True and result["emptyDocs"]["after"] is None
+    assert result["emptyChanges"]["rows"] == [] and result["emptyChanges"]["complete"] is True
+    assert result["docsAtC0"]["docs"] == [] and result["docsAtC0"]["pages"] == [{"count": 0, "complete": True, "hasAfter": False}]
+    assert result["docsAtC1Lim1"]["docs"] == expected_docs_c1
+    assert result["docsAtC1Exact"]["docs"] == expected_docs_c1
+    assert result["docsAtC1Exact"]["pages"] == [{"count": 3, "complete": True, "hasAfter": False}]
+    assert result["docsAtC1Lim2"]["docs"] == expected_docs_c1
+    assert result["docsAtC1Lim2"]["pages"] == [
+        {"count": 2, "complete": False, "hasAfter": True},
+        {"count": 1, "complete": True, "hasAfter": False},
+    ]
+    assert result["docsAtSnapEnd"]["documents"] == [] and result["docsAtSnapEnd"]["complete"] is True and result["docsAtSnapEnd"]["after"] is None
+    for key in ("docsAllLim1", "docsAllLim6", "docsAllExact", "docsAllOver"):
+        assert result[key]["docs"] == expected_docs_all, key
+    assert result["docsAllLim6"]["pages"] == [
+        {"count": 6, "complete": False, "hasAfter": True},
+        {"count": 1, "complete": True, "hasAfter": False},
+    ]
+    assert result["docsAllExact"]["pages"] == [{"count": 7, "complete": True, "hasAfter": False}]
+
+    for key in ("chAllLim1", "chAllLim3", "chAllExact", "chAllOver"):
+        assert result[key]["rows"] == expected_changes_all, key
+        assert result[key]["endCursor"] == result["finalCursor"], key
+    assert len(result["chAllLim3"]["pages"]) == 2
+    assert result["chAllLim3"]["pages"][0]["complete"] is False
+    assert result["chAllExact"]["pages"][0]["complete"] is True
+    assert result["chFromC1Lim1"]["rows"] == expected_changes_c1
+    assert result["chFromC1Exact"]["rows"] == expected_changes_c1
+    assert len(result["chFromC1Exact"]["pages"]) == 1 and result["chFromC1Exact"]["pages"][0]["complete"] is True
+    assert result["chFromC2"]["rows"] == [] and result["chFromC2"]["endCursor"] == result["finalCursor"]
+    assert result["chFromC3"]["rows"] == [] and result["chFromC3"]["endCursor"] == result["finalCursor"]
+
+
+def test_browser_scalar_compare_surrogate_pair_and_unicode_parity(portable_page):
+    samples = [
+        "",
+        "\u0000",
+        "a",
+        "ab",
+        "\u007f",
+        "\u0080",
+        "\u07ff",
+        "\u0800",
+        "\ud7ff",
+        "\ue000",
+        "\uffff",
+        "\U00010000",
+        "\U00010000a",
+        "\U0001f680",
+        "\U0001f680a",
+        "\U0001f680\ue000",
+        "\U0001f680\U0001f680",
+        "\U0010ffff",
+    ]
+    expected_order = sorted(samples)
+    assert expected_order == samples  # Python str comparison is Unicode scalar order.
+
+    result = portable_page.evaluate("""async samples => {
+      const {scalarCompare, compareKeys, canonical, canonicalValidated} = await import('./portable/host.js');
+      const reversed = [...samples].reverse();
+      const sorted = [...reversed].sort(scalarCompare);
+      const keySorted = [...reversed].sort(compareKeys);
+      const objSorted = reversed.map(k => ({[k]: 1})).sort(compareKeys).map(o => Object.keys(o)[0]);
+
+      let pairwiseOk = true;
+      for (let i = 0; i < samples.length; i++) {
+        if (scalarCompare(samples[i], samples[i]) !== 0) pairwiseOk = false;
+        for (let j = i + 1; j < samples.length; j++) {
+          if (!(scalarCompare(samples[i], samples[j]) < 0)) pairwiseOk = false;
+          if (!(scalarCompare(samples[j], samples[i]) > 0)) pairwiseOk = false;
+        }
+      }
+
+      // Direct canonical() still validates Unicode and finiteness, both with and without isWellFormed().
+      const checkRejections = () => {
+        const rejected = [];
+        for (const bad of ['\\ud800', '\\udc00', '\\ud800a', NaN, Infinity, {['\\ud800']: 1}]) {
+          try { canonical(bad); rejected.push(false); }
+          catch { rejected.push(true); }
+        }
+        return rejected;
+      };
+      const rejectedFast = checkRejections();
+      const origIsWellFormed = String.prototype.isWellFormed;
+      let rejectedFallback;
+      try {
+        Object.defineProperty(String.prototype, 'isWellFormed', {value: undefined, configurable: true, writable: true});
+        rejectedFallback = checkRejections();
+      } finally {
+        Object.defineProperty(String.prototype, 'isWellFormed', {value: origIsWellFormed, configurable: true, writable: true});
+      }
+
+      const canonicalParity = samples.every(s => canonical(s) === canonicalValidated(s));
+      return {sorted, keySorted, objSorted, pairwiseOk, rejectedFast, rejectedFallback, canonicalParity};
+    }""", samples)
+
+    assert result["sorted"] == expected_order
+    assert result["keySorted"] == expected_order
+    assert result["objSorted"] == expected_order
+    assert result["pairwiseOk"] is True
+    assert all(result["rejectedFast"])
+    assert all(result["rejectedFallback"])
+    assert result["canonicalParity"] is True

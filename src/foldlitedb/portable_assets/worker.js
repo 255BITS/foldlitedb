@@ -1,12 +1,11 @@
 /* One view, one isolated worker. Retained documents and committed view state are
    in memory; reload the page to discard them, or export documents for replay. */
-import {ViewModule, ViewError, canonical, compareKeys, databaseRequestJSON} from './host.js';
+import {ViewModule, ViewError, canonical, canonicalValidated, compareKeys, scalarCompare, databaseRequestJSON} from './host.js';
 import {DocumentConflict, SourceOrderError, CursorExpired, serializeError} from './errors.js';
 
 const utf8 = new TextEncoder();
 const MAX_DOCUMENTS = 20000, MAX_BATCH = 1024, MAX_GROUPS = 4096, MAX_EVENTS = 100000;
 const MAX_RETAINED_BYTES = 16 * 1024 * 1024, MAX_HISTORY_BYTES = 32 * 1024 * 1024;
-const clone = value => JSON.parse(JSON.stringify(value));
 const bytes = value => utf8.encode(JSON.stringify(value)).length;
 function nonnegative(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) throw new ViewError(`${label} must be a nonnegative safe integer`);
@@ -16,11 +15,14 @@ function name(value, label) {
   if (typeof value !== 'string' || !value || utf8.encode(value).length > 4096) throw new ViewError(`${label} must contain 1–4096 UTF-8 bytes`);
   return value;
 }
-/* Native UTF-8 key order follows Unicode scalars; JS's < uses UTF-16 units. */
-function keyCompare(a, b) {
-  const left = Array.from(a, c => c.codePointAt(0)), right = Array.from(b, c => c.codePointAt(0));
-  for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i];
-  return left.length - right.length;
+function partitionPoint(items, predicate) {
+  let lo = 0, hi = items.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (predicate(items[mid])) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 // Preview and ingestion validate the same map output. Empty emissions can be
@@ -97,39 +99,51 @@ class MemoryDatabase {
     if (sequence > this.sequence) throw new CursorExpired('Cursor is ahead of committed state.' + cursorRecovery);
     return sequence;
   }
-  ingest(input) {
+  ingest(input, validated = false) {
     if (!Array.isArray(input) || input.length > MAX_BATCH) throw new ViewError(`A batch must be an array of at most ${MAX_BATCH} documents`);
-    databaseRequestJSON({op: 'ingest', documents: input});
-    const identities = new Map(this.identities), positions = new Map(this.positions), checkpoints = new Map(this.checkpoints), states = new Map(this.states);
+    if (!validated) databaseRequestJSON({op: 'ingest', documents: input});
+    const stagedIdentities = new Map(), stagedPositions = new Map(), stagedCheckpoints = new Map(), stagedStates = new Map();
+    const getIdentity = key => stagedIdentities.get(key) ?? this.identities.get(key);
+    const getPosition = key => stagedPositions.get(key) ?? this.positions.get(key);
+    const getCheckpoint = source => stagedCheckpoints.has(source) ? stagedCheckpoints.get(source) : this.checkpoints.get(source);
+    const getState = key => stagedStates.get(key) ?? this.states.get(key);
     const appended = [], events = [], eventEntries = [], resolved = [];
     let sequence = this.sequence, documentBytes = this.documentBytes, historyBytes = this.historyBytes, replayed = 0;
     for (const supplied of input) {
       if (!supplied || Array.isArray(supplied) || typeof supplied !== 'object' || !Object.hasOwn(supplied, 'payload')) throw new ViewError('Each document needs a payload');
       const source = name(supplied.source === undefined ? 'default' : supplied.source, 'Source');
-      const payload = clone(supplied.payload), payloadText = canonical(payload);
+      const payloadText = canonicalValidated(supplied.payload);
       if (utf8.encode(payloadText).length > 262144) throw new ViewError('Document exceeds 262144 bytes');
+      const encodedSource = JSON.stringify(source);
+      let idKey = null;
       if (supplied.id !== undefined) {
         name(supplied.id, 'Document id');
-        const previous = identities.get(canonical([source, supplied.id]));
+        idKey = `[${encodedSource},${JSON.stringify(supplied.id)}]`;
+        const previous = getIdentity(idKey);
         if (previous) {
-          if (canonical(previous.payload) !== payloadText || (supplied.position !== undefined && supplied.position !== previous.position)) throw new DocumentConflict('DocumentConflict: document identity already has different contents or position');
+          if (canonicalValidated(previous.payload) !== payloadText || (supplied.position !== undefined && supplied.position !== previous.position)) throw new DocumentConflict('DocumentConflict: document identity already has different contents or position');
           resolved.push(previous); replayed++; continue;
         }
       }
-      const position = supplied.position === undefined ? (checkpoints.get(source) ?? -1) + 1 : nonnegative(supplied.position, 'Source position');
+      const checkpoint = getCheckpoint(source) ?? -1;
+      const position = supplied.position === undefined ? checkpoint + 1 : nonnegative(supplied.position, 'Source position');
       nonnegative(position, 'Source position');
-      const atPosition = positions.get(canonical([source, position]));
+      const posKey = `[${encodedSource},${position}]`;
+      const atPosition = getPosition(posKey);
       if (atPosition) {
-        if (canonical(atPosition.payload) !== payloadText || (supplied.id !== undefined && supplied.id !== atPosition.id)) throw new DocumentConflict('DocumentConflict: source position already has different contents');
+        if (canonicalValidated(atPosition.payload) !== payloadText || (supplied.id !== undefined && supplied.id !== atPosition.id)) throw new DocumentConflict('DocumentConflict: source position already has different contents');
         resolved.push(atPosition); replayed++; continue;
       }
-      if (position <= (checkpoints.get(source) ?? -1)) throw new SourceOrderError('Source positions must increase; an older position is not a retained replay');
+      if (position <= checkpoint) throw new SourceOrderError('Source positions must increase; an older position is not a retained replay');
       const id = supplied.id === undefined ? (globalThis.crypto?.randomUUID?.() || `doc-${this.epoch}-${position}-${Math.random().toString(36).slice(2)}`) : supplied.id;
       if (this.documents.length + appended.length >= MAX_DOCUMENTS) throw new ViewError('In-memory document limit reached; export your documents');
+      const payload = JSON.parse(payloadText);
       const document = {id, source, position, payload, sequence: ++sequence};
       documentBytes += bytes(document);
       if (documentBytes > MAX_RETAINED_BYTES) throw new ViewError('Retained documents exceed 16 MiB');
-      identities.set(canonical([source, id]), document); positions.set(canonical([source, position]), document); checkpoints.set(source, position);
+      stagedIdentities.set(idKey ?? `[${encodedSource},${JSON.stringify(id)}]`, document);
+      stagedPositions.set(posKey, document);
+      stagedCheckpoints.set(source, position);
       appended.push(document); resolved.push(document);
     }
     const groups = new Map();
@@ -139,25 +153,30 @@ class MemoryDatabase {
       const mapped = mapPayloads(this.view, mappedDocuments.map(document => document.payload));
       for (const contributions of mapped) {
         for (const contribution of contributions) {
-          const key = canonical(contribution.key);
+          const key = canonicalValidated(contribution.key);
           if (!groups.has(key)) groups.set(key, {key: JSON.parse(key), values: []});
           groups.get(key).values.push(contribution.value);
         }
       }
-      const ordered = [...groups.entries()].sort(([a], [b]) => keyCompare(a, b));
+      const ordered = [...groups.entries()].sort(([a], [b]) => scalarCompare(a, b));
       const reduced = this.view.reduceGroups(ordered.map(([encoded, group]) => {
-        const previous = states.get(encoded);
+        const previous = getState(encoded);
         return previous ? {state: previous.state, values: group.values} : {values: group.values};
       }));
+      let totalGroups = this.states.size;
       for (let index = 0; index < ordered.length; index++) {
         const [encoded, group] = ordered[index], {state, result} = reduced[index];
         const row = {key: group.key, state, result, sequence: ++sequence};
-        states.set(encoded, row); events.push(row); eventEntries.push([encoded, row]); historyBytes += bytes(row);
+        if (!this.states.has(encoded) && !stagedStates.has(encoded)) totalGroups++;
+        stagedStates.set(encoded, row); events.push(row); eventEntries.push([encoded, row]); historyBytes += bytes(row);
       }
-      if (states.size > MAX_GROUPS || this.history.length + events.length > MAX_EVENTS || historyBytes > MAX_HISTORY_BYTES) throw new ViewError('In-memory view history limit reached; export your documents');
+      if (totalGroups > MAX_GROUPS || this.history.length + events.length > MAX_EVENTS || historyBytes > MAX_HISTORY_BYTES) throw new ViewError('In-memory view history limit reached; export your documents');
     }
     // Commit every retained record, checkpoint, state, and change together.
-    this.identities = identities; this.positions = positions; this.checkpoints = checkpoints; this.states = states;
+    for (const [key, value] of stagedIdentities) this.identities.set(key, value);
+    for (const [key, value] of stagedPositions) this.positions.set(key, value);
+    for (const [key, value] of stagedCheckpoints) this.checkpoints.set(key, value);
+    for (const [key, value] of stagedStates) this.states.set(key, value);
     this.documents.push(...appended); this.history.push(...events); this.historyEntries.push(...eventEntries); this.sequence = sequence;
     if (appended.length) this.batches.push(appended);
     this.documentBytes = documentBytes; this.historyBytes = historyBytes;
@@ -181,8 +200,11 @@ class MemoryDatabase {
     }
     if (typeof cursor !== 'string') throw new ViewError('Page cursor must be an opaque string');
     const snapshot = this.readCursor(cursor), limit = this.limit(request);
-    const remaining = this.documents.filter(d => d.sequence <= snapshot && d.sequence > last);
-    const documents = remaining.slice(0, limit), complete = remaining.length <= limit;
+    const start = partitionPoint(this.documents, d => d.sequence <= last);
+    const end = snapshot === this.sequence ? this.documents.length : partitionPoint(this.documents, d => d.sequence <= snapshot);
+    const stop = Math.min(end, start + limit);
+    const documents = start < stop ? this.documents.slice(start, stop) : [];
+    const complete = end <= start + limit;
     return {documents, cursor, after: complete ? null : JSON.stringify([cursor, documents.at(-1).sequence]), complete};
   }
   query(request) {
@@ -192,7 +214,7 @@ class MemoryDatabase {
     const selector = querySelector(request);
     // Validate each key at its own depth budget, without charging the selector
     // envelope as another JSON level (the request validator does the same).
-    const selection = '{' + Object.keys(selector).sort().map(name => JSON.stringify(name) + ':' + canonical(selector[name])).join(',') + '}';
+    const selection = '{' + Object.keys(selector).sort().map(name => JSON.stringify(name) + ':' + canonicalValidated(selector[name])).join(',') + '}';
     let last;
     if (request.after !== undefined && request.after !== null) {
       let token;
@@ -208,7 +230,10 @@ class MemoryDatabase {
     let atSnapshot = this.states;
     if (snapshot !== this.sequence) {
       atSnapshot = new Map();
-      for (const [encoded, row] of this.historyEntries) if (row.sequence <= snapshot) atSnapshot.set(encoded, row);
+      for (const [encoded, row] of this.historyEntries) {
+        if (row.sequence > snapshot) break;
+        atSnapshot.set(encoded, row);
+      }
     }
     const remaining = [...atSnapshot.entries()].filter(([, row]) => (last === undefined || compareKeys(row.key, last) > 0)
       && queryMatches(row.key, selector)).sort(([, a], [, b]) => compareKeys(a.key, b.key));
@@ -218,7 +243,9 @@ class MemoryDatabase {
   }
   changes(request) {
     const since = this.readCursor(request.since ?? 0, true), limit = this.limit(request);
-    const remaining = this.history.filter(row => row.sequence > since), rows = remaining.slice(0, limit), complete = remaining.length <= limit;
+    const start = partitionPoint(this.history, row => row.sequence <= since);
+    const rows = this.history.slice(start, start + limit);
+    const complete = this.history.length - start <= limit;
     return {rows, cursor: this.cursor(complete ? this.sequence : rows.at(-1).sequence), complete};
   }
   stats() {
@@ -226,14 +253,14 @@ class MemoryDatabase {
   }
   replay() {
     const rebuilt = new MemoryDatabase(this.view);
-    for (const batch of this.batches) rebuilt.ingest(batch);
-    const values = database => [...database.states.entries()].sort(([a], [b]) => keyCompare(a, b)).map(([, row]) => ({key: row.key, state: row.state, result: row.result}));
-    return {equivalent: canonical(values(this)) === canonical(values(rebuilt)), documents: this.documents.length, groups: this.states.size, module_sha256: this.view.spec.sha256};
+    for (const batch of this.batches) rebuilt.ingest(batch, true);
+    const values = database => [...database.states.entries()].sort(([a], [b]) => scalarCompare(a, b)).map(([, row]) => ({key: row.key, state: row.state, result: row.result}));
+    return {equivalent: canonicalValidated(values(this)) === canonicalValidated(values(rebuilt)), documents: this.documents.length, groups: this.states.size, module_sha256: this.view.spec.sha256};
   }
   request(request) {
     databaseRequestJSON(request);
     switch (request.op) {
-      case 'ingest': return this.ingest(request.documents);
+      case 'ingest': return this.ingest(request.documents, true);
       case 'preview': {
         if (!Object.hasOwn(request, 'payload')) throw new ViewError('Preview requires a payload');
         return mapPayloads(this.view, [request.payload])[0];
