@@ -1,7 +1,7 @@
 {
   "abi": 1,
   "module": "documents.wasm",
-  "sha256": "48d702713f329504ae4b4fd2e5d6b644ffe49dd4e99f68aae4b2cb899b5e69f7",
+  "sha256": "30966d429f816ecfe8dbe5a1351b99fc889e6f5bc1f180b0fc6f9e3cc97e7ff7",
   "descriptor": {
     "abi": 1,
     "name": "documents",
